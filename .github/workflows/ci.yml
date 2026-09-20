@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Linux CPU build and tests
+    runs-on: ubuntu-24.04
+    # Match the dependencies documented in README.md, including Protobuf's CMake config.
+    container: archlinux:base-devel
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Git must be available before checkout to fetch the llama.cpp submodule.
+      - name: Install dependencies
+        run: pacman -Syu --noconfirm --needed git cmake ninja grpc protobuf
+
+      - name: Check out source and submodules
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DGGML_NATIVE=OFF
+          -DGGML_VULKAN=OFF
+          -DGGML_CUDA=OFF
+
+      # Explicit targets make a missing gRPC/Protobuf dependency fail the job,
+      # rather than silently succeeding with CMake's engine-only fallback.
+      - name: Build daemon, client, and tests
+        run: >-
+          cmake --build build --parallel 2
+          --target llamad llamad-chat engine_smoke chat_format_test
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure --no-tests=error

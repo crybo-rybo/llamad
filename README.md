@@ -27,6 +27,12 @@ The build includes llama.cpp's `common` library, which the chat layer needs for 
 templates and tool-call parsing; it is the bulk of a first build. The tests need no
 model file: they render and parse against a template checked into the submodule.
 
+GitHub Actions runs a CPU-only Release build and the tests on every push and pull
+request, and can also be started manually. The job uses an Arch Linux container
+with the dependencies above and builds the daemon, client, and engine smoke
+executable. It runs the parser tests without a GPU or model download; inference
+with a real model is not covered by CI.
+
 ## GPU
 
 llama.cpp's GPU backends are enabled with their usual CMake flags. Vulkan is the
