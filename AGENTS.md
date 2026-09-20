@@ -145,8 +145,9 @@ Match the effort to the risk, and report what you actually ran.
   alone (`--stop`, `--cancel-after`, `--grammar-file`, `--chat --demo-tool`); `llamad-chat --once`
   against a running daemon covers the full stack (`--demo-tools` for the tool loop). Use
   `--temp 0` for repeatable output and the 0.5B model unless the behaviour needs a stronger one.
-- CI builds CPU-only and runs the tests; it has no model and no GPU, so inference paths are only
-  ever verified locally. Say so when that is the case rather than implying coverage.
+- CI builds Linux CPU-only and macOS arm64 with Metal enabled and disabled, and runs the tests.
+  It does not exercise GPU execution or load a model, so inference paths are only verified
+  locally. Say so when that is the case rather than implying coverage.
 - Report results plainly, including what you did not or could not verify.
 
 ## Git

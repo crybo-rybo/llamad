@@ -44,7 +44,7 @@ add_subdirectory(tests)
 find_package(Protobuf CONFIG)
 find_package(gRPC CONFIG)
 if(NOT (Protobuf_FOUND AND gRPC_FOUND))
-    message(WARNING "gRPC/Protobuf not found: building the engine only (Arch: pacman -S grpc protobuf)")
+    message(WARNING "gRPC/Protobuf not found: building the engine only (see README.md for dependencies)")
     return()
 endif()
 

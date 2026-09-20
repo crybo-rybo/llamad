@@ -14,6 +14,7 @@
 #include <thread>
 #include <vector>
 
+#include <fcntl.h>
 #include <pthread.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -87,8 +88,13 @@ std::string default_socket_path() {
 // True if something is listening on `path` right now. A plain connect(2) is the
 // cheapest possible liveness probe and needs no gRPC machinery.
 bool socket_is_live(const std::string & path) {
-    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
+        return false;
+    }
+    // macOS has no SOCK_CLOEXEC; this probe runs before any worker threads exist.
+    if (::fcntl(fd, F_SETFD, FD_CLOEXEC) == -1) {
+        ::close(fd);
         return false;
     }
     sockaddr_un addr{};
@@ -101,7 +107,7 @@ bool socket_is_live(const std::string & path) {
 
 // Returns false (after printing why) if the path cannot be used.
 bool prepare_socket_path(const std::string & path) {
-    // sockaddr_un::sun_path is 108 bytes including the NUL, so 107 usable.
+    // Leave room for the NUL; sun_path's capacity depends on the platform.
     if (path.size() >= sizeof(sockaddr_un{}.sun_path)) {
         std::fprintf(stderr,
                      "error: socket path is %zu bytes, the maximum is %zu: %s\n",
