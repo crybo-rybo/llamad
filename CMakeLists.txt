@@ -9,8 +9,13 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# llama.cpp: only libllama + ggml, none of its tools/server/common.
-set(LLAMA_BUILD_COMMON   OFF CACHE BOOL "" FORCE)
+# llama.cpp: libllama + ggml, plus `common` (the Jinja chat templates, PEG chat parsers and
+# schema->grammar converter), which only the chat layer below uses. None of its tools/server.
+# OPENSSL/SUBPROCESS off: common's vendored cpp-httplib is for model downloads only, and turning
+# them off is what keeps llamad free of an OpenSSL dependency and of process spawning.
+set(LLAMA_BUILD_COMMON   ON  CACHE BOOL "" FORCE)
+set(LLAMA_OPENSSL        OFF CACHE BOOL "" FORCE)
+set(LLAMA_SUBPROCESS     OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TOOLS    OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -22,8 +27,18 @@ add_library(llamad_engine STATIC src/engine.cpp)
 target_include_directories(llamad_engine PUBLIC src)
 target_link_libraries(llamad_engine PUBLIC llama)
 
+# Chat layer: the only place llama.cpp's unstable `common` chat API is used. llama-common is
+# PRIVATE so none of its headers (or nlohmann/json) leak to consumers of chat_format.h; CMake
+# still propagates the archive itself through $<LINK_ONLY:> because llamad_chat is static.
+add_library(llamad_chat STATIC src/chat_format.cpp)
+target_include_directories(llamad_chat PUBLIC src)
+target_link_libraries(llamad_chat PRIVATE llama-common)
+
 add_executable(engine_smoke src/engine_smoke.cpp)
-target_link_libraries(engine_smoke PRIVATE llamad_engine)
+target_link_libraries(engine_smoke PRIVATE llamad_engine llamad_chat)
+
+enable_testing()
+add_subdirectory(tests)
 
 # Everything below needs gRPC; the engine can be built and tested without it.
 find_package(Protobuf CONFIG)
@@ -48,6 +63,6 @@ protobuf_generate(TARGET llamad_proto
     PROTOC_OUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/gen)
 
 add_executable(llamad src/main.cpp src/service.cpp)
-target_link_libraries(llamad PRIVATE llamad_engine llamad_proto gRPC::grpc++_reflection)
+target_link_libraries(llamad PRIVATE llamad_engine llamad_chat llamad_proto gRPC::grpc++_reflection)
 
 add_subdirectory(client)
