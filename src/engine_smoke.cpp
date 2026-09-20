@@ -16,13 +16,18 @@
 //   --ctx N             context size
 //   --threads N         thread count (0 = let llama.cpp decide)
 //   --ngl N             number of layers to offload to the GPU
+//   --devices A[,B...]  offload to these devices only (names from --list-devices)
+//   --tensor-split A[,B...]  share of the model per device, e.g. 3,1
+//   --list-devices      list the devices this build can see and exit
 
 #include "engine.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -32,8 +37,51 @@ void print_usage(const char * argv0) {
     std::fprintf(stderr,
                  "usage: %s <model.gguf> [--chat] [--temp T] [--seed N] [--top-k N] [--top-p P]\n"
                  "          [--min-p P] [--max-tokens N] [--stop STR]... [--cancel-after N]\n"
-                 "          [--repeat N] [--ctx N] [--threads N] [--ngl N] <prompt>\n",
-                 argv0);
+                 "          [--repeat N] [--ctx N] [--threads N] [--ngl N]\n"
+                 "          [--devices A[,B...]] [--tensor-split A[,B...]] <prompt>\n"
+                 "       %s --list-devices\n",
+                 argv0, argv0);
+}
+
+// Splits "a,b,c" on commas. Throws on an empty element.
+std::vector<std::string> split_list(const std::string & text, const char * what) {
+    std::vector<std::string> out;
+    for (size_t start = 0;;) {
+        const size_t comma = text.find(',', start);
+        const size_t len   = comma == std::string::npos ? std::string::npos : comma - start;
+        std::string  part  = text.substr(start, len);
+        if (part.empty()) {
+            throw std::runtime_error(std::string(what) + " has an empty element");
+        }
+        out.push_back(std::move(part));
+        if (comma == std::string::npos) {
+            return out;
+        }
+        start = comma + 1;
+    }
+}
+
+void print_device_table() {
+    const std::vector<llamad::DeviceInfo> devices = llamad::Engine::list_devices();
+    size_t w_name = std::strlen("NAME");
+    size_t w_type = std::strlen("TYPE");
+    for (const llamad::DeviceInfo & device : devices) {
+        w_name = std::max(w_name, device.name.size());
+        w_type = std::max(w_type, device.type.size());
+    }
+
+    std::printf("%-*s  %-*s  %9s  %9s  %s\n", (int) w_name, "NAME", (int) w_type, "TYPE", "FREE",
+                "TOTAL", "DESCRIPTION");
+    for (const llamad::DeviceInfo & device : devices) {
+        char free_buf[32];
+        char total_buf[32];
+        std::snprintf(free_buf, sizeof(free_buf), "%.1f GiB",
+                      (double) device.memory_free / (1024.0 * 1024.0 * 1024.0));
+        std::snprintf(total_buf, sizeof(total_buf), "%.1f GiB",
+                      (double) device.memory_total / (1024.0 * 1024.0 * 1024.0));
+        std::printf("%-*s  %-*s  %9s  %9s  %s\n", (int) w_name, device.name.c_str(), (int) w_type,
+                    device.type.c_str(), free_buf, total_buf, device.description.c_str());
+    }
 }
 
 const char * reason_name(llamad::FinishReason reason) {
@@ -54,6 +102,7 @@ int main(int argc, char ** argv) {
     std::vector<std::string> positional;
 
     bool    chat         = false;
+    bool    list_devices = false;
     long    cancel_after = -1;
     long    repeat       = 1;
 
@@ -94,6 +143,15 @@ int main(int argc, char ** argv) {
                 config.n_threads = std::stoi(next("--threads"));
             } else if (arg == "--ngl") {
                 config.n_gpu_layers = std::stoi(next("--ngl"));
+            } else if (arg == "--devices") {
+                config.devices = split_list(next("--devices"), "--devices");
+            } else if (arg == "--tensor-split") {
+                config.tensor_split.clear();
+                for (const std::string & part : split_list(next("--tensor-split"), "--tensor-split")) {
+                    config.tensor_split.push_back(std::stof(part));
+                }
+            } else if (arg == "--list-devices") {
+                list_devices = true;
             } else if (arg == "-h" || arg == "--help") {
                 print_usage(argv[0]);
                 return 0;
@@ -107,6 +165,12 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "error: %s\n", e.what());
         print_usage(argv[0]);
         return 2;
+    }
+
+    // Listing devices needs no model.
+    if (list_devices) {
+        print_device_table();
+        return 0;
     }
 
     if (positional.size() != 2) {

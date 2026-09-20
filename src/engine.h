@@ -18,6 +18,24 @@ struct EngineConfig {
     uint32_t    n_ctx        = 4096;
     int32_t     n_gpu_layers = 99;
     int32_t     n_threads    = 0;   // 0 = half the hardware threads (llama.cpp's own default is a fixed 4)
+
+    // Names of the devices to offload to, as reported by Engine::list_devices() (e.g. "Vulkan0").
+    // Empty = llama.cpp's default: every discrete GPU, or the integrated GPU if there is none.
+    // The model's layers and KV cache are split across the chosen devices.
+    std::vector<std::string> devices;
+
+    // Share of the model given to each offload device, in device order (e.g. {3, 1}).
+    // Empty = in proportion to each device's free memory. Must not be longer than the device list.
+    std::vector<float> tensor_split;
+};
+
+// A compute device known to the llama.cpp backends compiled into this binary.
+struct DeviceInfo {
+    std::string name;          // stable identifier, usable in EngineConfig::devices
+    std::string description;   // e.g. "NVIDIA GeForce GTX 1080"
+    std::string type;          // "cpu" | "gpu" | "igpu" | "accel" | "meta"
+    uint64_t    memory_free  = 0;
+    uint64_t    memory_total = 0;
 };
 
 struct ModelInfo {
@@ -78,6 +96,9 @@ public:
 
     Engine(const Engine &)             = delete;
     Engine & operator=(const Engine &) = delete;
+
+    // Every device the compiled-in backends can see. Usable before any Engine exists.
+    static std::vector<DeviceInfo> list_devices();
 
     ModelInfo info() const;
 

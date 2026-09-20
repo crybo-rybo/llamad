@@ -52,6 +52,109 @@ void init_llama_once() {
 }
 
 // ---------------------------------------------------------------------------
+// Devices
+// ---------------------------------------------------------------------------
+
+// `ggml_backend_dev_type` names both the enum and a function, and the function
+// hides the type, so the type always needs its elaborated `enum` form here.
+const char * device_type_name(enum ggml_backend_dev_type type) {
+    switch (type) {
+        case GGML_BACKEND_DEVICE_TYPE_CPU:   return "cpu";
+        case GGML_BACKEND_DEVICE_TYPE_GPU:   return "gpu";
+        case GGML_BACKEND_DEVICE_TYPE_IGPU:  return "igpu";
+        case GGML_BACKEND_DEVICE_TYPE_ACCEL: return "accel";
+        case GGML_BACKEND_DEVICE_TYPE_META:  return "meta";
+    }
+    return "unknown";
+}
+
+std::string device_name(ggml_backend_dev_t dev) {
+    const char * name = ggml_backend_dev_name(dev);
+    return name != nullptr ? std::string(name) : std::string();
+}
+
+std::string device_description(ggml_backend_dev_t dev) {
+    const char * desc = ggml_backend_dev_description(dev);
+    return desc != nullptr ? std::string(desc) : std::string();
+}
+
+// Every device the compiled-in backends registered, in backend order.
+std::vector<ggml_backend_dev_t> all_devices() {
+    std::vector<ggml_backend_dev_t> out;
+    const size_t n = ggml_backend_dev_count();
+    out.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        if (dev != nullptr) {
+            out.push_back(dev);
+        }
+    }
+    return out;
+}
+
+std::string join_device_names(const std::vector<ggml_backend_dev_t> & devices) {
+    std::string out;
+    for (ggml_backend_dev_t dev : devices) {
+        if (!out.empty()) {
+            out += ", ";
+        }
+        out += device_name(dev);
+    }
+    return out;
+}
+
+// The devices llama.cpp offloads to when no explicit list is given: every
+// discrete GPU, or the integrated GPUs if there is no discrete one.
+std::vector<ggml_backend_dev_t> default_offload_devices(const std::vector<ggml_backend_dev_t> & devices) {
+    std::vector<ggml_backend_dev_t> gpus;
+    std::vector<ggml_backend_dev_t> igpus;
+    for (ggml_backend_dev_t dev : devices) {
+        switch (ggml_backend_dev_type(dev)) {
+            case GGML_BACKEND_DEVICE_TYPE_GPU:  gpus.push_back(dev); break;
+            case GGML_BACKEND_DEVICE_TYPE_IGPU: igpus.push_back(dev); break;
+            default:                            break;
+        }
+    }
+    return gpus.empty() ? igpus : gpus;
+}
+
+bool is_gpu_device(ggml_backend_dev_t dev) {
+    const enum ggml_backend_dev_type type = ggml_backend_dev_type(dev);
+    return type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU;
+}
+
+double as_gib(uint64_t bytes) {
+    return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0);
+}
+
+// One line per device the model was offloaded to, read back after the model and
+// the KV cache are resident so the free figure reflects what the load actually
+// cost. llama.cpp's own INFO output is suppressed by log_callback, so this is
+// the only place the device setup becomes visible.
+void report_offload_devices(const EngineConfig & config, const std::vector<ggml_backend_dev_t> & offload) {
+    const bool has_gpu = std::any_of(offload.begin(), offload.end(), is_gpu_device);
+
+    if (!has_gpu) {
+        std::fprintf(stderr, "[llamad] no GPU device available: inference is CPU-only\n");
+        return;
+    }
+    if (config.n_gpu_layers == 0) {
+        std::fprintf(stderr, "[llamad] no layers offloaded (n_gpu_layers = 0): inference is CPU-only\n");
+        return;
+    }
+
+    for (ggml_backend_dev_t dev : offload) {
+        size_t free_bytes  = 0;
+        size_t total_bytes = 0;
+        ggml_backend_dev_memory(dev, &free_bytes, &total_bytes);
+        std::fprintf(stderr, "[llamad] device %s: %s (%.1f GiB free of %.1f GiB)\n",
+                     device_name(dev).c_str(), device_description(dev).c_str(),
+                     as_gib(free_bytes), as_gib(total_bytes));
+    }
+    std::fflush(stderr);
+}
+
+// ---------------------------------------------------------------------------
 // UTF-8 / stop-string aware streaming
 // ---------------------------------------------------------------------------
 
@@ -309,6 +412,27 @@ struct Engine::Impl {
 // Engine
 // ---------------------------------------------------------------------------
 
+std::vector<DeviceInfo> Engine::list_devices() {
+    init_llama_once();
+
+    std::vector<DeviceInfo> out;
+    for (ggml_backend_dev_t dev : all_devices()) {
+        DeviceInfo info;
+        info.name        = device_name(dev);
+        info.description = device_description(dev);
+        info.type        = device_type_name(ggml_backend_dev_type(dev));
+
+        size_t free_bytes  = 0;
+        size_t total_bytes = 0;
+        ggml_backend_dev_memory(dev, &free_bytes, &total_bytes);
+        info.memory_free  = free_bytes;
+        info.memory_total = total_bytes;
+
+        out.push_back(std::move(info));
+    }
+    return out;
+}
+
 Engine::Engine(const EngineConfig & config) : impl_(new Impl()) {
     init_llama_once();
 
@@ -316,13 +440,83 @@ Engine::Engine(const EngineConfig & config) : impl_(new Impl()) {
         throw EngineError("no model path was given");
     }
 
+    const std::vector<ggml_backend_dev_t> devices = all_devices();
+
+    // The devices the model's layers will actually land on, and (only when the
+    // caller named them) the NULL-terminated array llama.cpp wants. Both must
+    // stay alive until llama_model_load_from_file has returned.
+    std::vector<ggml_backend_dev_t> offload;
+    std::vector<ggml_backend_dev_t> device_arg;
+
+    if (!config.devices.empty()) {
+        for (const std::string & wanted : config.devices) {
+            const auto it = std::find_if(devices.begin(), devices.end(), [&](ggml_backend_dev_t dev) {
+                return device_name(dev) == wanted;
+            });
+            if (it == devices.end()) {
+                throw EngineError("unknown device '" + wanted + "'; available devices are: " +
+                                  join_device_names(devices));
+            }
+            if (std::find(offload.begin(), offload.end(), *it) != offload.end()) {
+                throw EngineError("device '" + wanted + "' is listed more than once");
+            }
+            offload.push_back(*it);
+        }
+        device_arg = offload;
+        device_arg.push_back(nullptr);
+    } else {
+        offload = default_offload_devices(devices);
+    }
+
+    // tensor_split is passed as a fixed-size array, so it is validated against
+    // the devices it will be applied to before it is padded out.
+    std::vector<float> tensor_split;
+    if (!config.tensor_split.empty()) {
+        float sum = 0.0f;
+        for (size_t i = 0; i < config.tensor_split.size(); ++i) {
+            // Written so that a NaN fails the test too.
+            if (!(config.tensor_split[i] >= 0.0f)) {
+                throw EngineError("tensor split entry " + std::to_string(i + 1) +
+                                  " is negative or not a number");
+            }
+            sum += config.tensor_split[i];
+        }
+        if (sum <= 0.0f) {
+            throw EngineError("tensor split is all zeros: it would leave every device without work");
+        }
+        if (offload.empty()) {
+            throw EngineError("a tensor split was given but there is no GPU to offload to");
+        }
+        if (config.tensor_split.size() > offload.size()) {
+            throw EngineError("tensor split has " + std::to_string(config.tensor_split.size()) +
+                              " entries but only " + std::to_string(offload.size()) +
+                              (config.devices.empty() ? " device(s) will be used for offloading"
+                                                      : " device(s) were requested"));
+        }
+        if (config.tensor_split.size() > llama_max_devices()) {
+            throw EngineError("tensor split has " + std::to_string(config.tensor_split.size()) +
+                              " entries but llama.cpp supports at most " +
+                              std::to_string(llama_max_devices()) + " devices");
+        }
+
+        tensor_split.assign(llama_max_devices(), 0.0f);
+        std::copy(config.tensor_split.begin(), config.tensor_split.end(), tensor_split.begin());
+    }
+
     llama_model_params mparams = llama_model_default_params();
     mparams.n_gpu_layers       = config.n_gpu_layers;
+    if (!device_arg.empty()) {
+        mparams.devices = device_arg.data();
+    }
+    if (!tensor_split.empty()) {
+        mparams.tensor_split = tensor_split.data();
+    }
 
     impl_->model = llama_model_load_from_file(config.model_path.c_str(), mparams);
     if (impl_->model == nullptr) {
         throw EngineError("failed to load the model from '" + config.model_path +
-                          "' (missing file, or not a supported GGUF)");
+                          "' (missing file, not a supported GGUF, or not enough memory on the "
+                          "offload devices; see the errors above)");
     }
 
     impl_->vocab = llama_model_get_vocab(impl_->model);
@@ -354,6 +548,23 @@ Engine::Engine(const EngineConfig & config) : impl_(new Impl()) {
     if (impl_->n_ctx_seq == 0 || impl_->n_batch == 0) {
         throw EngineError("llama context reports a zero context or batch size");
     }
+
+    // GPU backends build their compute pipelines on first use, which costs the first
+    // request a second or more. Pay that here instead: a small batch and a single
+    // token exercise the prompt and the generation paths. Failure is not an error.
+    llama_token warm = llama_vocab_bos(impl_->vocab);
+    if (warm == LLAMA_TOKEN_NULL) {
+        warm = llama_vocab_eos(impl_->vocab);
+    }
+    if (warm != LLAMA_TOKEN_NULL) {
+        std::vector<llama_token> batch(std::min<uint32_t>(32, impl_->n_batch), warm);
+        llama_decode(impl_->ctx, llama_batch_get_one(batch.data(), static_cast<int32_t>(batch.size())));
+        llama_decode(impl_->ctx, llama_batch_get_one(batch.data(), 1));
+        llama_synchronize(impl_->ctx);
+        llama_memory_clear(llama_get_memory(impl_->ctx), /*data*/ true);
+    }
+
+    report_offload_devices(config, offload);
 }
 
 Engine::~Engine() = default;
@@ -455,6 +666,9 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
 
         off += n_chunk;
     }
+    // GPU backends return from llama_decode before the work is done; without this the
+    // prompt would look free and its cost would be billed to the first generated token.
+    llama_synchronize(impl_->ctx);
     result.stats.prompt_ms = ms_since(t_prompt);
 
     // --- generation -----------------------------------------------------

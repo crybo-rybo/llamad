@@ -22,6 +22,28 @@ cmake --build build -j
 
 (If you already cloned without submodules: `git submodule update --init --recursive`.)
 
+## GPU
+
+llama.cpp's GPU backends are enabled with their usual CMake flags. Vulkan is the
+one tested here: it runs on Pascal cards (GTX 10xx), which CUDA 13 no longer targets.
+
+```sh
+pacman -S vulkan-headers spirv-headers vulkan-icd-loader shaderc
+cmake -S . -B build -G Ninja -DGGML_VULKAN=ON
+cmake --build build -j
+```
+
+Every discrete GPU is used by default: llama.cpp splits the model's layers
+across them in proportion to each card's free memory, and ignores an integrated
+GPU whenever a discrete one exists. Two 8 GB cards therefore hold a model that
+fits on neither alone. The daemon prints one line per offload device at startup.
+
+```sh
+./build/llamad --list-devices                        # names, types, free/total memory
+./build/llamad --model M --devices Vulkan0           # this card only
+./build/llamad --model M --tensor-split 3,1          # 3:1 share, in device order
+```
+
 ## Run the daemon
 
 ```sh

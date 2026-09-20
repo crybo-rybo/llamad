@@ -2,3 +2,4 @@ build*/
 models/
 compile_commands.json
 .cache/
+.deps/

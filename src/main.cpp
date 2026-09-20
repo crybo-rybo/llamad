@@ -2,6 +2,7 @@
 // socket. There is no TCP listener, by design: access control is the socket's
 // file permissions.
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -11,6 +12,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <pthread.h>
 #include <sys/socket.h>
@@ -37,8 +39,40 @@ void print_usage(const char * argv0) {
                  "  --ctx N          context size (default 4096)\n"
                  "  --ngl N          layers to offload to the GPU (default 99)\n"
                  "  --threads N      threads for inference, 0 = auto, half the hardware threads (default 0)\n"
+                 "  --devices NAMES  comma-separated devices to offload to (default: every discrete GPU)\n"
+                 "  --tensor-split S comma-separated share per device, e.g. 3,1 (default: by free memory)\n"
+                 "  --list-devices   list the devices this build can offload to, and exit\n"
                  "  --help           show this message\n",
                  argv0);
+}
+
+std::string format_gib(uint64_t bytes) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.1f GiB", static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0));
+    return buf;
+}
+
+void print_device_table() {
+    const std::vector<llamad::DeviceInfo> devices = llamad::Engine::list_devices();
+    if (devices.empty()) {
+        std::printf("no devices (this build has no ggml backend registered)\n");
+        return;
+    }
+
+    size_t w_name = std::strlen("NAME");
+    size_t w_type = std::strlen("TYPE");
+    for (const llamad::DeviceInfo & device : devices) {
+        w_name = std::max(w_name, device.name.size());
+        w_type = std::max(w_type, device.type.size());
+    }
+
+    std::printf("%-*s  %-*s  %9s  %9s  %s\n", static_cast<int>(w_name), "NAME", static_cast<int>(w_type),
+                "TYPE", "FREE", "TOTAL", "DESCRIPTION");
+    for (const llamad::DeviceInfo & device : devices) {
+        std::printf("%-*s  %-*s  %9s  %9s  %s\n", static_cast<int>(w_name), device.name.c_str(),
+                    static_cast<int>(w_type), device.type.c_str(), format_gib(device.memory_free).c_str(),
+                    format_gib(device.memory_total).c_str(), device.description.c_str());
+    }
 }
 
 std::string default_socket_path() {
@@ -111,6 +145,45 @@ bool parse_int(const char * text, long * out) {
     return true;
 }
 
+// Splits "a,b,c" on commas. Fails on an empty element, so "a,,b" and "" are errors.
+bool split_list(const std::string & text, std::vector<std::string> * out) {
+    out->clear();
+    for (size_t start = 0;;) {
+        const size_t comma = text.find(',', start);
+        const size_t len   = comma == std::string::npos ? std::string::npos : comma - start;
+        std::string  part  = text.substr(start, len);
+        if (part.empty()) {
+            return false;
+        }
+        out->push_back(std::move(part));
+        if (comma == std::string::npos) {
+            return true;
+        }
+        start = comma + 1;
+    }
+}
+
+// Parses "3,1" into non-negative floats. The engine owns the remaining checks
+// (all-zero, more entries than devices), which need the device list.
+bool parse_tensor_split(const std::string & text, std::vector<float> * out) {
+    std::vector<std::string> parts;
+    if (!split_list(text, &parts)) {
+        return false;
+    }
+
+    out->clear();
+    for (const std::string & part : parts) {
+        char * end = nullptr;
+        errno      = 0;
+        const float value = std::strtof(part.c_str(), &end);
+        if (errno != 0 || end == part.c_str() || *end != '\0' || !(value >= 0.0f)) {
+            return false;
+        }
+        out->push_back(value);
+    }
+    return true;
+}
+
 }  // namespace
 
 int main(int argc, char ** argv) {
@@ -119,6 +192,10 @@ int main(int argc, char ** argv) {
     long        n_ctx       = 4096;
     long        n_gpu_layers = 99;
     long        n_threads   = 0;
+    bool        list_devices = false;
+
+    std::vector<std::string> devices;
+    std::vector<float>       tensor_split;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -152,11 +229,32 @@ int main(int argc, char ** argv) {
                 std::fprintf(stderr, "error: --threads needs a non-negative integer\n");
                 return 2;
             }
+        } else if (arg == "--devices") {
+            if (!split_list(next("--devices"), &devices)) {
+                std::fprintf(stderr, "error: --devices needs a comma-separated list of device names"
+                                     " (see --list-devices)\n");
+                return 2;
+            }
+        } else if (arg == "--tensor-split") {
+            if (!parse_tensor_split(next("--tensor-split"), &tensor_split)) {
+                std::fprintf(stderr,
+                             "error: --tensor-split needs a comma-separated list of non-negative"
+                             " numbers, e.g. 3,1\n");
+                return 2;
+            }
+        } else if (arg == "--list-devices") {
+            list_devices = true;
         } else {
             std::fprintf(stderr, "error: unknown argument '%s'\n", arg.c_str());
             print_usage(argv[0]);
             return 2;
         }
+    }
+
+    // Listing devices needs no model, and is the way to find the names --devices takes.
+    if (list_devices) {
+        print_device_table();
+        return 0;
     }
 
     if (model_path.empty()) {
@@ -193,6 +291,8 @@ int main(int argc, char ** argv) {
         config.n_ctx        = static_cast<uint32_t>(n_ctx);
         config.n_gpu_layers = static_cast<int32_t>(n_gpu_layers);
         config.n_threads    = static_cast<int32_t>(n_threads);
+        config.devices      = devices;
+        config.tensor_split = tensor_split;
         std::fprintf(stderr, "[llamad] loading %s ...\n", model_path.c_str());
         engine = std::make_unique<llamad::Engine>(config);
     } catch (const std::exception & e) {
