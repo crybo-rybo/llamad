@@ -18,3 +18,14 @@ if(TARGET llamad_proto)
 
     add_test(NAME contract COMMAND contract_test)
 endif()
+
+# The JSON reader/writer and the tool set: client.h and json.h only, no daemon.
+if(TARGET llamad_client)
+    add_executable(json_test json_test.cpp)
+    target_link_libraries(json_test PRIVATE llamad_client)
+    add_test(NAME json COMMAND json_test)
+
+    add_executable(client_tools_test client_tools_test.cpp)
+    target_link_libraries(client_tools_test PRIVATE llamad_client)
+    add_test(NAME client_tools COMMAND client_tools_test)
+endif()

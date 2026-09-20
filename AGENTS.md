@@ -25,7 +25,7 @@ single source of truth for how things work.
 | `src/chat_format.{h,cpp}` | Chat layer: renders messages and tools through the model's Jinja template, builds the tool-call grammar, parses tool calls out of generated text. |
 | `src/service.{h,cpp}`, `src/main.cpp` | gRPC service and the daemon: socket lifecycle, signals, proto ↔ engine type conversion. |
 | `src/engine_smoke.cpp` | CLI that drives the engine and chat layer in-process, with no daemon and no gRPC. |
-| `client/` | Client library (`include/llamad/client.h`, `src/client.cpp`) and `llamad-chat` (`examples/chat_cli.cpp`). |
+| `client/` | Client library (`include/llamad/client.h`, `src/client.cpp`) and `llamad-chat` (`examples/chat_cli.cpp`). `include/llamad/json.h` + `src/json.cpp` read and write a tool's arguments, its result and its JSON Schema from a type's members; `client.h` includes it, so an application still includes one header. |
 | `tests/` | Plain-executable tests registered with CTest. No model file needed. |
 | `third_party/llama.cpp` | Pinned, unmodified submodule. |
 | `models/` | Local GGUF files. Gitignored; not available in CI. |
@@ -98,8 +98,9 @@ holdback filter, RAII wrappers for llama.cpp handles, proto conversion helpers a
 Extend what exists before introducing a parallel mechanism.
 
 **No new dependencies without asking.** The dependency list is llama.cpp, gRPC and Protobuf.
-Tests are plain executables with a `CHECK` macro; the demo tool parses its one JSON argument by
-hand rather than pull a JSON library into the client. That restraint is intentional.
+Tests are plain executables with a `CHECK` macro; the client reads and writes the JSON a tool
+call needs with its own small reader in `json.{h,cpp}` rather than pull a JSON library in. That
+restraint is intentional.
 
 **Write for the next reader.** Code is read far more than it is written, mostly by someone
 without your current context. Favour names that say what a thing is, straight-line control flow,
@@ -144,6 +145,8 @@ Match the effort to the risk, and report what you actually ran.
 - Chat layer or parsing changes: add or extend a case in `tests/chat_format_test.cpp`. These tests
   run canned model output through a real template with no GGUF, so they are cheap — prefer them
   to manual checks wherever the logic can be reached that way.
+- Client changes reachable without a daemon — the JSON reader, a tool's schema or dispatch —
+  belong in `tests/json_test.cpp` or `tests/client_tools_test.cpp`, which need neither.
 - Engine, service or client changes: exercise the real path. `engine_smoke` covers the engine
   alone (`--stop`, `--cancel-after`, `--grammar-file`, `--chat --demo-tool`); `llamad-chat --once`
   against a running daemon covers the full stack (`--demo-tools` for the tool loop). Use

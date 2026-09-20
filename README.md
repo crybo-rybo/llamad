@@ -23,14 +23,15 @@ git clone --recurse-submodules git@github.com:crybo-rybo/llamad.git
 cd llamad
 cmake -S . -B build -G Ninja
 cmake --build build -j
-ctest --test-dir build --output-on-failure    # chat template / tool-call parser and wire contract tests
+ctest --test-dir build --output-on-failure    # chat template, wire contract, JSON and tool set tests
 ```
 
 (If you already cloned without submodules: `git submodule update --init --recursive`.)
 
 The build includes llama.cpp's `common` library, which the chat layer needs for Jinja
 templates and tool-call parsing; it is the bulk of a first build. The tests need no
-model file: they render and parse against a template checked into the submodule.
+model file and no daemon: the chat-template ones render and parse against a template
+checked into the submodule, the rest need nothing but the build.
 
 GitHub Actions builds on Arch Linux (CPU-only) on every push and pull request, and can
 also be started manually. The job builds the daemon, client, and engine smoke executable, and
@@ -119,7 +120,8 @@ int main() {
 ```
 
 `llamad/client.h` exposes no gRPC or protobuf types, so your build needs neither
-on its include path.
+on its include path. It does reflect over your own tool functions, so linking
+`llamad_client` puts C++26 and `-freflection` on whatever includes it.
 
 ## Tool calling
 
@@ -151,41 +153,48 @@ tool      { tool_call_id, content }     one per call, the result, as a string
 assistant "It is 06:28 in Tokyo."       finish_reason = EOG
 ```
 
-`llamad-chat --demo-tools` is that loop, worked through end to end
-(`client/examples/chat_cli.cpp`): it offers one `get_current_time` tool, runs it
-whenever the model asks, and feeds the result back.
-
-```sh
-./build/client/llamad-chat --demo-tools --once "What time is it in Tokyo right now?" --temp 0
-# [stats] finish=tool_calls prompt_tokens=194 completion_tokens=23 ...
-# [tool] get_current_time({"timezone": "Asia/Tokyo"}) -> {"timezone":"Asia/Tokyo","time":"..."}
-# The current time in Tokyo (Japan Standard Time) is ...
-```
-
-From your own code it is the same loop:
+In an application a tool is a C++ function. `ToolSet::add` reads its name off the
+identifier, its descriptions off `desc` annotations and the argument schema off the
+parameter list; the `chat` overload that takes a `ToolSet` runs the loop above, parses
+each call's arguments, invokes the function and sends the result back.
 
 ```cpp
-std::vector<llamad::client::Tool> tools = {
-    {"get_current_time", "Get the current time in a given IANA timezone.",
-     R"({"type":"object","properties":{"timezone":{"type":"string"}},"required":["timezone"]})"}};
+using llamad::client::desc;
+
+[[=desc{"Get the current date and time in a given IANA timezone."}]]
+std::string get_current_time([[=desc{"IANA timezone, e.g. Europe/Paris"}]] std::string timezone);
+
+llamad::client::ToolSet tools;
+tools.add<^^get_current_time>();
 
 std::vector<llamad::client::ChatMessage> history = {{"user", "What time is it in Tokyo?"}};
 
-for (;;) {
-    std::string reply;
-    auto result = client.chat(history, tools, params, [&](const std::string & text) {
-        reply += text;                      // user-visible content only
-        return true;
-    });
-    if (result.reason != llamad::client::FinishReason::ToolCalls) {
-        break;                              // ordinary answer; reply holds it
-    }
-    history.push_back({"assistant", reply, result.tool_calls, ""});
-    for (const llamad::client::ToolCall & call : result.tool_calls) {
-        history.push_back({"tool", run_my_tool(call.name, call.arguments_json), {}, call.id});
-    }                                       // call.id goes in tool_call_id
-}
+auto result = client.chat(history, tools, params, [](const std::string & text) {
+    std::fputs(text.c_str(), stdout);       // user-visible content only
+    return true;
+});                                         // history holds every turn the answer took
 ```
+
+A tool returning `std::string` is handed to the model as it is; any other return type
+is written as JSON, as are the arguments read out of a call. A tool that does not
+exist, arguments that do not parse and an exception thrown by the tool all become an
+`{"error":"..."}` result the model can recover from. The loop stops after eight rounds
+of tool calls, which the caller sees as a `ToolCalls` result.
+
+`llamad-chat --demo-tools` is that worked through end to end
+(`client/examples/chat_cli.cpp`): it offers one `get_current_time` tool and answers
+with it.
+
+```sh
+./build/client/llamad-chat --demo-tools --once "What time is it in Tokyo right now?" --temp 0
+# [tool] get_current_time(Asia/Tokyo) -> 2026-09-21 08:44:44 JST
+# The current time in Tokyo is 2026-09-21 08:44:44 JST.
+# [stats] finish=eog prompt_tokens=461 completion_tokens=52 ...
+```
+
+The `chat` overload taking a `std::vector<Tool>` is the same thing with the loop left
+to the caller: it takes the name, description and JSON Schema as strings, and returns
+each round of `tool_calls` for the caller to answer.
 
 Not supported: `tool_choice` (the model always decides), streamed argument deltas
 (calls are atomic), and reasoning separation (a model's `<think>` block, if any, is

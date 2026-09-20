@@ -20,6 +20,11 @@ namespace {
     throw RpcError(static_cast<int>(status.error_code()), status.error_message());
 }
 
+// What a tool that could not run reports back to the model.
+std::string tool_error(const std::string & message) {
+    return "{\"error\":" + json::write(message) + "}";
+}
+
 // The daemon must be there already: a missing socket is an error to report, not
 // something to wait on, so wait_for_ready stays off (the gRPC default, set
 // explicitly here because it is the whole point of the fail-fast behaviour).
@@ -28,6 +33,20 @@ void init_context(grpc::ClientContext & context) {
 }
 
 }  // namespace
+
+std::string ToolSet::call(const ToolCall & call) const {
+    for (size_t i = 0; i < definitions_.size(); ++i) {
+        if (definitions_[i].name != call.name) {
+            continue;
+        }
+        try {
+            return invoke_[i](call.arguments_json);
+        } catch (const std::exception & e) {
+            return tool_error(e.what());
+        }
+    }
+    return tool_error("no such tool: " + call.name);
+}
 
 struct Client::Impl {
     std::shared_ptr<grpc::Channel>    channel;
@@ -167,6 +186,48 @@ GenerateResult Client::chat(const std::vector<ChatMessage> & messages,
 
     auto reader = impl_->stub->Chat(&context, request);
     return impl_->consume(context, reader, on_chunk);
+}
+
+GenerateResult Client::chat(std::vector<ChatMessage> & history,
+                            const ToolSet & tools,
+                            const SamplingParams & params,
+                            const ChunkCallback & on_chunk,
+                            int max_rounds) {
+    GenerateResult result{FinishReason::Eog, {}, {}};
+    GenerateStats  total{};
+
+    for (int round = 0; round < max_rounds; ++round) {
+        std::string reply;
+        result = chat(history, tools.definitions(), params, [&](const std::string & text) {
+            reply += text;
+            return on_chunk ? on_chunk(text) : true;
+        });
+
+        total.prompt_tokens     += result.stats.prompt_tokens;
+        total.completion_tokens += result.stats.completion_tokens;
+        total.prompt_ms         += result.stats.prompt_ms;
+        total.completion_ms     += result.stats.completion_ms;
+        result.stats             = total;
+
+        // tool_calls is non-empty iff the reason is ToolCalls, so this is the only branch that
+        // has a tool to run; a cancelled or truncated round falls through and returns.
+        if (result.reason == FinishReason::ToolCalls && !result.tool_calls.empty()) {
+            history.push_back({"assistant", reply, result.tool_calls, ""});
+            for (const ToolCall & call : result.tool_calls) {
+                history.push_back({"tool", tools.call(call), {}, call.id});
+            }
+            continue;
+        }
+
+        if (!reply.empty()) {
+            history.push_back({"assistant", reply});
+        }
+        return result;
+    }
+
+    // Every round spent and the model is still asking. The last round's tools ran and their
+    // results are in `history`; the reason stays ToolCalls because no reply to them was generated.
+    return result;
 }
 
 }  // namespace client
