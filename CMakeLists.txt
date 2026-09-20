@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(llamad LANGUAGES C CXX)
 
+# llama.cpp builds at the standard it is written for. The project's own targets are declared
+# after it and use C++26 (see below).
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -22,6 +24,23 @@ set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/llama.cpp EXCLUDE_FROM_ALL)
 
+# llamad is written in C++26 and relies on static reflection (<meta>), which GCC enables with
+# -freflection. Checked here so an unsupported compiler fails at configure time with a reason.
+set(CMAKE_CXX_STANDARD 26)
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_FLAGS "-std=c++26 -freflection")
+check_cxx_source_compiles("
+    #include <meta>
+    struct S { int a; };
+    static_assert(std::meta::nonstatic_data_members_of(^^S, std::meta::access_context::current()).size() == 1);
+    int main() {}" LLAMAD_HAVE_REFLECTION)
+unset(CMAKE_REQUIRED_FLAGS)
+if(NOT LLAMAD_HAVE_REFLECTION)
+    message(FATAL_ERROR "llamad needs a compiler with C++26 static reflection (GCC 16 or later): "
+                        "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} does not provide it.")
+endif()
+add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-freflection>)
+
 # Engine: libllama wrapper, no gRPC/protobuf.
 add_library(llamad_engine STATIC src/engine.cpp)
 target_include_directories(llamad_engine PUBLIC src)
@@ -30,7 +49,10 @@ target_link_libraries(llamad_engine PUBLIC llama)
 # Chat layer: the only place llama.cpp's unstable `common` chat API is used. llama-common is
 # PRIVATE so none of its headers (or nlohmann/json) leak to consumers of chat_format.h; CMake
 # still propagates the archive itself through $<LINK_ONLY:> because llamad_chat is static.
+# common's headers (nlohmann/json among them) are written for C++17 and are included as system
+# headers, so what C++26 deprecates in them is not reported against this project.
 add_library(llamad_chat STATIC src/chat_format.cpp)
+set_target_properties(llama-common nlohmann PROPERTIES SYSTEM ON)
 target_include_directories(llamad_chat PUBLIC src)
 target_link_libraries(llamad_chat PRIVATE llama-common)
 

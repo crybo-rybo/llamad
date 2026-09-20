@@ -5,7 +5,7 @@ documentation; this file is about how to change the code well.
 
 ## What this project is
 
-llamad is a small C++17 daemon that loads one llama.cpp model once and serves it to local
+llamad is a small C++26 daemon that loads one llama.cpp model once and serves it to local
 applications over gRPC on a Unix domain socket. Applications link a tiny client library and get
 streaming completion, chat and tool calling without embedding llama.cpp.
 
@@ -111,7 +111,8 @@ cheap and obvious; do not trade readability for speed without a number that says
 
 Match the file you are in; consistency beats preference.
 
-- C++17. 4-space indent. `const T & name` and `T * name` with spaces around `&` and `*`.
+- C++26 with static reflection (`<meta>`; GCC 16 or later, `-freflection`).
+- 4-space indent. `const T & name` and `T * name` with spaces around `&` and `*`.
 - Aligned declarations and assignments where the surrounding code aligns them.
 - `/*name*/` comments on literal arguments whose meaning is not obvious: `tokenize(text, /*add_special*/ false, ...)`.
 - Anonymous namespaces for file-local helpers. Pimpl where a header must hide a dependency.
@@ -145,9 +146,9 @@ Match the effort to the risk, and report what you actually ran.
   alone (`--stop`, `--cancel-after`, `--grammar-file`, `--chat --demo-tool`); `llamad-chat --once`
   against a running daemon covers the full stack (`--demo-tools` for the tool loop). Use
   `--temp 0` for repeatable output and the 0.5B model unless the behaviour needs a stronger one.
-- CI builds Linux CPU-only and macOS arm64 with Metal enabled and disabled, and runs the tests.
-  It does not exercise GPU execution or load a model, so inference paths are only verified
-  locally. Say so when that is the case rather than implying coverage.
+- CI builds Linux CPU-only with GCC and runs the tests. It does not exercise GPU execution or
+  load a model, so inference paths are only verified locally. Say so when that is the case
+  rather than implying coverage.
 - Report results plainly, including what you did not or could not verify.
 
 ## Git

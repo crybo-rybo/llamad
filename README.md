@@ -7,22 +7,14 @@ without paying the model load time in every process.
 
 ## Dependencies
 
+llamad is written in C++26 and uses static reflection, so it needs GCC 16 or later. Clang and
+Apple Clang do not implement reflection, which makes Linux with GCC the supported platform.
+
 Arch Linux:
 
 ```sh
-pacman -S grpc protobuf cmake ninja
+pacman -S gcc grpc protobuf cmake ninja
 ```
-
-macOS on Apple Silicon, with Apple's Command Line Tools and
-[Homebrew](https://brew.sh/):
-
-```sh
-xcode-select --install                      # if the Command Line Tools are absent
-brew install grpc protobuf cmake ninja
-```
-
-Use a native arm64 terminal and Homebrew installation on Apple Silicon, so the
-compiler and libraries target the same architecture.
 
 ## Build
 
@@ -36,35 +28,16 @@ ctest --test-dir build --output-on-failure    # chat template / tool-call parser
 
 (If you already cloned without submodules: `git submodule update --init --recursive`.)
 
-On Apple Silicon, use this configure command in place of the one above:
-
-```sh
-cmake -S . -B build -G Ninja \
-  -DCMAKE_OSX_ARCHITECTURES=arm64 \
-  -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
-  -DGGML_OPENMP=OFF
-```
-
-Apple Clang does not bundle OpenMP; the CPU backend works without it. Metal and
-Apple's Accelerate framework are enabled by default by llama.cpp. These instructions
-target the macOS daemon and CLI; iOS and other Apple app platforms are not covered.
-
 The build includes llama.cpp's `common` library, which the chat layer needs for Jinja
 templates and tool-call parsing; it is the bulk of a first build. The tests need no
 model file: they render and parse against a template checked into the submodule.
 
-GitHub Actions builds on Arch Linux (CPU-only) and macOS arm64 (with Metal both
-enabled and disabled) on every push and pull request, and can also be started
-manually. Each job builds the daemon, client, and engine smoke executable, and
-runs the parser tests without a GPU or model download. Metal compilation is
-covered; GPU execution and inference with a real model are not covered by CI.
+GitHub Actions builds on Arch Linux (CPU-only) on every push and pull request, and can
+also be started manually. The job builds the daemon, client, and engine smoke executable, and
+runs the tests without a GPU or model download. GPU execution and inference with a real model
+are not covered by CI.
 
 ## GPU
-
-On Apple Silicon, the default build includes Metal. Check available devices with
-`./build/llamad --list-devices`; the daemon selects the Metal GPU automatically.
-Use `--ngl 0` to run inference on the CPU, or configure with `-DGGML_METAL=OFF`
-to build without Metal.
 
 llama.cpp's GPU backends are enabled with their usual CMake flags. Vulkan is the
 one tested here: it runs on Pascal cards (GTX 10xx), which CUDA 13 no longer targets.
