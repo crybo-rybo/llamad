@@ -34,12 +34,28 @@ struct SamplingParams {
     std::vector<std::string> stop;
 };
 
-struct ChatMessage {
-    std::string role;
-    std::string content;
+// A tool the model may call. The daemon executes nothing and keeps no registry: definitions
+// travel with each request, and the caller runs the tool and sends the result back.
+struct Tool {
+    std::string name;
+    std::string description;
+    std::string parameters_json_schema;  // JSON Schema object for the arguments, as a JSON string
 };
 
-enum class FinishReason { Eog, Length, Stop, Cancelled };
+struct ToolCall {
+    std::string id;              // assigned by the daemon; echo it back as tool_call_id
+    std::string name;
+    std::string arguments_json;  // complete, valid JSON object
+};
+
+struct ChatMessage {
+    std::string           role;  // "system" | "user" | "assistant" | "tool"
+    std::string           content;
+    std::vector<ToolCall> tool_calls;    // assistant turns being replayed from history
+    std::string           tool_call_id;  // role "tool": the call this message answers
+};
+
+enum class FinishReason { Eog, Length, Stop, Cancelled, ToolCalls };
 
 struct GenerateStats {
     int32_t prompt_tokens     = 0;
@@ -49,8 +65,9 @@ struct GenerateStats {
 };
 
 struct GenerateResult {
-    FinishReason  reason;
-    GenerateStats stats;
+    FinishReason          reason;
+    GenerateStats         stats;
+    std::vector<ToolCall> tool_calls;  // set when reason == ToolCalls
 };
 
 // Called with each piece of generated text, in order. Return false to cancel the request.
@@ -82,6 +99,15 @@ public:
     // If on_chunk returns false the request is cancelled and reason is Cancelled.
     GenerateResult generate(const std::string & prompt, const SamplingParams & params, const ChunkCallback & on_chunk);
     GenerateResult chat(const std::vector<ChatMessage> & messages, const SamplingParams & params, const ChunkCallback & on_chunk);
+
+    // Same, with tools the model may call. The caller owns the loop: on FinishReason::ToolCalls,
+    // append an assistant message carrying result.tool_calls (content = the streamed text, if any),
+    // then one "tool" message per call with tool_call_id set and the tool's result as content,
+    // and call chat again.
+    GenerateResult chat(const std::vector<ChatMessage> & messages,
+                        const std::vector<Tool> & tools,
+                        const SamplingParams & params,
+                        const ChunkCallback & on_chunk);
 
 private:
     struct Impl;

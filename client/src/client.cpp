@@ -17,11 +17,12 @@ namespace {
 
 FinishReason from_proto(v1::FinishReason reason) {
     switch (reason) {
-        case v1::FINISH_REASON_EOG:       return FinishReason::Eog;
-        case v1::FINISH_REASON_LENGTH:    return FinishReason::Length;
-        case v1::FINISH_REASON_STOP:      return FinishReason::Stop;
-        case v1::FINISH_REASON_CANCELLED: return FinishReason::Cancelled;
-        default:                          return FinishReason::Eog;
+        case v1::FINISH_REASON_EOG:        return FinishReason::Eog;
+        case v1::FINISH_REASON_LENGTH:     return FinishReason::Length;
+        case v1::FINISH_REASON_STOP:       return FinishReason::Stop;
+        case v1::FINISH_REASON_CANCELLED:  return FinishReason::Cancelled;
+        case v1::FINISH_REASON_TOOL_CALLS: return FinishReason::ToolCalls;
+        default:                           return FinishReason::Eog;
     }
 }
 
@@ -76,6 +77,10 @@ struct Client::Impl {
                 result.stats.completion_tokens  = chunk.stats().completion_tokens();
                 result.stats.prompt_ms          = chunk.stats().prompt_ms();
                 result.stats.completion_ms      = chunk.stats().completion_ms();
+                result.tool_calls.clear();
+                for (const v1::ToolCall & call : chunk.tool_calls()) {
+                    result.tool_calls.push_back({call.id(), call.name(), call.arguments_json()});
+                }
             }
         }
 
@@ -172,6 +177,13 @@ GenerateResult Client::generate(const std::string & prompt,
 GenerateResult Client::chat(const std::vector<ChatMessage> & messages,
                             const SamplingParams & params,
                             const ChunkCallback & on_chunk) {
+    return chat(messages, {}, params, on_chunk);
+}
+
+GenerateResult Client::chat(const std::vector<ChatMessage> & messages,
+                            const std::vector<Tool> & tools,
+                            const SamplingParams & params,
+                            const ChunkCallback & on_chunk) {
     grpc::ClientContext context;
     init_context(context);
 
@@ -180,6 +192,19 @@ GenerateResult Client::chat(const std::vector<ChatMessage> & messages,
         v1::ChatMessage * out = request.add_messages();
         out->set_role(m.role);
         out->set_content(m.content);
+        out->set_tool_call_id(m.tool_call_id);
+        for (const ToolCall & call : m.tool_calls) {
+            v1::ToolCall * out_call = out->add_tool_calls();
+            out_call->set_id(call.id);
+            out_call->set_name(call.name);
+            out_call->set_arguments_json(call.arguments_json);
+        }
+    }
+    for (const Tool & t : tools) {
+        v1::Tool * out = request.add_tools();
+        out->set_name(t.name);
+        out->set_description(t.description);
+        out->set_parameters_json_schema(t.parameters_json_schema);
     }
     fill_sampling(request.mutable_sampling(), params);
 

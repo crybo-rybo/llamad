@@ -53,14 +53,32 @@ message GenerateRequest {
   SamplingParams sampling = 2;
 }
 
+// A tool the model may call. The daemon never executes tools and keeps no registry:
+// definitions travel with each request, and the caller runs the tool and sends the
+// result back as a "tool" message.
+message Tool {
+  string name = 1;
+  string description = 2;
+  string parameters_json_schema = 3;  // JSON Schema object for the arguments, as a JSON string
+}
+
+message ToolCall {
+  string id = 1;               // assigned by the daemon; echo it back in the "tool" message's tool_call_id
+  string name = 2;
+  string arguments_json = 3;   // complete, valid JSON object
+}
+
 message ChatMessage {
-  string role = 1;             // "system" | "user" | "assistant"
+  string role = 1;             // "system" | "user" | "assistant" | "tool"
   string content = 2;
+  repeated ToolCall tool_calls = 3;  // assistant turns being replayed from history
+  string tool_call_id = 4;           // role "tool": the call this message answers
 }
 
 message ChatRequest {
   repeated ChatMessage messages = 1;
   SamplingParams sampling = 2;
+  repeated Tool tools = 3;
 }
 
 enum FinishReason {
@@ -69,6 +87,7 @@ enum FinishReason {
   FINISH_REASON_LENGTH = 2;     // max_tokens or context limit reached
   FINISH_REASON_STOP = 3;       // a stop string matched
   FINISH_REASON_CANCELLED = 4;  // client cancelled
+  FINISH_REASON_TOOL_CALLS = 5; // the model asked for one or more tools
 }
 
 message GenerateStats {
@@ -79,9 +98,12 @@ message GenerateStats {
 }
 
 // A stream is zero or more chunks carrying `text`, then exactly one final chunk
-// with `finish_reason` and `stats` set (its `text` may be empty).
+// with `finish_reason` and `stats` set (its `text` may be empty). Tool calls ride
+// that same final chunk, whole and never as fragments; `text` chunks only ever
+// carry user-visible content, never tool-call markup.
 message GenerateChunk {
   string text = 1;
   FinishReason finish_reason = 2;
   GenerateStats stats = 3;
+  repeated ToolCall tool_calls = 4;  // only ever set on the final chunk
 }
