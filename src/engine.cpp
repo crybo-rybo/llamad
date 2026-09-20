@@ -13,6 +13,7 @@
 #include <string>
 #include <thread>
 #include <type_traits>
+#include <unordered_set>
 #include <vector>
 
 namespace llamad {
@@ -290,16 +291,77 @@ private:
     std::string                      pending_;
 };
 
+// ---------------------------------------------------------------------------
+// Grammar constraint
+// ---------------------------------------------------------------------------
+
+// Escapes the characters std::regex treats as syntax, so that a literal word can be used as a
+// grammar trigger pattern. Same character set as common/common.cpp's regex_escape.
+std::string regex_escape(const std::string & text) {
+    static const std::string special = ".^$|()*+?[]{}\\";
+
+    std::string out;
+    out.reserve(text.size());
+    for (const char c : text) {
+        if (special.find(c) != std::string::npos) {
+            out += '\\';
+        }
+        out += c;
+    }
+    return out;
+}
+
+// The string-valued parts of SamplingParams that only mean something once they have been
+// looked up in the vocabulary.
+struct ResolvedTokens {
+    std::unordered_set<llama_token> preserved;          // tokens whose special text is emitted
+    std::vector<llama_token>        trigger_tokens;     // lazy grammar: trigger on this token
+    std::vector<std::string>        trigger_patterns;   // lazy grammar: trigger on this regex
+};
+
 // RAII wrapper so the sampler chain is freed on every path, exceptions included.
 class SamplerChain {
 public:
-    explicit SamplerChain(const SamplingParams & params) {
+    SamplerChain(const llama_vocab * vocab, const SamplingParams & params, const ResolvedTokens & resolved) {
         llama_sampler_chain_params cparams = llama_sampler_chain_default_params();
         cparams.no_perf                    = true;
 
         chain_ = llama_sampler_chain_init(cparams);
         if (chain_ == nullptr) {
             throw EngineError("failed to create the sampler chain");
+        }
+
+        // A constructor that throws gets no destructor call, so the chain is freed by hand.
+        try {
+            build(vocab, params, resolved);
+        } catch (...) {
+            llama_sampler_free(chain_);
+            chain_ = nullptr;
+            throw;
+        }
+    }
+
+    ~SamplerChain() {
+        if (chain_ != nullptr) {
+            llama_sampler_free(chain_);
+        }
+    }
+
+    SamplerChain(const SamplerChain &)             = delete;
+    SamplerChain & operator=(const SamplerChain &) = delete;
+
+    llama_sampler * get() const { return chain_; }
+
+private:
+    void build(const llama_vocab * vocab, const SamplingParams & params, const ResolvedTokens & resolved) {
+        // The grammar goes first, ahead of the greedy short-circuit too: every other sampler must
+        // only ever see tokens the grammar allows. common/sampling.cpp keeps the grammar outside
+        // the chain and rejection-samples for speed; in-chain is simpler and just as correct,
+        // because llama_sampler_sample() accepts the sampled token into the chain, which forwards
+        // accept() to every sampler in it: that is what advances the grammar and fires its
+        // lazy triggers.
+        if (!params.grammar.empty()) {
+            add_grammar(vocab, params, resolved);
         }
 
         if (params.temperature <= 0.0f) {
@@ -322,18 +384,29 @@ public:
                                 llama_sampler_init_dist(params.seed ? *params.seed : LLAMA_DEFAULT_SEED));
     }
 
-    ~SamplerChain() {
-        if (chain_ != nullptr) {
-            llama_sampler_free(chain_);
+    void add_grammar(const llama_vocab * vocab, const SamplingParams & params, const ResolvedTokens & resolved) {
+        std::vector<const char *> patterns;
+        patterns.reserve(resolved.trigger_patterns.size());
+        for (const std::string & pattern : resolved.trigger_patterns) {
+            patterns.push_back(pattern.c_str());
         }
+
+        // A non-empty grammar string that does not parse (bad syntax, no root rule, left recursion)
+        // makes both of these return null; they never hand back a sampler with no grammar in it.
+        llama_sampler * grammar =
+            params.grammar_lazy
+                ? llama_sampler_init_grammar_lazy_patterns(vocab, params.grammar.c_str(), /*grammar_root*/ "root",
+                                                           patterns.data(), patterns.size(),
+                                                           resolved.trigger_tokens.data(),
+                                                           resolved.trigger_tokens.size())
+                : llama_sampler_init_grammar(vocab, params.grammar.c_str(), /*grammar_root*/ "root");
+        if (grammar == nullptr) {
+            throw EngineError("failed to parse the grammar");
+        }
+
+        llama_sampler_chain_add(chain_, grammar);
     }
 
-    SamplerChain(const SamplerChain &)             = delete;
-    SamplerChain & operator=(const SamplerChain &) = delete;
-
-    llama_sampler * get() const { return chain_; }
-
-private:
     llama_sampler * chain_ = nullptr;
 };
 
@@ -391,20 +464,56 @@ struct Engine::Impl {
         return tokens;
     }
 
-    std::string token_to_piece(llama_token token) const {
+    // `special` renders the text of a control/added token instead of nothing; it is on only for the
+    // tokens the caller asked to have preserved.
+    std::string token_to_piece(llama_token token, bool special) const {
         char          buf[256];
-        const int32_t n = llama_token_to_piece(vocab, token, buf, sizeof(buf), 0, /*special*/ false);
+        const int32_t n = llama_token_to_piece(vocab, token, buf, sizeof(buf), 0, special);
         if (n >= 0) {
             return std::string(buf, static_cast<size_t>(n));
         }
 
         std::vector<char> big(static_cast<size_t>(-n));
         const int32_t     n2 = llama_token_to_piece(vocab, token, big.data(),
-                                                    static_cast<int32_t>(big.size()), 0, /*special*/ false);
+                                                    static_cast<int32_t>(big.size()), 0, special);
         if (n2 < 0) {
             throw EngineError("failed to convert a token to text");
         }
         return std::string(big.data(), static_cast<size_t>(n2));
+    }
+
+    // Preserved tokens and grammar triggers are given as text; only the vocabulary can turn them
+    // into token ids. Mirrors what llama-server does with the same two request fields.
+    ResolvedTokens resolve(const SamplingParams & params) const {
+        ResolvedTokens out;
+
+        // A string that is not exactly one token cannot name a token, so it is simply ignored.
+        for (const std::string & text : params.preserved_tokens) {
+            const std::vector<int32_t> ids = tokenize(text, /*add_special*/ false, /*parse_special*/ true);
+            if (ids.size() == 1) {
+                out.preserved.insert(ids[0]);
+            }
+        }
+
+        if (params.grammar.empty() || !params.grammar_lazy) {
+            return out;   // triggers only mean something for a lazy grammar
+        }
+
+        out.trigger_patterns = params.grammar_trigger_patterns;
+        for (const std::string & word : params.grammar_trigger_words) {
+            const std::vector<int32_t> ids = tokenize(word, /*add_special*/ false, /*parse_special*/ true);
+            // A word that is one token and is preserved becomes a token trigger, the cheap exact
+            // form; llama-server insists on that pairing and rejects the request otherwise.
+            // Everything else matches as text, which is safe even for a special token: the
+            // grammar's trigger buffer is fed pieces rendered with special = true regardless.
+            if (ids.size() == 1 && out.preserved.count(ids[0]) != 0) {
+                out.trigger_tokens.push_back(ids[0]);
+            } else {
+                out.trigger_patterns.push_back(regex_escape(word));
+            }
+        }
+
+        return out;
     }
 };
 
@@ -598,35 +707,25 @@ std::vector<int32_t> Engine::tokenize(const std::string & text, bool add_special
     return impl_->tokenize(text, add_special, parse_special);
 }
 
-std::string Engine::apply_chat_template(const std::vector<ChatMessage> & messages) const {
-    const char * tmpl = llama_model_chat_template(impl_->model, /*name*/ nullptr);
-    if (tmpl == nullptr) {
-        throw EngineError("the model has no built-in chat template");
+ChatTemplateInfo Engine::chat_template() const {
+    ChatTemplateInfo out;
+
+    const char * source = llama_model_chat_template(impl_->model, /*name*/ nullptr);
+    if (source != nullptr) {
+        out.source = source;
     }
 
-    std::vector<llama_chat_message> chat;
-    chat.reserve(messages.size());
-    size_t total = 0;
-    for (const ChatMessage & m : messages) {
-        chat.push_back(llama_chat_message{m.role.c_str(), m.content.c_str()});
-        total += m.role.size() + m.content.size();
-    }
+    // A Jinja template refers to the BOS/EOS tokens by their text, so they are rendered with their
+    // special text here (this is how common_chat_templates_init derives them from a model). A vocab
+    // without the token contributes an empty string.
+    const auto token_text = [&](llama_token token) -> std::string {
+        return token == LLAMA_TOKEN_NULL ? std::string() : impl_->token_to_piece(token, /*special*/ true);
+    };
 
-    // Recommended starting size is 2x the total message length.
-    std::vector<char> buf(std::max<size_t>(total * 2, 512));
+    out.bos_token = token_text(llama_vocab_bos(impl_->vocab));
+    out.eos_token = token_text(llama_vocab_eos(impl_->vocab));
 
-    int32_t n = llama_chat_apply_template(tmpl, chat.data(), chat.size(), /*add_ass*/ true, buf.data(),
-                                          static_cast<int32_t>(buf.size()));
-    if (n > static_cast<int32_t>(buf.size())) {
-        buf.resize(static_cast<size_t>(n));
-        n = llama_chat_apply_template(tmpl, chat.data(), chat.size(), /*add_ass*/ true, buf.data(),
-                                      static_cast<int32_t>(buf.size()));
-    }
-    if (n < 0) {
-        throw EngineError("the model's chat template is not supported by llama_chat_apply_template");
-    }
-
-    return std::string(buf.data(), static_cast<size_t>(std::min<size_t>(static_cast<size_t>(n), buf.size())));
+    return out;
 }
 
 GenerateResult Engine::generate(const std::string & prompt, const SamplingParams & params,
@@ -649,9 +748,13 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
     result.reason              = FinishReason::Length;
     result.stats.prompt_tokens = static_cast<int32_t>(tokens.size());
 
-    // The sampler chain is built before any decoding so a bad configuration fails
-    // fast, and is freed by RAII on every path.
-    SamplerChain sampler(params);
+    // The preserved tokens decide which pieces are rendered with their special text; the triggers
+    // are only used by a lazy grammar.
+    const ResolvedTokens resolved = impl_->resolve(params);
+
+    // The sampler chain is built before any decoding so a bad configuration (an unparsable grammar,
+    // say) fails fast, and is freed by RAII on every path.
+    SamplerChain sampler(impl_->vocab, params, resolved);
 
     // --- prompt ---------------------------------------------------------
     const auto t_prompt = std::chrono::steady_clock::now();
@@ -692,7 +795,8 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
 
         result.stats.completion_tokens++;
 
-        const StreamFilter::Status status = filter.push(impl_->token_to_piece(token));
+        const StreamFilter::Status status =
+            filter.push(impl_->token_to_piece(token, resolved.preserved.count(token) != 0));
         if (status == StreamFilter::Status::Stopped) {
             result.reason = FinishReason::Stop;
             flush_tail    = false;

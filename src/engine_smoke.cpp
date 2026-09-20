@@ -4,6 +4,8 @@
 //
 // Options:
 //   --chat              wrap the prompt as a single user message via the chat template
+//   --demo-tool         with --chat: offer the model one get_current_time tool
+//   --grammar-file PATH constrain generation with this GBNF file (not lazy; overrides --chat's grammar)
 //   --temp T            sampling temperature (<= 0 means greedy)
 //   --seed N            sampling seed
 //   --top-k N           top-k
@@ -20,6 +22,7 @@
 //   --tensor-split A[,B...]  share of the model per device, e.g. 3,1
 //   --list-devices      list the devices this build can see and exit
 
+#include "chat_format.h"
 #include "engine.h"
 
 #include <algorithm>
@@ -27,6 +30,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <fstream>
+#include <iterator>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -35,12 +41,33 @@ namespace {
 
 void print_usage(const char * argv0) {
     std::fprintf(stderr,
-                 "usage: %s <model.gguf> [--chat] [--temp T] [--seed N] [--top-k N] [--top-p P]\n"
-                 "          [--min-p P] [--max-tokens N] [--stop STR]... [--cancel-after N]\n"
-                 "          [--repeat N] [--ctx N] [--threads N] [--ngl N]\n"
+                 "usage: %s <model.gguf> [--chat] [--demo-tool] [--grammar-file PATH] [--temp T]\n"
+                 "          [--seed N] [--top-k N] [--top-p P] [--min-p P] [--max-tokens N]\n"
+                 "          [--stop STR]... [--cancel-after N] [--repeat N] [--ctx N]\n"
+                 "          [--threads N] [--ngl N]\n"
                  "          [--devices A[,B...]] [--tensor-split A[,B...]] <prompt>\n"
                  "       %s --list-devices\n",
                  argv0, argv0);
+}
+
+// Reads a whole file. Throws if it cannot be opened.
+std::string read_file(const std::string & path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        throw std::runtime_error("cannot open '" + path + "'");
+    }
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+// The one tool --demo-tool offers, so tool calling can be exercised without the daemon.
+llamad::Tool demo_tool() {
+    llamad::Tool tool;
+    tool.name                   = "get_current_time";
+    tool.description            = "Get the current time in a given timezone";
+    tool.parameters_json_schema = R"({"type":"object","properties":{"timezone":{"type":"string",)"
+                                  R"("description":"IANA timezone, e.g. Europe/Paris"}},)"
+                                  R"("required":["timezone"]})";
+    return tool;
 }
 
 // Splits "a,b,c" on commas. Throws on an empty element.
@@ -101,10 +128,12 @@ int main(int argc, char ** argv) {
     llamad::SamplingParams  params;
     std::vector<std::string> positional;
 
-    bool    chat         = false;
-    bool    list_devices = false;
-    long    cancel_after = -1;
-    long    repeat       = 1;
+    bool        chat         = false;
+    bool        use_tool     = false;
+    bool        list_devices = false;
+    long        cancel_after = -1;
+    long        repeat       = 1;
+    std::string grammar_file;
 
     try {
         for (int i = 1; i < argc; ++i) {
@@ -119,6 +148,10 @@ int main(int argc, char ** argv) {
 
             if (arg == "--chat") {
                 chat = true;
+            } else if (arg == "--demo-tool") {
+                use_tool = true;
+            } else if (arg == "--grammar-file") {
+                grammar_file = next("--grammar-file");
             } else if (arg == "--temp") {
                 params.temperature = std::stof(next("--temp"));
             } else if (arg == "--seed") {
@@ -161,6 +194,10 @@ int main(int argc, char ** argv) {
                 positional.push_back(arg);
             }
         }
+
+        if (use_tool && !chat) {
+            throw std::runtime_error("--demo-tool only makes sense with --chat");
+        }
     } catch (const std::exception & e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         print_usage(argv[0]);
@@ -191,10 +228,45 @@ int main(int argc, char ** argv) {
                      (double) info.size_bytes / (1024.0 * 1024.0), info.n_ctx, info.n_ctx_train,
                      info.has_chat_template ? "yes" : "no");
 
+        // In chat mode the whole request comes out of the chat layer: the prompt, the tool-call
+        // grammar and the tokens whose text the parser needs to see.
+        std::unique_ptr<llamad::ChatFormat> format;
+        llamad::RenderedChat                rendered;
+
         std::string text = prompt;
         if (chat) {
-            text = engine.apply_chat_template({{"user", prompt}});
+            const llamad::ChatTemplateInfo tmpl = engine.chat_template();
+            if (tmpl.source.empty()) {
+                throw std::runtime_error("the model has no built-in chat template");
+            }
+            format.reset(new llamad::ChatFormat(tmpl.source, tmpl.bos_token, tmpl.eos_token));
+
+            std::vector<llamad::Tool> tools;
+            if (use_tool) {
+                tools.push_back(demo_tool());
+            }
+
+            rendered = format->render({{"user", prompt, {}, {}}}, tools);
+
+            text                            = rendered.prompt;
+            params.grammar                  = rendered.grammar.grammar;
+            params.grammar_lazy             = rendered.grammar.lazy;
+            params.grammar_trigger_patterns = rendered.grammar.trigger_patterns;
+            params.grammar_trigger_words    = rendered.grammar.trigger_words;
+            params.preserved_tokens         = rendered.preserved_tokens;
+            params.stop.insert(params.stop.end(), rendered.additional_stops.begin(),
+                               rendered.additional_stops.end());
         }
+
+        // A hand-written grammar replaces whatever the chat layer came up with, so that a
+        // constraint can be tried out on its own.
+        if (!grammar_file.empty()) {
+            params.grammar      = read_file(grammar_file);
+            params.grammar_lazy = false;
+            params.grammar_trigger_patterns.clear();
+            params.grammar_trigger_words.clear();
+        }
+
         std::fprintf(stderr, "prompt tokens: %zu\n", engine.tokenize(text, true, true).size());
 
         for (long run = 0; run < repeat; ++run) {
@@ -202,11 +274,20 @@ int main(int argc, char ** argv) {
                 std::fprintf(stderr, "--- run %ld/%ld ---\n", run + 1, repeat);
             }
 
+            // The parser is what withholds tool-call markup, so only what it returns is printed.
+            std::unique_ptr<llamad::ChatFormat::Stream> stream;
+            if (format) {
+                stream.reset(new llamad::ChatFormat::Stream(format->stream(rendered)));
+            }
+
             long chunks = 0;
             auto on_chunk = [&](const std::string & piece) -> bool {
                 ++chunks;
-                std::fwrite(piece.data(), 1, piece.size(), stdout);
-                std::fflush(stdout);
+                const std::string visible = stream ? stream->push(piece) : piece;
+                if (!visible.empty()) {
+                    std::fwrite(visible.data(), 1, visible.size(), stdout);
+                    std::fflush(stdout);
+                }
                 return !(cancel_after >= 0 && chunks >= cancel_after);
             };
 
@@ -219,7 +300,22 @@ int main(int argc, char ** argv) {
                          reason_name(result.reason), result.stats.prompt_tokens,
                          result.stats.completion_tokens, result.stats.prompt_ms,
                          result.stats.completion_ms, chunks);
+
+            if (stream) {
+                const llamad::ChatFormat::Stream::Final final = stream->finish();
+                if (!final.content_tail.empty()) {
+                    std::fprintf(stderr, "content_tail: %s\n", final.content_tail.c_str());
+                }
+                for (const llamad::ToolCall & call : final.tool_calls) {
+                    std::fprintf(stderr, "tool_call: %s %s  (id %s)\n", call.name.c_str(),
+                                 call.arguments_json.c_str(), call.id.c_str());
+                }
+                std::fprintf(stderr, "tool_calls: %zu\n", final.tool_calls.size());
+            }
         }
+    } catch (const llamad::ChatFormatError & e) {
+        std::fprintf(stderr, "chat format error: %s\n", e.what());
+        return 1;
     } catch (const llamad::EngineError & e) {
         std::fprintf(stderr, "engine error: %s\n", e.what());
         return 1;

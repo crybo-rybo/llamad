@@ -47,6 +47,13 @@ struct ModelInfo {
     bool        has_chat_template = false;
 };
 
+// The model's built-in chat template and the token text a template may reference.
+struct ChatTemplateInfo {
+    std::string source;      // empty if the model has none
+    std::string bos_token;
+    std::string eos_token;
+};
+
 // Defaults here are the daemon defaults documented in llamad.proto.
 struct SamplingParams {
     float                    temperature = 0.8f;   // <= 0 means greedy
@@ -56,11 +63,14 @@ struct SamplingParams {
     std::optional<uint32_t>  seed;                 // nullopt = random
     int32_t                  max_tokens  = -1;     // < 0 = until context is full
     std::vector<std::string> stop;
-};
 
-struct ChatMessage {
-    std::string role;
-    std::string content;
+    // Grammar constraint (GBNF). Filled in by the chat layer for tool calling; empty = unconstrained.
+    std::string              grammar;
+    bool                     grammar_lazy = false;        // only constrain once a trigger fires
+    std::vector<std::string> grammar_trigger_patterns;    // regexes
+    std::vector<std::string> grammar_trigger_words;       // literal words: token trigger if a single token, else escaped to a regex
+    // Special tokens whose text must be rendered into the output stream (e.g. "<tool_call>" where it is an added token).
+    std::vector<std::string> preserved_tokens;
 };
 
 enum class FinishReason { Eog, Length, Stop, Cancelled };
@@ -104,8 +114,8 @@ public:
 
     std::vector<int32_t> tokenize(const std::string & text, bool add_special, bool parse_special) const;
 
-    // Applies the model's built-in chat template with the assistant turn opened.
-    std::string apply_chat_template(const std::vector<ChatMessage> & messages) const;
+    // The model's built-in chat template, for the chat layer to render with.
+    ChatTemplateInfo chat_template() const;
 
     // Generates from a raw prompt. Serialized internally: concurrent callers queue.
     // Each call starts from an empty KV cache.

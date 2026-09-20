@@ -24,6 +24,7 @@
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/health_check_service_interface.h>
 
+#include "chat_format.h"
 #include "engine.h"
 #include "service.h"
 
@@ -300,7 +301,29 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    llamad::LlamaService service(*engine);
+    // One ChatFormat for the whole daemon: it is immutable, so every request renders and parses
+    // through it concurrently (the per-request parser state is a separate Stream). A model with no
+    // usable template still serves Generate, Tokenize and GetModelInfo; only Chat is refused, and
+    // a template that will not parse is a warning rather than a reason not to start.
+    std::unique_ptr<llamad::ChatFormat> chat_format;
+    std::string chat_unavailable_reason = "the model has no built-in chat template";
+    {
+        const llamad::ChatTemplateInfo tmpl = engine->chat_template();
+        if (!tmpl.source.empty()) {
+            try {
+                chat_format = std::make_unique<llamad::ChatFormat>(tmpl.source, tmpl.bos_token, tmpl.eos_token);
+            } catch (const std::exception & e) {
+                chat_unavailable_reason =
+                    std::string("the model's chat template could not be parsed: ") + e.what();
+                std::fprintf(stderr, "[llamad] warning: %s\n", chat_unavailable_reason.c_str());
+                std::fprintf(stderr, "[llamad] warning: Chat is disabled; Generate still works\n");
+            }
+        } else {
+            std::fprintf(stderr, "[llamad] warning: %s; Chat is disabled\n", chat_unavailable_reason.c_str());
+        }
+    }
+
+    llamad::LlamaService service(*engine, chat_format.get(), chat_unavailable_reason);
 
     grpc::EnableDefaultHealthCheckService(true);
     grpc::reflection::InitProtoReflectionServerBuilderPlugin();
