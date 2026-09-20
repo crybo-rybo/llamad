@@ -60,19 +60,21 @@ add_executable(engine_smoke src/engine_smoke.cpp)
 target_link_libraries(engine_smoke PRIVATE llamad_engine llamad_chat)
 
 enable_testing()
-add_subdirectory(tests)
 
 # Everything below needs gRPC; the engine can be built and tested without it.
 find_package(Protobuf CONFIG)
 find_package(gRPC CONFIG)
 if(NOT (Protobuf_FOUND AND gRPC_FOUND))
     message(WARNING "gRPC/Protobuf not found: building the engine only (see README.md for dependencies)")
+    add_subdirectory(tests)
     return()
 endif()
 
+# `proto` is on the include path alongside the generated sources, so convert.h sits next to the
+# .proto it converts and both sides spell it "llamad/v1/convert.h".
 add_library(llamad_proto STATIC proto/llamad/v1/llamad.proto)
 target_link_libraries(llamad_proto PUBLIC protobuf::libprotobuf gRPC::grpc++)
-target_include_directories(llamad_proto PUBLIC ${CMAKE_CURRENT_BINARY_DIR}/gen)
+target_include_directories(llamad_proto PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/proto ${CMAKE_CURRENT_BINARY_DIR}/gen)
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/gen)
 protobuf_generate(TARGET llamad_proto
     IMPORT_DIRS proto
@@ -88,3 +90,6 @@ add_executable(llamad src/main.cpp src/service.cpp)
 target_link_libraries(llamad PRIVATE llamad_engine llamad_chat llamad_proto gRPC::grpc++_reflection)
 
 add_subdirectory(client)
+
+# Last: the contract test sees the proto, the engine, the chat layer and the client together.
+add_subdirectory(tests)

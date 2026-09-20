@@ -8,28 +8,10 @@
 #include <utility>
 #include <vector>
 
+#include "llamad/v1/convert.h"
+
 namespace llamad {
 namespace {
-
-const char * finish_reason_name(FinishReason reason) {
-    switch (reason) {
-        case FinishReason::Eog:       return "EOG";
-        case FinishReason::Length:    return "LENGTH";
-        case FinishReason::Stop:      return "STOP";
-        case FinishReason::Cancelled: return "CANCELLED";
-    }
-    return "UNSPECIFIED";
-}
-
-v1::FinishReason to_proto(FinishReason reason) {
-    switch (reason) {
-        case FinishReason::Eog:       return v1::FINISH_REASON_EOG;
-        case FinishReason::Length:    return v1::FINISH_REASON_LENGTH;
-        case FinishReason::Stop:      return v1::FINISH_REASON_STOP;
-        case FinishReason::Cancelled: return v1::FINISH_REASON_CANCELLED;
-    }
-    return v1::FINISH_REASON_UNSPECIFIED;
-}
 
 // Only fields the client actually set override the engine defaults from engine.h.
 SamplingParams from_proto(const v1::SamplingParams & p) {
@@ -42,13 +24,6 @@ SamplingParams from_proto(const v1::SamplingParams & p) {
     if (p.has_max_tokens())  { out.max_tokens  = p.max_tokens(); }
     out.stop.assign(p.stop().begin(), p.stop().end());
     return out;
-}
-
-void fill_stats(v1::GenerateStats * out, const GenerateStats & in) {
-    out->set_prompt_tokens(in.prompt_tokens);
-    out->set_completion_tokens(in.completion_tokens);
-    out->set_prompt_ms(in.prompt_ms);
-    out->set_completion_ms(in.completion_ms);
 }
 
 // `tool_calls` < 0 leaves the count out of the line entirely (Generate has no tool calls).
@@ -68,13 +43,7 @@ grpc::Status LlamaService::GetModelInfo(grpc::ServerContext *,
                                         const v1::GetModelInfoRequest *,
                                         v1::ModelInfo * response) {
     try {
-        const llamad::ModelInfo info = engine_.info();
-        response->set_description(info.description);
-        response->set_n_params(info.n_params);
-        response->set_size_bytes(info.size_bytes);
-        response->set_n_ctx(info.n_ctx);
-        response->set_n_ctx_train(info.n_ctx_train);
-        response->set_has_chat_template(info.has_chat_template);
+        wire::to_proto(engine_.info(), response);
         std::fprintf(stderr, "[llamad] GetModelInfo\n");
         return grpc::Status::OK;
     } catch (const EngineError & e) {
@@ -147,8 +116,7 @@ grpc::Status LlamaService::stream_generation(const char * rpc_name,
             client_gone = true;
         }
 
-        v1::FinishReason      reason      = to_proto(result.reason);
-        const char *          reason_name = finish_reason_name(result.reason);
+        v1::FinishReason      reason = wire::enum_cast<v1::FinishReason>(result.reason);
         std::vector<ToolCall> tool_calls;
 
         if (!client_gone && hooks != nullptr) {
@@ -161,8 +129,7 @@ grpc::Status LlamaService::stream_generation(const char * rpc_name,
             const bool ran_to_completion =
                 result.reason == FinishReason::Eog || result.reason == FinishReason::Stop;
             if (ran_to_completion && !tool_calls.empty()) {
-                reason      = v1::FINISH_REASON_TOOL_CALLS;
-                reason_name = "TOOL_CALLS";
+                reason = v1::FINISH_REASON_TOOL_CALLS;
             } else {
                 tool_calls.clear();
             }
@@ -177,12 +144,9 @@ grpc::Status LlamaService::stream_generation(const char * rpc_name,
             // Exactly one final chunk, carrying finish_reason, stats and any tool calls.
             v1::GenerateChunk final_chunk;
             final_chunk.set_finish_reason(reason);
-            fill_stats(final_chunk.mutable_stats(), result.stats);
+            wire::to_proto(result.stats, final_chunk.mutable_stats());
             for (const ToolCall & call : tool_calls) {
-                v1::ToolCall * out = final_chunk.add_tool_calls();
-                out->set_id(call.id);
-                out->set_name(call.name);
-                out->set_arguments_json(call.arguments_json);
+                wire::to_proto(call, final_chunk.add_tool_calls());
             }
             if (!writer->Write(final_chunk)) {
                 client_gone = true;
@@ -191,7 +155,7 @@ grpc::Status LlamaService::stream_generation(const char * rpc_name,
 
         const double wall_ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
-        log_request(rpc_name, result.stats, reason_name, wall_ms,
+        log_request(rpc_name, result.stats, wire::value_name(reason), wall_ms,
                     hooks != nullptr ? static_cast<int>(tool_calls.size()) : -1);
 
         return grpc::Status::OK;
@@ -233,21 +197,13 @@ grpc::Status LlamaService::Chat(grpc::ServerContext * context,
         std::vector<llamad::ChatMessage> messages;
         messages.reserve(static_cast<size_t>(request->messages().size()));
         for (const v1::ChatMessage & m : request->messages()) {
-            llamad::ChatMessage message;
-            message.role    = m.role();
-            message.content = m.content();
-            message.tool_calls.reserve(static_cast<size_t>(m.tool_calls().size()));
-            for (const v1::ToolCall & c : m.tool_calls()) {
-                message.tool_calls.push_back({c.id(), c.name(), c.arguments_json()});
-            }
-            message.tool_call_id = m.tool_call_id();
-            messages.push_back(std::move(message));
+            messages.push_back(wire::from_proto<llamad::ChatMessage>(m));
         }
 
         std::vector<llamad::Tool> tools;
         tools.reserve(static_cast<size_t>(request->tools().size()));
         for (const v1::Tool & t : request->tools()) {
-            tools.push_back({t.name(), t.description(), t.parameters_json_schema()});
+            tools.push_back(wire::from_proto<llamad::Tool>(t));
         }
 
         rendered = chat_format_->render(messages, tools);

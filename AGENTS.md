@@ -20,6 +20,7 @@ single source of truth for how things work.
 | Path | Role |
 |---|---|
 | `proto/llamad/v1/llamad.proto` | The wire contract. Engine-agnostic: nothing in it depends on how inference runs. |
+| `proto/llamad/v1/convert.h` | Name-matched conversion between those messages and the plain structs that mirror them, on both sides of the wire. Names no protobuf type: a message is reached only through the accessors protoc generates. |
 | `src/engine.{h,cpp}` | Wrapper over libllama: model loading, tokenizing, sampling, the generate loop, UTF-8 and stop-string safe streaming. |
 | `src/chat_format.{h,cpp}` | Chat layer: renders messages and tools through the model's Jinja template, builds the tool-call grammar, parses tool calls out of generated text. |
 | `src/service.{h,cpp}`, `src/main.cpp` | gRPC service and the daemon: socket lifecycle, signals, proto ↔ engine type conversion. |
@@ -60,7 +61,8 @@ agreement first, not a clever workaround.
 3. **The three contracts change deliberately.** `llamad.proto`, `engine.h` and `client.h` are the
    seams the rest is built against. Proto changes are additive: never renumber or repurpose a
    field. When one contract changes, update everything that mirrors it in the same change
-   (proto ↔ `service.cpp` ↔ `client.h` / `client.cpp`).
+   (proto ↔ `service.cpp` ↔ `client.h` / `client.cpp`). `tests/contract_test.cpp` fails the build
+   when a mirror struct and the message it mirrors disagree, in either direction.
 4. **The daemon is stateless per request.** No sessions, no registries, no state carried between
    calls. Clients resend history; tools travel with each request as opaque data and are never
    executed or validated by the daemon.

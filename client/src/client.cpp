@@ -9,34 +9,12 @@
 
 #include <grpcpp/grpcpp.h>
 
+#include "llamad/v1/convert.h"
 #include "llamad/v1/llamad.grpc.pb.h"
 
 namespace llamad {
 namespace client {
 namespace {
-
-FinishReason from_proto(v1::FinishReason reason) {
-    switch (reason) {
-        case v1::FINISH_REASON_EOG:        return FinishReason::Eog;
-        case v1::FINISH_REASON_LENGTH:     return FinishReason::Length;
-        case v1::FINISH_REASON_STOP:       return FinishReason::Stop;
-        case v1::FINISH_REASON_CANCELLED:  return FinishReason::Cancelled;
-        case v1::FINISH_REASON_TOOL_CALLS: return FinishReason::ToolCalls;
-        default:                           return FinishReason::Eog;
-    }
-}
-
-void fill_sampling(v1::SamplingParams * out, const SamplingParams & in) {
-    if (in.temperature) { out->set_temperature(*in.temperature); }
-    if (in.top_k)       { out->set_top_k(*in.top_k); }
-    if (in.top_p)       { out->set_top_p(*in.top_p); }
-    if (in.min_p)       { out->set_min_p(*in.min_p); }
-    if (in.seed)        { out->set_seed(*in.seed); }
-    if (in.max_tokens)  { out->set_max_tokens(*in.max_tokens); }
-    for (const std::string & s : in.stop) {
-        out->add_stop(s);
-    }
-}
 
 [[noreturn]] void throw_rpc_error(const grpc::Status & status) {
     throw RpcError(static_cast<int>(status.error_code()), status.error_message());
@@ -72,14 +50,12 @@ struct Client::Impl {
                 }
             }
             if (chunk.finish_reason() != v1::FINISH_REASON_UNSPECIFIED) {
-                result.reason                   = from_proto(chunk.finish_reason());
-                result.stats.prompt_tokens      = chunk.stats().prompt_tokens();
-                result.stats.completion_tokens  = chunk.stats().completion_tokens();
-                result.stats.prompt_ms          = chunk.stats().prompt_ms();
-                result.stats.completion_ms      = chunk.stats().completion_ms();
+                // A reason a later daemon knows and this client does not reads as Eog.
+                result.reason = wire::enum_cast(chunk.finish_reason(), FinishReason::Eog);
+                result.stats  = wire::from_proto<GenerateStats>(chunk.stats());
                 result.tool_calls.clear();
                 for (const v1::ToolCall & call : chunk.tool_calls()) {
-                    result.tool_calls.push_back({call.id(), call.name(), call.arguments_json()});
+                    result.tool_calls.push_back(wire::from_proto<ToolCall>(call));
                 }
             }
         }
@@ -133,14 +109,7 @@ ModelInfo Client::get_model_info() {
         throw_rpc_error(status);
     }
 
-    ModelInfo info;
-    info.description       = response.description();
-    info.n_params          = response.n_params();
-    info.size_bytes        = response.size_bytes();
-    info.n_ctx             = response.n_ctx();
-    info.n_ctx_train       = response.n_ctx_train();
-    info.has_chat_template = response.has_chat_template();
-    return info;
+    return wire::from_proto<ModelInfo>(response);
 }
 
 std::vector<int32_t> Client::tokenize(const std::string & text, bool add_special, bool parse_special) {
@@ -168,7 +137,7 @@ GenerateResult Client::generate(const std::string & prompt,
 
     v1::GenerateRequest request;
     request.set_prompt(prompt);
-    fill_sampling(request.mutable_sampling(), params);
+    wire::to_proto(params, request.mutable_sampling());
 
     auto reader = impl_->stub->Generate(&context, request);
     return impl_->consume(context, reader, on_chunk);
@@ -189,24 +158,12 @@ GenerateResult Client::chat(const std::vector<ChatMessage> & messages,
 
     v1::ChatRequest request;
     for (const ChatMessage & m : messages) {
-        v1::ChatMessage * out = request.add_messages();
-        out->set_role(m.role);
-        out->set_content(m.content);
-        out->set_tool_call_id(m.tool_call_id);
-        for (const ToolCall & call : m.tool_calls) {
-            v1::ToolCall * out_call = out->add_tool_calls();
-            out_call->set_id(call.id);
-            out_call->set_name(call.name);
-            out_call->set_arguments_json(call.arguments_json);
-        }
+        wire::to_proto(m, request.add_messages());
     }
     for (const Tool & t : tools) {
-        v1::Tool * out = request.add_tools();
-        out->set_name(t.name);
-        out->set_description(t.description);
-        out->set_parameters_json_schema(t.parameters_json_schema);
+        wire::to_proto(t, request.add_tools());
     }
-    fill_sampling(request.mutable_sampling(), params);
+    wire::to_proto(params, request.mutable_sampling());
 
     auto reader = impl_->stub->Chat(&context, request);
     return impl_->consume(context, reader, on_chunk);

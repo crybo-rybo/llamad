@@ -46,7 +46,7 @@ jobs:
       - name: Build daemon, client, and tests
         run: >-
           cmake --build build --parallel 2
-          --target llamad llamad-chat engine_smoke chat_format_test
+          --target llamad llamad-chat engine_smoke chat_format_test contract_test
 
       - name: Run tests
         run: ctest --test-dir build --output-on-failure --no-tests=error
