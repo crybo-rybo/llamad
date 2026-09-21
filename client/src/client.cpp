@@ -22,7 +22,7 @@ namespace {
 
 // What a tool that could not run reports back to the model.
 std::string tool_error(const std::string & message) {
-    return "{\"error\":" + json::write(message) + "}";
+    return nlohmann::json{{"error", message}}.dump();
 }
 
 // The daemon must be there already: a missing socket is an error to report, not

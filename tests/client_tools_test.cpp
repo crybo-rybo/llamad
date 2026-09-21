@@ -4,6 +4,8 @@
 #include "llamad/client.h"
 
 #include <cstdio>
+#include <cstdint>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -70,6 +72,17 @@ std::string always_fails(std::string reason) {
     throw std::runtime_error("cannot do that: " + reason);
 }
 
+int invocation_count = 0;
+
+uint32_t count_items(uint32_t count) {
+    ++invocation_count;
+    return count;
+}
+
+double non_finite_result() {
+    return std::numeric_limits<double>::infinity();
+}
+
 void test_definition() {
     client::ToolSet tools;
     tools.add<^^get_weather>();
@@ -115,14 +128,29 @@ void test_call_reports_failures() {
     const std::string unknown = tools.call({"call_0", "get_time", "{}"});
     CHECK(unknown.rfind(R"({"error":"no such tool: get_time")", 0) == 0);
 
-    const std::string malformed = tools.call({"call_1", "get_weather", R"({"city":)"});
-    CHECK(malformed.rfind(R"({"error":"json: )", 0) == 0);
-
     const std::string missing = tools.call({"call_2", "get_weather", R"({"scale":"Metric"})"});
     CHECK(missing.find("missing key 'city'") != std::string::npos);
 
     CHECK_EQ(tools.call({"call_3", "always_fails", R"({"reason":"\"reasons\""})"}),
              R"({"error":"cannot do that: \"reasons\""})");
+}
+
+void test_checked_arguments_and_results() {
+    client::ToolSet tools;
+    tools.add<^^count_items>();
+    tools.add<^^non_finite_result>();
+
+    for (const std::string arguments : {R"({"count":-1})", R"({"count":4294967296})",
+                                        R"({"count":1.5})", R"({"count":true})", "[]", R"({"count":)"}) {
+        const auto result = nlohmann::json::parse(tools.call({"call", "count_items", arguments}));
+        CHECK(result.contains("error"));
+        CHECK(result.at("error").is_string());
+    }
+    CHECK(invocation_count == 0);
+    CHECK_EQ(tools.call({"call", "count_items", R"({"count":4294967295})"}), "4294967295");
+    CHECK(invocation_count == 1);
+    const auto result = nlohmann::json::parse(tools.call({"call", "non_finite_result", "{}"}));
+    CHECK(result.at("error") == "json: non-finite number");
 }
 
 }  // namespace
@@ -131,6 +159,7 @@ int main() {
     test_definition();
     test_call();
     test_call_reports_failures();
+    test_checked_arguments_and_results();
 
     std::fprintf(stderr, "%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
