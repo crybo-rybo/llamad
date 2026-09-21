@@ -84,7 +84,7 @@ SIGINT/SIGTERM shut the daemon down and remove the socket.
 Also accepts `--socket`, `--system TEXT`, `--seed N`, `--max-tokens N`. Ctrl-C
 cancels the reply in progress; Ctrl-C or Ctrl-D at the prompt quits.
 
-`engine_smoke` drives the engine in-process, with no daemon and no gRPC:
+`./build/tests/engine_smoke` drives the engine in-process, with no daemon and no gRPC:
 `--chat` renders the prompt through the model's chat template, `--demo-tool`
 adds the same `get_current_time` tool to that rendering, and `--grammar-file
 PATH` constrains generation with a GBNF file of your own.

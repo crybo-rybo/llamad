@@ -62,9 +62,6 @@ set_target_properties(llama-common nlohmann PROPERTIES SYSTEM ON)
 target_include_directories(llamad_chat PUBLIC src)
 target_link_libraries(llamad_chat PRIVATE llama-common)
 
-add_executable(engine_smoke src/engine_smoke.cpp)
-target_link_libraries(engine_smoke PRIVATE llamad_engine llamad_chat llamad_flags)
-
 enable_testing()
 
 # Everything below needs gRPC; the engine can be built and tested without it.

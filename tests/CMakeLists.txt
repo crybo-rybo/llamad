@@ -35,3 +35,8 @@ if(TARGET llamad_client)
     target_link_libraries(client_tools_test PRIVATE llamad_client)
     add_test(NAME client_tools COMMAND client_tools_test)
 endif()
+
+# The engine and the chat layer in-process, without the daemon. It needs a model file, so it is
+# a CLI to run by hand and not a CTest test; it needs no gRPC, so it builds on every path.
+add_executable(engine_smoke engine_smoke.cpp)
+target_link_libraries(engine_smoke PRIVATE llamad_engine llamad_chat llamad_flags)

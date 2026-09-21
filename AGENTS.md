@@ -26,9 +26,8 @@ single source of truth for how things work.
 | `src/service.{h,cpp}`, `src/main.cpp` | gRPC service and the daemon: socket lifecycle, signals, proto ↔ engine type conversion. |
 | `src/cli/flags.h` | The one command-line parser and `--help` printer, over a struct whose members are a binary's flags. Target `llamad_flags` exposes only `src/cli`, so `llamad-chat` uses it without reaching a daemon header. |
 | `src/engine_flags.h` | The context and offload flags `llamad` and `engine_smoke` share, and the `EngineConfig` they describe. |
-| `src/engine_smoke.cpp` | CLI that drives the engine and chat layer in-process, with no daemon and no gRPC. |
 | `client/` | Client library (`include/llamad/client.h`, `src/client.cpp`) and `llamad-chat` (`examples/chat_cli.cpp`). `include/llamad/json.h` + `src/json.cpp` read and write a tool's arguments, its result and its JSON Schema from a type's members; `client.h` includes it, so an application still includes one header. |
-| `tests/` | Plain-executable tests registered with CTest. No model file needed. |
+| `tests/` | Plain-executable tests registered with CTest, needing no model file, and `engine_smoke.cpp`: a CLI that drives the engine and chat layer in-process, with no daemon and no gRPC. |
 | `third_party/llama.cpp` | Pinned, unmodified submodule. |
 | `models/` | Local GGUF files. Gitignored; not available in CI. |
 
@@ -41,7 +40,7 @@ ctest --test-dir build --output-on-failure
 
 ./build/llamad --model models/qwen2.5-0.5b-instruct-q4_k_m.gguf --socket /tmp/llamad-dev.sock
 ./build/client/llamad-chat --socket /tmp/llamad-dev.sock --once "Hello" --temp 0
-./build/engine_smoke --help             # engine without the daemon
+./build/tests/engine_smoke --help       # engine without the daemon
 ```
 
 `build*/` directories are gitignored. When you start a daemon for testing, give it a private
