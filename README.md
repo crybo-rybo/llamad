@@ -183,7 +183,8 @@ A tool returning `std::string` is handed to the model as it is; any other return
 is written as JSON, as are the arguments read out of a call. A tool that does not
 exist, arguments that do not parse and an exception thrown by the tool all become an
 `{"error":"..."}` result the model can recover from. The loop stops after eight rounds
-of tool calls, which the caller sees as a `ToolCalls` result.
+of tool calls, which the caller sees as a `ToolCalls` result; that limit is `chat`'s last
+argument and must be positive.
 
 Tool arguments use checked C++ conversions: integer arguments must be integers in range,
 floating-point arguments must fit their type, and enums use their enumerator names.

@@ -72,6 +72,10 @@ std::string always_fails(std::string reason) {
     throw std::runtime_error("cannot do that: " + reason);
 }
 
+std::string throws_an_int() {
+    throw 42;
+}
+
 int invocation_count = 0;
 
 uint32_t count_items(uint32_t count) {
@@ -135,6 +139,16 @@ void test_call_reports_failures() {
              R"({"error":"cannot do that: \"reasons\""})");
 }
 
+// Not every tool throws something derived from std::exception, and call() still answers in JSON.
+void test_call_survives_a_non_standard_exception() {
+    client::ToolSet tools;
+    tools.add<^^throws_an_int>();
+
+    const auto result = nlohmann::json::parse(tools.call({"call_0", "throws_an_int", "{}"}));
+    CHECK(result.contains("error"));
+    CHECK(result.at("error").is_string());
+}
+
 void test_checked_arguments_and_results() {
     client::ToolSet tools;
     tools.add<^^count_items>();
@@ -159,6 +173,7 @@ int main() {
     test_definition();
     test_call();
     test_call_reports_failures();
+    test_call_survives_a_non_standard_exception();
     test_checked_arguments_and_results();
 
     std::fprintf(stderr, "%d checks, %d failures\n", checks, failures);

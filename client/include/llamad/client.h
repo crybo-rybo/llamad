@@ -221,6 +221,7 @@ public:
     // The same loop, run here. The caller appends the user message to `history` and gets back a
     // history holding every assistant and "tool" turn the answer took, with `stats` summed over
     // the rounds. A result of ToolCalls means max_rounds was spent with the model still asking.
+    // max_rounds must be positive; anything else throws std::invalid_argument.
     GenerateResult chat(std::vector<ChatMessage> & history,
                         const ToolSet & tools,
                         const SamplingParams & params,

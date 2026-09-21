@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -47,6 +48,10 @@ std::string ToolSet::call(const ToolCall & call) const {
             return invoke_[i](call.arguments_json);
         } catch (const std::exception & e) {
             return tool_error(e.what());
+        } catch (...) {
+            // A tool may throw anything; whatever it was, the model gets a result it can read
+            // rather than an exception crossing a boundary that promises not to throw.
+            return tool_error("tool threw an unknown exception: " + call.name);
         }
     }
     return tool_error("no such tool: " + call.name);
@@ -197,6 +202,12 @@ GenerateResult Client::chat(std::vector<ChatMessage> & history,
                             const SamplingParams & params,
                             const ChunkCallback & on_chunk,
                             int max_rounds) {
+    // A round budget of nothing would answer without asking the model anything, which no caller
+    // can mean; reporting it as a successful empty answer would hide the mistake.
+    if (max_rounds <= 0) {
+        throw std::invalid_argument("chat: max_rounds must be positive");
+    }
+
     GenerateResult result{FinishReason::Eog, {}, {}};
     GenerateStats  total{};
 
