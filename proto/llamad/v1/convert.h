@@ -1,14 +1,18 @@
-#pragma once
+/** @file
+ * @brief Name-matched reflection conversion and compile-time wire-contract checks.
+ *
+ * Conversion between the messages in llamad.proto and the plain structs that mirror them on
+ * either side of the wire (engine.h and chat_format.h in the daemon, client.h in the client).
+ *
+ * A mirror struct names its fields exactly as the message does, so the mapping is derived from
+ * those names at compile time instead of being written out per field. A field the message does
+ * not have fails to compile, which is what keeps the two from drifting apart.
+ *
+ * Nothing here names a protobuf type: the message is only ever reached through the accessors
+ * protoc generates for each field `x`: x(), set_x(), has_x(), add_x() and clear_x().
+ */
 
-// Conversion between the messages in llamad.proto and the plain structs that mirror them on
-// either side of the wire (engine.h and chat_format.h in the daemon, client.h in the client).
-//
-// A mirror struct names its fields exactly as the message does, so the mapping is derived from
-// those names at compile time instead of being written out per field. A field the message does
-// not have fails to compile, which is what keeps the two from drifting apart.
-//
-// Nothing here names a protobuf type: the message is only ever reached through the accessors
-// protoc generates for each field `x`: x(), set_x(), has_x(), add_x() and clear_x().
+#pragma once
 
 #include <cstddef>
 #include <meta>
@@ -19,50 +23,59 @@
 #include <vector>
 
 namespace llamad {
+/// Reflection-based conversion between wire messages and their plain C++ mirrors.
 namespace wire {
+/// Implementation details for the enclosing reflected adapter.
 namespace detail {
 
+/// Whether a type is a specialization of std::optional.
 template <typename T> constexpr bool is_optional                   = false;
+/// Recognize the supported std::optional specialization.
 template <typename T> constexpr bool is_optional<std::optional<T>> = true;
+/// Whether a type is a specialization of std::vector.
 template <typename T> constexpr bool is_vector                     = false;
+/// Recognize the supported std::vector specialization.
 template <typename T> constexpr bool is_vector<std::vector<T>>     = true;
 
-// A `repeated` field of messages rather than of scalars: the element mirrors a message too.
+/// A `repeated` field of messages rather than of scalars: the element mirrors a message too.
 template <typename T> constexpr bool is_nested_vector                 = false;
+/// Detect repeated aggregate messages for recursive conversion.
 template <typename T> constexpr bool is_nested_vector<std::vector<T>> = std::is_aggregate_v<T>;
 
-// The element of a repeated field's container, named the way from_proto reads it out.
+/// The element of a repeated field's container, named the way from_proto reads it out.
 template <typename Container> using value_type_of = typename Container::value_type;
 
-// One of the traits above, applied to a reflected type: trait(^^is_optional, t) is
-// is_optional<[:t:]>, so the checks below classify a field exactly as the converters do.
+/// One of the traits above, applied to a reflected type: trait(^^is_optional, t) is
+/// is_optional<[:t:]>, so the checks below classify a field exactly as the converters do.
 consteval bool trait(std::meta::info variable_template, std::meta::info type) {
     return std::meta::extract<bool>(std::meta::substitute(variable_template, {type}));
 }
 
-// std::optional<U> and std::vector<U> each hold one U.
+/// `std::optional<U>` and `std::vector<U>` each hold one U.
 consteval std::meta::info held_type(std::meta::info type) {
     return std::meta::template_arguments_of(type)[0];
 }
 
-// The three walks below only ever look at what a caller of the message could call anyway.
-// define_static_array outlives the constant evaluation that builds the list, so `template for`
-// can iterate it.
+/// The three walks below only ever look at what a caller of the message could call anyway.
+/// define_static_array outlives the constant evaluation that builds the list, so `template for`
+/// can iterate it.
 consteval auto fields_of(std::meta::info type) {
     return std::define_static_array(
         std::meta::nonstatic_data_members_of(type, std::meta::access_context::unprivileged()));
 }
 
+/// Materialize enum reflections with static lifetime for expansion statements.
 consteval auto values_of(std::meta::info enum_type) {
     return std::define_static_array(std::meta::enumerators_of(enum_type));
 }
 
+/// Enumerate publicly accessible generated message members.
 consteval auto members_of(std::meta::info type) {
     return std::meta::members_of(type, std::meta::access_context::unprivileged());
 }
 
-// The null reflection when `message` has no such accessor. Overloads differ by arity
-// (stop() and stop(int)); setters that take a string are function templates.
+/// The null reflection when `message` has no such accessor. Overloads differ by arity
+/// (stop() and stop(int)); setters that take a string are function templates.
 consteval std::meta::info find_accessor(std::meta::info message, std::string_view name, size_t arity) {
     std::meta::info function_template{};
     for (std::meta::info member : members_of(message)) {
@@ -78,6 +91,7 @@ consteval std::meta::info find_accessor(std::meta::info message, std::string_vie
     return arity > 0 ? function_template : std::meta::info{};
 }
 
+/// Resolve a field accessor or fail constant evaluation with a contract-drift diagnostic.
 consteval std::meta::info accessor(std::meta::info message, std::string_view prefix, std::meta::info field,
                                    size_t arity) {
     const std::string name = std::string(prefix) + std::string(std::meta::identifier_of(field));
@@ -90,8 +104,8 @@ consteval std::meta::info accessor(std::meta::info message, std::string_view pre
     return found;
 }
 
-// One field of a mirror struct against the message: same name, same presence, same value type.
-// Throws, so the caller's constant evaluation fails with a message naming what disagrees.
+/// One field of a mirror struct against the message: same name, same presence, same value type.
+/// Throws, so the caller's constant evaluation fails with a message naming what disagrees.
 consteval void check_field(std::meta::info message, std::meta::info field) {
     const std::string     name   = std::string(std::meta::identifier_of(field));
     const std::string     drift  = ": the struct and llamad.proto have drifted apart";
@@ -147,6 +161,7 @@ consteval void check_field(std::meta::info message, std::meta::info field) {
     }
 }
 
+/// Invoke a generated setter, accounting for protobuf string setter templates.
 template <std::meta::info Function, typename P, typename V>
 void call(P * out, const V & value) {
     if constexpr (std::meta::is_function_template(Function)) {
@@ -156,7 +171,7 @@ void call(P * out, const V & value) {
     }
 }
 
-// "FinishReason" -> "FINISH_REASON_", the prefix protobuf style puts on every value of the enum.
+/// "FinishReason" -> "FINISH_REASON_", the prefix protobuf style puts on every value of the enum.
 consteval std::string value_prefix(std::meta::info enum_type) {
     std::string out;
     for (char c : std::meta::identifier_of(enum_type)) {
@@ -168,14 +183,14 @@ consteval std::string value_prefix(std::meta::info enum_type) {
     return out + '_';
 }
 
-// The enumerator's name without that prefix: "TOOL_CALLS" for FINISH_REASON_TOOL_CALLS.
+/// The enumerator's name without that prefix: "TOOL_CALLS" for FINISH_REASON_TOOL_CALLS.
 consteval std::string_view short_name(std::meta::info enumerator) {
     const std::string_view name   = std::meta::identifier_of(enumerator);
     const std::string      prefix = value_prefix(std::meta::parent_of(enumerator));
     return name.starts_with(prefix) ? name.substr(prefix.size()) : name;
 }
 
-// Spelling differences between the two sides disappear: ToolCalls and TOOL_CALLS are "toolcalls".
+/// Spelling differences between the two sides disappear: ToolCalls and TOOL_CALLS are "toolcalls".
 consteval std::string folded_name(std::meta::info enumerator) {
     std::string out;
     for (char c : short_name(enumerator)) {
@@ -186,6 +201,7 @@ consteval std::string folded_name(std::meta::info enumerator) {
     return out;
 }
 
+/// Find the enumerator with the same normalized name, or return the null reflection.
 consteval std::meta::info same_value_in(std::meta::info enum_type, std::meta::info enumerator) {
     for (std::meta::info candidate : std::meta::enumerators_of(enum_type)) {
         if (folded_name(candidate) == folded_name(enumerator)) {
@@ -197,6 +213,11 @@ consteval std::meta::info same_value_in(std::meta::info enum_type, std::meta::in
 
 }  // namespace detail
 
+/// Populate name-matched message fields from a plain mirror struct.
+/// @param in Source mirror.
+/// @param out Non-null destination message; use an empty message for a fresh conversion.
+/// Repeated fields append and unset optionals leave the destination unchanged.
+/// Missing accessors fail constant evaluation rather than silently dropping data.
 template <typename T, typename P>
 void to_proto(const T & in, P * out) {
     template for (constexpr std::meta::info field : detail::fields_of(^^T)) {
@@ -226,6 +247,9 @@ void to_proto(const T & in, P * out) {
     }
 }
 
+/// Construct a mirror from name-matched message accessors.
+/// Absent optionals stay unset and repeated messages convert recursively.
+/// @tparam T Plain mirror with compatible names, field types and default initialization.
 template <typename T, typename P>
 T from_proto(const P & in) {
     T out;
@@ -251,11 +275,11 @@ T from_proto(const P & in) {
     return out;
 }
 
-// True when T and message P have exactly the same fields, each with the same presence —
-// std::optional against a proto3 `optional` — and the same value type; a compile error naming the
-// field and what disagrees otherwise. to_proto and from_proto already reject a struct field the
-// message lacks; this also catches a field added to the message and not to the struct, and one
-// that agrees by name while narrowing or dropping the value it carries.
+/// True when T and message P have exactly the same fields, each with the same presence —
+/// std::optional against a proto3 `optional` — and the same value type; a compile error naming the
+/// field and what disagrees otherwise. to_proto and from_proto already reject a struct field the
+/// message lacks; this also catches a field added to the message and not to the struct, and one
+/// that agrees by name while narrowing or dropping the value it carries.
 template <typename T, typename P>
 consteval bool mirrors() {
     // Every field of the struct is a field of the message and matches it, or check_field throws.
@@ -263,7 +287,7 @@ consteval bool mirrors() {
         detail::check_field(^^P, field);
     }
 
-    // And the other way round: protoc gives every field of a message its own clear_<name>().
+    /// And the other way round: protoc gives every field of a message its own clear_<name>().
     constexpr std::string_view clear = "clear_";
     for (std::meta::info member : detail::members_of(^^P)) {
         if (!std::meta::is_function(member) || !std::meta::has_identifier(member) ||
@@ -285,8 +309,8 @@ consteval bool mirrors() {
     return true;
 }
 
-// The same check as a value: true where mirrors<T, P>() is the compile error instead. It is how
-// contract_test asserts that a struct deliberately out of step with its message is rejected.
+/// The same check as a value: true where mirrors<T, P>() is the compile error instead. It is how
+/// contract_test asserts that a struct deliberately out of step with its message is rejected.
 template <typename T, typename P>
 consteval bool drifted() {
     try {
@@ -296,9 +320,9 @@ consteval bool drifted() {
     }
 }
 
-// Converts between an enum in llamad.proto and its plain twin by value name, ignoring the
-// FINISH_REASON_ style prefix and case: FINISH_REASON_TOOL_CALLS is FinishReason::ToolCalls.
-// Every value of From must exist in To, or the call does not compile.
+/// Converts between an enum in llamad.proto and its plain twin by value name, ignoring the
+/// FINISH_REASON_ style prefix and case: FINISH_REASON_TOOL_CALLS is FinishReason::ToolCalls.
+/// Every value of From must exist in To, or the call does not compile.
 template <typename To, typename From>
 constexpr To enum_cast(From value) {
     template for (constexpr std::meta::info enumerator : detail::values_of(^^From)) {
@@ -311,7 +335,7 @@ constexpr To enum_cast(From value) {
     return To{};
 }
 
-// The same, for a From with values To lacks (UNSPECIFIED, or one from a later daemon).
+/// The same, for a From with values To lacks (UNSPECIFIED, or one from a later daemon).
 template <typename To, typename From>
 constexpr To enum_cast(From value, To fallback) {
     template for (constexpr std::meta::info enumerator : detail::values_of(^^From)) {
@@ -325,7 +349,7 @@ constexpr To enum_cast(From value, To fallback) {
     return fallback;
 }
 
-// The value's name as llamad.proto spells it, without the prefix: "TOOL_CALLS".
+/// The value's name as llamad.proto spells it, without the prefix: "TOOL_CALLS".
 template <typename E>
 const char * value_name(E value) {
     template for (constexpr std::meta::info enumerator : detail::values_of(^^E)) {

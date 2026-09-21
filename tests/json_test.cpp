@@ -1,5 +1,9 @@
-// The client's reflection adapter: field mapping, conversion policies and tool schemas.
-// JSON syntax and escaping belong to nlohmann's tests. No daemon or model is needed here.
+/** @file
+ * @brief Checked JSON conversion, enum names, optional presence and generated schemas.
+ *
+ * The client's reflection adapter: field mapping, conversion policies and tool schemas.
+ * JSON syntax and escaping belong to nlohmann's tests. No daemon or model is needed here.
+ */
 
 #include "llamad/json.h"
 

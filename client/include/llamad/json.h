@@ -1,11 +1,15 @@
-#pragma once
+/** @file
+ * @brief Checked JSON conversion and schema generation for reflected C++ types.
+ *
+ * Reflection over tool arguments, results and schemas. nlohmann handles JSON syntax and
+ * serialization; this adapter maps ordinary C++ types to it, with checked numeric conversions.
+ * Values are strings, booleans, numbers, enums, optionals, vectors and aggregate structs.
+ * Unknown keys are ignored, missing required members are errors, and absent or null optionals
+ * are unset. Enums use their names; unset optional members are omitted when writing objects.
+ * Whatever a type cannot take, in either direction, is a json::Error.
+ */
 
-// Reflection over tool arguments, results and schemas. nlohmann handles JSON syntax and
-// serialization; this adapter maps ordinary C++ types to it, with checked numeric conversions.
-// Values are strings, booleans, numbers, enums, optionals, vectors and aggregate structs.
-// Unknown keys are ignored, missing required members are errors, and absent or null optionals
-// are unset. Enums use their names; unset optional members are omitted when writing objects.
-// Whatever a type cannot take, in either direction, is a json::Error.
+#pragma once
 
 #include <cmath>
 #include <cstddef>
@@ -26,13 +30,14 @@
 namespace llamad {
 namespace client {
 
-// A description of the thing it annotates: a tool function, one of its parameters, or a member
-// of a struct, where it becomes the "description" of the schema property. The text is a char
-// array because an annotation's value has to be of a structural type.
+/// A description of the thing it annotates: a tool function, one of its parameters, or a member
+/// of a struct, where it becomes the "description" of the schema property. The text is a char
+/// array because an annotation's value has to be of a structural type.
 template <std::size_t N>
 struct desc {
-    char text[N];
+    char text[N];  ///< Null-terminated description copied from the annotation literal.
 
+    /// Copy a string literal into a structural annotation value.
     consteval desc(const char (&literal)[N]) {
         for (std::size_t i = 0; i < N; ++i) {
             text[i] = literal[i];
@@ -40,42 +45,51 @@ struct desc {
     }
 };
 
+/// Checked conversion and JSON schemas for reflected tool arguments and results.
 namespace json {
 
-// Thrown by read() for text that is not JSON or does not fit the type, and by write() for a value
-// JSON cannot carry. nlohmann's own exceptions stay behind this header.
+/// Thrown by read() for text that is not JSON or does not fit the type, and by write() for a value
+/// JSON cannot carry. nlohmann's own exceptions stay behind this header.
 struct Error : std::runtime_error {
+    /// Prefix a conversion failure with its JSON context.
     explicit Error(const std::string & message) : std::runtime_error("json: " + message) {}
 };
 
+/// Implementation details for the enclosing reflected adapter.
 namespace detail {
 
-// Declaration order is also the order presented to the model in its tool schema.
+/// Declaration order is also the order presented to the model in its tool schema.
 using Json = nlohmann::ordered_json;
 
+/// Whether a type is a specialization of std::optional.
 template <typename T> constexpr bool is_optional                   = false;
+/// Recognize the supported std::optional specialization.
 template <typename T> constexpr bool is_optional<std::optional<T>> = true;
+/// Whether a type is a specialization of std::vector.
 template <typename T> constexpr bool is_vector                     = false;
+/// Recognize the supported std::vector specialization.
 template <typename T> constexpr bool is_vector<std::vector<T>>     = true;
 
-// define_static_array outlives the constant evaluation that builds the list, so `template for`
-// can iterate it.
+/// define_static_array outlives the constant evaluation that builds the list, so `template for`
+/// can iterate it.
 consteval auto fields_of(std::meta::info type) {
     return std::define_static_array(
         std::meta::nonstatic_data_members_of(type, std::meta::access_context::unprivileged()));
 }
 
+/// Materialize enum reflections with static lifetime for expansion statements.
 consteval auto values_of(std::meta::info enum_type) {
     return std::define_static_array(std::meta::enumerators_of(enum_type));
 }
 
+/// Recognize a client::desc annotation by its template identity.
 consteval bool is_desc(std::meta::info annotation) {
     const std::meta::info type = std::meta::type_of(annotation);
     return std::meta::has_template_arguments(type) && std::meta::template_of(type) == ^^client::desc;
 }
 
-// The text of X's desc annotation, or "" when it has none. X is a member, a parameter or a
-// function.
+/// The text of X's desc annotation, or "" when it has none. X is a member, a parameter or a
+/// function.
 template <std::meta::info X>
 consteval const char * description() {
     template for (constexpr std::meta::info annotation :
@@ -88,6 +102,7 @@ consteval const char * description() {
     return std::define_static_string(std::string_view());
 }
 
+/// Assign a parsed JSON value using exact type and range checks; mutations may be partial.
 template <typename T>
 void read_value(const Json & in, T & out) {
     if constexpr (is_optional<T>) {
@@ -172,6 +187,7 @@ void read_value(const Json & in, T & out) {
     }
 }
 
+/// Convert supported C++ results, rejecting non-finite numbers and unnamed enum values.
 template <typename T>
 Json write_value(const T & value) {
     if constexpr (is_optional<T>) {
@@ -217,9 +233,11 @@ Json write_value(const T & value) {
     }
 }
 
+/// Build the JSON Schema for a scalar, optional, vector or reflected aggregate type.
 template <typename T>
 Json type_schema();
 
+/// Build ordered aggregate properties; supplied descriptions override member annotations.
 template <typename T>
 Json object_schema(std::span<const char * const> descriptions) {
     Json out = {{"type", "object"}, {"properties", Json::object()}, {"required", Json::array()}};
@@ -266,8 +284,8 @@ Json type_schema() {
     }
 }
 
-// A tool's result may hold bytes that are not UTF-8 (file contents, another program's output).
-// They are written as U+FFFD, so the model still gets the rest of the result.
+/// A tool's result may hold bytes that are not UTF-8 (file contents, another program's output).
+/// They are written as U+FFFD, so the model still gets the rest of the result.
 inline std::string dump(const Json & value) {
     return value.dump(/*indent*/ -1, /*indent_char*/ ' ', /*ensure_ascii*/ false,
                       Json::error_handler_t::replace);
@@ -275,6 +293,12 @@ inline std::string dump(const Json & value) {
 
 }  // namespace detail
 
+/// Parse JSON and assign it to a supported C++ value.
+/// @tparam T String, boolean, number, enum, optional, vector or aggregate of supported types.
+/// @param text JSON input; it need not be null-terminated.
+/// @param out Destination; a conversion failure may leave it partially updated.
+/// @throws Error For syntax, missing required members, wrong types or out-of-range numbers.
+/// Unknown keys are ignored; missing or null optionals are reset. Enum values use names.
 template <typename T>
 void read(std::string_view text, T & out) {
     // read_value checks what kind of value it holds before taking it, so the parse is the one
@@ -288,13 +312,20 @@ void read(std::string_view text, T & out) {
     detail::read_value(value, out);
 }
 
+/// Serialize a supported result to compact JSON; unset optional object members are omitted.
+/// Invalid UTF-8 bytes are replaced with U+FFFD.
+/// @tparam T String, boolean, number, enum, optional, vector or aggregate of supported types.
+/// @throws Error For non-finite or out-of-range numbers and unnamed enum values.
 template <typename T>
 std::string write(const T & value) {
     return detail::dump(detail::write_value(value));
 }
 
-// Non-optional members are required; descriptions override member annotations positionally for
-// the aggregate synthesised from a tool function's parameter list.
+/// Build the JSON object schema of a reflected aggregate.
+/// Non-optional members are required; descriptions override member annotations positionally for
+/// the aggregate synthesised from a tool function's parameter list.
+/// @tparam T Aggregate whose public members have supported JSON types.
+/// @param descriptions Optional member descriptions in declaration order; missing entries use annotations.
 template <typename T>
 std::string schema(std::span<const char * const> descriptions = {}) {
     return detail::dump(detail::object_schema<T>(descriptions));

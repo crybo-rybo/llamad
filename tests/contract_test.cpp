@@ -1,6 +1,10 @@
-// The structs in engine.h, chat_format.h and client.h mirror messages in llamad.proto field for
-// field. This is the one place all four are visible at once, so it is where that is checked: a
-// field added, removed or renamed on either side fails the build here rather than at a call site.
+/** @file
+ * @brief Compile-time and runtime checks that wire messages and plain structs mirror exactly.
+ *
+ * The structs in engine.h, chat_format.h and client.h mirror messages in llamad.proto field for
+ * field. This is the one place all four are visible at once, so it is where that is checked: a
+ * field added, removed or renamed on either side fails the build here rather than at a call site.
+ */
 
 #include <cstdint>
 #include <cstdio>

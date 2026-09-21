@@ -1,3 +1,7 @@
+/** @file
+ * @brief Private gRPC transport and the client-owned tool execution loop.
+ */
+
 #include "llamad/client.h"
 
 #include <cstdlib>
@@ -17,22 +21,24 @@ namespace llamad {
 namespace client {
 namespace {
 
+/// Translate a failed transport status into the public client exception.
 [[noreturn]] void throw_rpc_error(const grpc::Status & status) {
     throw RpcError(static_cast<int>(status.error_code()), status.error_message());
 }
 
-// What a tool that could not run reports back to the model: {"error":"..."}.
+/// What a tool that could not run reports back to the model: {"error":"..."}.
 struct ToolError {
-    std::string error;
+    std::string error;  ///< Failure text visible to the model.
 };
 
+/// Encode a recoverable tool failure as an error object for the model.
 std::string tool_error(const std::string & message) {
     return json::write(ToolError{message});
 }
 
-// The daemon must be there already: a missing socket is an error to report, not
-// something to wait on, so wait_for_ready stays off (the gRPC default, set
-// explicitly here because it is the whole point of the fail-fast behaviour).
+/// The daemon must be there already: a missing socket is an error to report, not
+/// something to wait on, so wait_for_ready stays off (the gRPC default, set
+/// explicitly here because it is the whole point of the fail-fast behaviour).
 void init_context(grpc::ClientContext & context) {
     context.set_wait_for_ready(false);
 }
@@ -57,11 +63,12 @@ std::string ToolSet::call(const ToolCall & call) const {
     return tool_error("no such tool: " + call.name);
 }
 
+/// Keep transport types private and consume synchronous server streams.
 struct Client::Impl {
-    std::shared_ptr<grpc::Channel>    channel;
-    std::unique_ptr<v1::Llama::Stub>  stub;
+    std::shared_ptr<grpc::Channel>    channel;  ///< Shared Unix-domain gRPC channel.
+    std::unique_ptr<v1::Llama::Stub>  stub;     ///< Generated service stub owned by the client.
 
-    // Runs a server-streaming call to completion, honouring cancellation.
+    /// Runs a server-streaming call to completion, honouring cancellation.
     template <typename Reader>
     GenerateResult consume(grpc::ClientContext & context,
                            Reader & reader,

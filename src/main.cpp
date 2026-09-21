@@ -1,6 +1,10 @@
-// llamad: hosts one llama.cpp model and serves it over gRPC on a Unix domain
-// socket. There is no TCP listener, by design: access control is the socket's
-// file permissions.
+/** @file
+ * @brief Daemon entry point, private Unix socket lifecycle and signal-driven shutdown.
+ *
+ * llamad: hosts one llama.cpp model and serves it over gRPC on a Unix domain
+ * socket. There is no TCP listener, by design: access control is the socket's
+ * file permissions.
+ */
 
 #include <algorithm>
 #include <cerrno>
@@ -36,26 +40,30 @@ namespace {
 
 using llamad::cli::help;
 
+/// Options specific to this executable; shared flags are composed separately.
 struct Options {
     [[=help{"PATH", "GGUF model to load (required)"}]]
-    std::string model;
+    std::string model;  ///< GGUF model to load (required).
 
     [[=help{"PATH", "unix socket to listen on\n"
                     "(default: $XDG_RUNTIME_DIR/llamad.sock, else /tmp/llamad-<uid>.sock)"}]]
-    std::optional<std::string> socket;
+    std::optional<std::string> socket;  ///< Unix socket path; empty uses the per-user default.
 };
 
+/// Print usage and reflected flag descriptions to stderr.
 void print_usage(const char * argv0) {
     std::fprintf(stderr, "usage: %s --model PATH [options]\n\n", argv0);
     llamad::cli::print_flags(stderr, Options{}, llamad::EngineFlags{}, llamad::cli::HelpFlag{});
 }
 
+/// Format a byte count in binary gibibytes.
 std::string format_gib(uint64_t bytes) {
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%.1f GiB", static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0));
     return buf;
 }
 
+/// Print backend devices and memory without loading a model.
 void print_device_table() {
     const std::vector<llamad::DeviceInfo> devices = llamad::Engine::list_devices();
     if (devices.empty()) {
@@ -79,6 +87,7 @@ void print_device_table() {
     }
 }
 
+/// Select the per-user runtime socket path with a UID-based temporary fallback.
 std::string default_socket_path() {
     const char * runtime_dir = std::getenv("XDG_RUNTIME_DIR");
     if (runtime_dir != nullptr && runtime_dir[0] != '\0') {
@@ -87,8 +96,8 @@ std::string default_socket_path() {
     return "/tmp/llamad-" + std::to_string(static_cast<unsigned>(getuid())) + ".sock";
 }
 
-// True if something is listening on `path` right now. A plain connect(2) is the
-// cheapest possible liveness probe and needs no gRPC machinery.
+/// True if something is listening on `path` right now. A plain connect(2) is the
+/// cheapest possible liveness probe and needs no gRPC machinery.
 bool socket_is_live(const std::string & path) {
     const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -107,7 +116,7 @@ bool socket_is_live(const std::string & path) {
     return live;
 }
 
-// Returns false (after printing why) if the path cannot be used.
+/// Returns false (after printing why) if the path cannot be used.
 bool prepare_socket_path(const std::string & path) {
     // Leave room for the NUL; sun_path's capacity depends on the platform.
     if (path.size() >= sizeof(sockaddr_un{}.sun_path)) {
@@ -145,6 +154,8 @@ bool prepare_socket_path(const std::string & path) {
 
 }  // namespace
 
+/// Run the executable.
+/// @return Zero on success, two for invalid command-line usage, or one for a runtime failure.
 int main(int argc, char ** argv) {
     Options               options;
     llamad::EngineFlags   engine_flags;

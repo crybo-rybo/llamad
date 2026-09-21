@@ -1,109 +1,127 @@
+/** @file
+ * @brief Engine-agnostic v1 wire contract for the local llamad service.
+ */
+
 syntax = "proto3";
 
 package llamad.v1;
 
-// Typed, streaming interface to a single llama.cpp model hosted by the llamad daemon.
-// Messages are deliberately engine-agnostic: nothing here depends on how the daemon
-// runs inference, so the engine can change without breaking clients.
+/// Typed, streaming interface to a single llama.cpp model hosted by the llamad daemon.
+/// Messages are deliberately engine-agnostic: nothing here depends on how the daemon
+/// runs inference, so the engine can change without breaking clients.
 service Llama {
+  /// Return metadata without running inference.
   rpc GetModelInfo(GetModelInfoRequest) returns (ModelInfo);
+  /// Tokenize text without generating output.
   rpc Tokenize(TokenizeRequest) returns (TokenizeResponse);
 
-  // Completes a raw prompt. No chat template is applied.
+  /// Completes a raw prompt. No chat template is applied.
   rpc Generate(GenerateRequest) returns (stream GenerateChunk);
 
-  // Formats messages with the model's built-in chat template, then generates.
+  /// Formats messages with the model's built-in chat template, then generates.
   rpc Chat(ChatRequest) returns (stream GenerateChunk);
 }
 
+/// Empty request for metadata about the one loaded model.
 message GetModelInfoRequest {}
 
+/// Model metadata and the actual daemon context capacity.
 message ModelInfo {
-  string description = 1;      // e.g. "qwen2 0.5B Q4_K - Medium"
-  uint64 n_params = 2;
-  uint64 size_bytes = 3;
-  uint32 n_ctx = 4;            // context size the daemon was started with
-  uint32 n_ctx_train = 5;      // context size the model was trained with
-  bool has_chat_template = 6;
+  string description = 1;      ///< e.g. "qwen2 0.5B Q4_K - Medium"
+  uint64 n_params = 2;  ///< Number of parameters in the loaded model.
+  uint64 size_bytes = 3;  ///< Model tensor size in bytes.
+  uint32 n_ctx = 4;            ///< context size the daemon was started with
+  uint32 n_ctx_train = 5;      ///< context size the model was trained with
+  bool has_chat_template = 6;  ///< Whether a template is stored; successful parsing is a separate capability check.
 }
 
+/// Text and explicit special-token handling controls.
 message TokenizeRequest {
-  string text = 1;
-  bool add_special = 2;        // add BOS/EOS as the model expects
-  bool parse_special = 3;      // treat special-token text (e.g. "<|im_start|>") as tokens
+  string text = 1;  ///< Text to tokenize.
+  bool add_special = 2;        ///< add BOS/EOS as the model expects
+  bool parse_special = 3;      ///< treat special-token text (e.g. "<|im_start|>") as tokens
 }
 
+/// Ordered token IDs from the loaded vocabulary.
 message TokenizeResponse {
-  repeated int32 tokens = 1;
+  repeated int32 tokens = 1;  ///< Token IDs in input order.
 }
 
-// Unset optional fields fall back to the daemon defaults noted below.
+/// Unset optional fields fall back to the daemon defaults noted below.
 message SamplingParams {
-  optional float temperature = 1;   // default 0.8; <= 0 means greedy
-  optional int32 top_k = 2;         // default 40; <= 0 disables
-  optional float top_p = 3;         // default 0.95; >= 1 disables
-  optional float min_p = 4;         // default 0.05; <= 0 disables
-  optional uint32 seed = 5;         // default: random
-  optional int32 max_tokens = 6;    // default: until context is full
-  repeated string stop = 7;         // generation ends before any of these strings
+  optional float temperature = 1;   ///< default 0.8; <= 0 means greedy
+  optional int32 top_k = 2;         ///< default 40; <= 0 disables
+  optional float top_p = 3;         ///< default 0.95; >= 1 disables
+  optional float min_p = 4;         ///< default 0.05; <= 0 disables
+  optional uint32 seed = 5;         ///< default: random
+  optional int32 max_tokens = 6;    ///< default: until context is full
+  repeated string stop = 7;         ///< generation ends before any of these strings
 }
 
+/// Raw prompt and optional sampling overrides.
 message GenerateRequest {
-  string prompt = 1;
-  SamplingParams sampling = 2;
+  string prompt = 1;  ///< Raw model input; no chat template is applied.
+  SamplingParams sampling = 2;  ///< Unset fields use the daemon defaults.
 }
 
-// A tool the model may call. The daemon never executes tools and keeps no registry:
-// definitions travel with each request, and the caller runs the tool and sends the
-// result back as a "tool" message.
+/// A tool the model may call. The daemon never executes tools and keeps no registry:
+/// definitions travel with each request, and the caller runs the tool and sends the
+/// result back as a "tool" message.
 message Tool {
-  string name = 1;
-  string description = 2;
-  string parameters_json_schema = 3;  // JSON Schema object for the arguments, as a JSON string
+  string name = 1;  ///< Tool function name.
+  string description = 2;  ///< Human-readable description.
+  string parameters_json_schema = 3;  ///< JSON Schema object for the arguments, as a JSON string
 }
 
+/// One complete function call whose ID links its result to the assistant turn.
 message ToolCall {
-  string id = 1;               // assigned by the daemon; echo it back in the "tool" message's tool_call_id
-  string name = 2;
-  string arguments_json = 3;   // complete, valid JSON object
+  string id = 1;               ///< assigned by the daemon; echo it back in the "tool" message's tool_call_id
+  string name = 2;  ///< Tool function name.
+  string arguments_json = 3;   ///< complete, valid JSON object
 }
 
+/// One history turn; roles and tool-call IDs are interpreted by the model template.
 message ChatMessage {
-  string role = 1;             // "system" | "user" | "assistant" | "tool"
-  string content = 2;
-  repeated ToolCall tool_calls = 3;  // assistant turns being replayed from history
-  string tool_call_id = 4;           // role "tool": the call this message answers
+  string role = 1;             ///< "system" | "user" | "assistant" | "tool"
+  string content = 2;  ///< Turn text, or an opaque result string for role tool.
+  repeated ToolCall tool_calls = 3;  ///< assistant turns being replayed from history
+  string tool_call_id = 4;           ///< role "tool": the call this message answers
 }
 
+/// Complete conversation and request-local tool definitions.
 message ChatRequest {
-  repeated ChatMessage messages = 1;
-  SamplingParams sampling = 2;
-  repeated Tool tools = 3;
+  repeated ChatMessage messages = 1;  ///< Entire ordered conversation; must not be empty.
+  SamplingParams sampling = 2;  ///< Unset fields use the daemon defaults.
+  repeated Tool tools = 3;  ///< Tools available in this request; the daemon never executes them.
 }
 
+/// Why generation ended; UNSPECIFIED marks an ordinary text chunk.
 enum FinishReason {
-  FINISH_REASON_UNSPECIFIED = 0;
-  FINISH_REASON_EOG = 1;        // model emitted an end-of-generation token
-  FINISH_REASON_LENGTH = 2;     // max_tokens or context limit reached
-  FINISH_REASON_STOP = 3;       // a stop string matched
-  FINISH_REASON_CANCELLED = 4;  // client cancelled
-  FINISH_REASON_TOOL_CALLS = 5; // the model asked for one or more tools
+  FINISH_REASON_UNSPECIFIED = 0;  ///< Text chunk; generation is still in progress.
+  FINISH_REASON_EOG = 1;        ///< model emitted an end-of-generation token
+  FINISH_REASON_LENGTH = 2;     ///< max_tokens or context limit reached
+  FINISH_REASON_STOP = 3;       ///< a stop string matched
+  FINISH_REASON_CANCELLED = 4;  ///< client cancelled
+  FINISH_REASON_TOOL_CALLS = 5; ///< the model asked for one or more tools
 }
 
+/// Token counts and wall-clock milliseconds, excluding time queued for the engine.
 message GenerateStats {
-  int32 prompt_tokens = 1;
-  int32 completion_tokens = 2;
-  double prompt_ms = 3;
-  double completion_ms = 4;
+  int32 prompt_tokens = 1;  ///< Decoded prompt tokens including special tokens.
+  int32 completion_tokens = 2;  ///< Generated non-EOG tokens, including withheld stop and tool markup.
+  double prompt_ms = 3;  ///< Prompt decoding wall time in milliseconds.
+  double completion_ms = 4;  ///< Generation wall time in milliseconds including streaming callbacks.
 }
 
-// A stream is zero or more chunks carrying `text`, then exactly one final chunk
-// with `finish_reason` and `stats` set (its `text` may be empty). Tool calls ride
-// that same final chunk, whole and never as fragments; `text` chunks only ever
-// carry user-visible content, never tool-call markup.
+/// A successful stream is zero or more chunks carrying `text`, then exactly one final chunk
+/// with `finish_reason` and `stats` set (its `text` may be empty). Tool calls ride
+/// that same final chunk, whole and never as fragments; `text` chunks only ever
+/// carry user-visible content, never tool-call markup. Transport failure or cancellation
+/// can end the stream before the final chunk; tool_calls is non-empty iff the final
+/// finish_reason is FINISH_REASON_TOOL_CALLS.
 message GenerateChunk {
-  string text = 1;
-  FinishReason finish_reason = 2;
-  GenerateStats stats = 3;
-  repeated ToolCall tool_calls = 4;  // only ever set on the final chunk
+  string text = 1;  ///< User-visible output, excluding recognized tool markup and matched stops.
+  FinishReason finish_reason = 2;  ///< UNSPECIFIED on text chunks; a concrete reason on the single final chunk.
+  GenerateStats stats = 3;  ///< Present on the final chunk; counts and timings for this generation.
+  repeated ToolCall tool_calls = 4;  ///< only ever set on the final chunk
 }

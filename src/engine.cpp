@@ -1,3 +1,7 @@
+/** @file
+ * @brief Model ownership, device selection, sampling and safe streaming through libllama.
+ */
+
 #include "engine.h"
 
 #include "ggml-backend.h"
@@ -24,9 +28,9 @@ namespace {
 // llama.cpp / ggml logging: only warnings and errors reach stderr.
 // ---------------------------------------------------------------------------
 
-// GGML_LOG_LEVEL_CONT means "continuation of the previous log line", so its own
-// level carries no information: remember the level of the last real line and let
-// continuations inherit it.
+/// GGML_LOG_LEVEL_CONT means "continuation of the previous log line", so its own
+/// level carries no information: remember the level of the last real line and let
+/// continuations inherit it.
 void log_callback(ggml_log_level level, const char * text, void * /*user_data*/) {
     // ggml logs from worker threads too, so keep the remembered level atomic.
     static std::atomic<int> last_level{GGML_LOG_LEVEL_NONE};
@@ -43,6 +47,7 @@ void log_callback(ggml_log_level level, const char * text, void * /*user_data*/)
     }
 }
 
+/// Initialize backend registration and logging once across all Engine instances.
 void init_llama_once() {
     static std::once_flag once;
     std::call_once(once, [] {
@@ -56,8 +61,8 @@ void init_llama_once() {
 // Devices
 // ---------------------------------------------------------------------------
 
-// `ggml_backend_dev_type` names both the enum and a function, and the function
-// hides the type, so the type always needs its elaborated `enum` form here.
+/// `ggml_backend_dev_type` names both the enum and a function, and the function
+/// hides the type, so the type always needs its elaborated `enum` form here.
 const char * device_type_name(enum ggml_backend_dev_type type) {
     switch (type) {
         case GGML_BACKEND_DEVICE_TYPE_CPU:   return "cpu";
@@ -69,17 +74,19 @@ const char * device_type_name(enum ggml_backend_dev_type type) {
     return "unknown";
 }
 
+/// Return the backend's device identifier, or empty when unavailable.
 std::string device_name(ggml_backend_dev_t dev) {
     const char * name = ggml_backend_dev_name(dev);
     return name != nullptr ? std::string(name) : std::string();
 }
 
+/// Return the backend's human-readable device description, or empty.
 std::string device_description(ggml_backend_dev_t dev) {
     const char * desc = ggml_backend_dev_description(dev);
     return desc != nullptr ? std::string(desc) : std::string();
 }
 
-// Every device the compiled-in backends registered, in backend order.
+/// Every device the compiled-in backends registered, in backend order.
 std::vector<ggml_backend_dev_t> all_devices() {
     std::vector<ggml_backend_dev_t> out;
     const size_t n = ggml_backend_dev_count();
@@ -93,6 +100,7 @@ std::vector<ggml_backend_dev_t> all_devices() {
     return out;
 }
 
+/// Format the selected device identifiers for configuration diagnostics.
 std::string join_device_names(const std::vector<ggml_backend_dev_t> & devices) {
     std::string out;
     for (ggml_backend_dev_t dev : devices) {
@@ -104,8 +112,8 @@ std::string join_device_names(const std::vector<ggml_backend_dev_t> & devices) {
     return out;
 }
 
-// The devices llama.cpp offloads to when no explicit list is given: every
-// discrete GPU, or the integrated GPUs if there is no discrete one.
+/// The devices llama.cpp offloads to when no explicit list is given: every
+/// discrete GPU, or the integrated GPUs if there is no discrete one.
 std::vector<ggml_backend_dev_t> default_offload_devices(const std::vector<ggml_backend_dev_t> & devices) {
     std::vector<ggml_backend_dev_t> gpus;
     std::vector<ggml_backend_dev_t> igpus;
@@ -119,19 +127,21 @@ std::vector<ggml_backend_dev_t> default_offload_devices(const std::vector<ggml_b
     return gpus.empty() ? igpus : gpus;
 }
 
+/// Classify discrete and integrated GPUs as offload-capable devices.
 bool is_gpu_device(ggml_backend_dev_t dev) {
     const enum ggml_backend_dev_type type = ggml_backend_dev_type(dev);
     return type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU;
 }
 
+/// Convert a byte count to binary gibibytes for device reporting.
 double as_gib(uint64_t bytes) {
     return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0);
 }
 
-// One line per device the model was offloaded to, read back after the model and
-// the KV cache are resident so the free figure reflects what the load actually
-// cost. llama.cpp's own INFO output is suppressed by log_callback, so this is
-// the only place the device setup becomes visible.
+/// One line per device the model was offloaded to, read back after the model and
+/// the KV cache are resident so the free figure reflects what the load actually
+/// cost. llama.cpp's own INFO output is suppressed by log_callback, so this is
+/// the only place the device setup becomes visible.
 void report_offload_devices(const EngineConfig & config, const std::vector<ggml_backend_dev_t> & offload) {
     const bool has_gpu = std::any_of(offload.begin(), offload.end(), is_gpu_device);
 
@@ -159,9 +169,9 @@ void report_offload_devices(const EngineConfig & config, const std::vector<ggml_
 // UTF-8 / stop-string aware streaming
 // ---------------------------------------------------------------------------
 
-// Number of trailing bytes of `s` that form an incomplete UTF-8 sequence.
-// Returns 0 when the buffer ends on a complete (or simply invalid) sequence,
-// in which case nothing needs to be held back.
+/// Number of trailing bytes of `s` that form an incomplete UTF-8 sequence.
+/// Returns 0 when the buffer ends on a complete (or simply invalid) sequence,
+/// in which case nothing needs to be held back.
 size_t incomplete_utf8_tail(const std::string & s) {
     const size_t n        = s.size();
     const size_t max_look = std::min<size_t>(n, 4);
@@ -191,8 +201,8 @@ size_t incomplete_utf8_tail(const std::string & s) {
     return 0;  // only continuation bytes (invalid): emit as-is
 }
 
-// Length of the longest suffix of `pending` that is a proper prefix of one of
-// the stop strings. That suffix must be held back: it may yet become a match.
+/// Length of the longest suffix of `pending` that is a proper prefix of one of
+/// the stop strings. That suffix must be held back: it may yet become a match.
 size_t stop_prefix_holdback(const std::string & pending, const std::vector<std::string> & stops) {
     size_t best = 0;
     for (const std::string & stop : stops) {
@@ -210,16 +220,23 @@ size_t stop_prefix_holdback(const std::string & pending, const std::vector<std::
     return best;
 }
 
-// Buffers generated text and hands it to the callback as soon as it is known to
-// be deliverable: never an incomplete UTF-8 sequence, and never bytes that could
-// still turn out to be the start of a stop string.
+/// Buffers generated text and hands it to the callback as soon as it is known to
+/// be deliverable: never an incomplete UTF-8 sequence, and never bytes that could
+/// still turn out to be the start of a stop string.
 class StreamFilter {
 public:
-    enum class Status { Continue, Stopped, Cancelled };
+    /// Outcome of delivering one token piece.
+    enum class Status {
+        Continue,  ///< More input may be generated.
+        Stopped,   ///< A stop string matched.
+        Cancelled  ///< The receiver declined a chunk.
+    };
 
+    /// Borrow stop strings and callback for this generation; both must outlive the filter.
     StreamFilter(const std::vector<std::string> & stops, const ChunkCallback & on_chunk) :
         stops_(stops), on_chunk_(on_chunk) {}
 
+    /// Buffer a token piece and emit only the prefix safe from UTF-8 and stop-string splits.
     Status push(const std::string & piece) {
         pending_ += piece;
 
@@ -262,9 +279,9 @@ public:
         return Status::Continue;
     }
 
-    // Called when generation ended on its own: a held-back stop prefix that never
-    // completed is real output and must be delivered; an incomplete UTF-8 tail is
-    // dropped because it can never become a valid character.
+    /// Called when generation ended on its own: a held-back stop prefix that never
+    /// completed is real output and must be delivered; an incomplete UTF-8 tail is
+    /// dropped because it can never become a valid character.
     void flush() {
         if (pending_.empty()) {
             return;
@@ -276,6 +293,7 @@ public:
     }
 
 private:
+    /// Deliver nonempty text, treating an empty callback as acceptance.
     bool deliver(const std::string & text) {
         if (text.empty()) {
             return true;
@@ -286,17 +304,17 @@ private:
         return on_chunk_(text);
     }
 
-    const std::vector<std::string> & stops_;
-    const ChunkCallback &            on_chunk_;
-    std::string                      pending_;
+    const std::vector<std::string> & stops_;     ///< Borrowed stop strings for this generation.
+    const ChunkCallback &            on_chunk_;  ///< Borrowed synchronous receiver.
+    std::string                      pending_;   ///< Bytes withheld until their UTF-8 and stop-prefix status is determined.
 };
 
 // ---------------------------------------------------------------------------
 // Grammar constraint
 // ---------------------------------------------------------------------------
 
-// Escapes the characters std::regex treats as syntax, so that a literal word can be used as a
-// grammar trigger pattern. Same character set as common/common.cpp's regex_escape.
+/// Escapes the characters std::regex treats as syntax, so that a literal word can be used as a
+/// grammar trigger pattern. Same character set as common/common.cpp's regex_escape.
 std::string regex_escape(const std::string & text) {
     static const std::string special = ".^$|()*+?[]{}\\";
 
@@ -311,17 +329,18 @@ std::string regex_escape(const std::string & text) {
     return out;
 }
 
-// The string-valued parts of SamplingParams that only mean something once they have been
-// looked up in the vocabulary.
+/// The string-valued parts of SamplingParams that only mean something once they have been
+/// looked up in the vocabulary.
 struct ResolvedTokens {
-    std::unordered_set<llama_token> preserved;          // tokens whose special text is emitted
-    std::vector<llama_token>        trigger_tokens;     // lazy grammar: trigger on this token
-    std::vector<std::string>        trigger_patterns;   // lazy grammar: trigger on this regex
+    std::unordered_set<llama_token> preserved;         ///< tokens whose special text is emitted
+    std::vector<llama_token>        trigger_tokens;    ///< lazy grammar: trigger on this token
+    std::vector<std::string>        trigger_patterns;  ///< lazy grammar: trigger on this regex
 };
 
-// RAII wrapper so the sampler chain is freed on every path, exceptions included.
+/// RAII wrapper so the sampler chain is freed on every path, exceptions included.
 class SamplerChain {
 public:
+    /// Allocate and populate a sampler chain; release it on construction failure.
     SamplerChain(const llama_vocab * vocab, const SamplingParams & params, const ResolvedTokens & resolved) {
         llama_sampler_chain_params cparams = llama_sampler_chain_default_params();
         cparams.no_perf                    = true;
@@ -341,18 +360,23 @@ public:
         }
     }
 
+    /// Free the owned chain and every sampler added to it.
     ~SamplerChain() {
         if (chain_ != nullptr) {
             llama_sampler_free(chain_);
         }
     }
 
+    /// Copying is disabled because the chain has a single owner.
     SamplerChain(const SamplerChain &)             = delete;
+    /// Copying is disabled because the chain has a single owner.
     SamplerChain & operator=(const SamplerChain &) = delete;
 
+    /// Borrow the chain for sampling; ownership stays with this wrapper.
     llama_sampler * get() const { return chain_; }
 
 private:
+    /// Add grammar before any probability filters, including the greedy path.
     void build(const llama_vocab * vocab, const SamplingParams & params, const ResolvedTokens & resolved) {
         // The grammar goes first, ahead of the greedy short-circuit too: every other sampler must
         // only ever see tokens the grammar allows. common/sampling.cpp keeps the grammar outside
@@ -384,6 +408,7 @@ private:
                                 llama_sampler_init_dist(params.seed ? *params.seed : LLAMA_DEFAULT_SEED));
     }
 
+    /// Attach an eager or triggered GBNF sampler; reject grammars that cannot be parsed.
     void add_grammar(const llama_vocab * vocab, const SamplingParams & params, const ResolvedTokens & resolved) {
         std::vector<const char *> patterns;
         patterns.reserve(resolved.trigger_patterns.size());
@@ -407,9 +432,10 @@ private:
         llama_sampler_chain_add(chain_, grammar);
     }
 
-    llama_sampler * chain_ = nullptr;
+    llama_sampler * chain_ = nullptr;  ///< Owned sampler chain, including its grammar sampler.
 };
 
+/// Measure elapsed steady-clock time in milliseconds.
 double ms_since(const std::chrono::steady_clock::time_point & t0) {
     const auto dt = std::chrono::steady_clock::now() - t0;
     return std::chrono::duration<double, std::milli>(dt).count();
@@ -421,17 +447,19 @@ double ms_since(const std::chrono::steady_clock::time_point & t0) {
 // Engine::Impl
 // ---------------------------------------------------------------------------
 
+/// Own the model and context and serialize access to generation state.
 struct Engine::Impl {
-    llama_model *       model = nullptr;
-    llama_context *     ctx   = nullptr;
-    const llama_vocab * vocab = nullptr;
+    llama_model *       model = nullptr;  ///< Owned model, released after its context.
+    llama_context *     ctx   = nullptr;  ///< Owned generation context.
+    const llama_vocab * vocab = nullptr;  ///< Vocabulary borrowed from model.
 
-    uint32_t n_ctx     = 0;  // context size actually in use
-    uint32_t n_ctx_seq = 0;  // per-sequence capacity (what a single generation may use)
-    uint32_t n_batch   = 0;  // largest batch llama_decode accepts
+    uint32_t n_ctx     = 0;  ///< context size actually in use
+    uint32_t n_ctx_seq = 0;  ///< per-sequence capacity (what a single generation may use)
+    uint32_t n_batch   = 0;  ///< largest batch llama_decode accepts
 
-    std::mutex generate_mutex;
+    std::mutex generate_mutex;  ///< Serializes requests sharing the context and KV cache.
 
+    /// Release the context before the model it borrows.
     ~Impl() {
         if (ctx != nullptr) {
             llama_free(ctx);
@@ -441,6 +469,7 @@ struct Engine::Impl {
         }
     }
 
+    /// Query the vocabulary for required capacity, then tokenize into an owned buffer.
     std::vector<int32_t> tokenize(const std::string & text, bool add_special, bool parse_special) const {
         // llama_tokenize returns -(number of tokens) when the buffer is too small.
         int32_t n = llama_tokenize(vocab, text.c_str(), static_cast<int32_t>(text.size()), nullptr, 0,
@@ -464,8 +493,8 @@ struct Engine::Impl {
         return tokens;
     }
 
-    // `special` renders the text of a control/added token instead of nothing; it is on only for the
-    // tokens the caller asked to have preserved.
+    /// `special` renders the text of a control/added token instead of nothing; it is on only for the
+    /// tokens the caller asked to have preserved.
     std::string token_to_piece(llama_token token, bool special) const {
         char          buf[256];
         const int32_t n = llama_token_to_piece(vocab, token, buf, sizeof(buf), 0, special);
@@ -482,8 +511,8 @@ struct Engine::Impl {
         return std::string(big.data(), static_cast<size_t>(n2));
     }
 
-    // Preserved tokens and grammar triggers are given as text; only the vocabulary can turn them
-    // into token ids. Mirrors what llama-server does with the same two request fields.
+    /// Preserved tokens and grammar triggers are given as text; only the vocabulary can turn them
+    /// into token ids. Mirrors what llama-server does with the same two request fields.
     ResolvedTokens resolve(const SamplingParams & params) const {
         ResolvedTokens out;
 

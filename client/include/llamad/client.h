@@ -1,7 +1,11 @@
-#pragma once
+/** @file
+ * @brief Application-facing synchronous streaming client and reflected tool dispatch.
+ *
+ * C++ client for the llamad daemon. This header exposes no gRPC or protobuf types,
+ * so applications only need this header and the llamad_client library.
+ */
 
-// C++ client for the llamad daemon. This header exposes no gRPC or protobuf types,
-// so applications only need this header and the llamad_client library.
+#pragma once
 
 #include <cstdint>
 #include <functional>
@@ -18,44 +22,49 @@
 #include "llamad/json.h"
 
 namespace llamad {
+/// Application API for streaming requests, tool execution and reflected JSON.
 namespace client {
 
+/// Metadata for the loaded model and its configured context.
 struct ModelInfo {
-    std::string description;
-    uint64_t    n_params          = 0;
-    uint64_t    size_bytes        = 0;
-    uint32_t    n_ctx             = 0;
-    uint32_t    n_ctx_train       = 0;
-    bool        has_chat_template = false;
+    std::string description;                ///< Human-readable model architecture and quantization description.
+    uint64_t    n_params          = 0;      ///< Number of model parameters.
+    uint64_t    size_bytes        = 0;      ///< Size of model tensors in bytes.
+    uint32_t    n_ctx             = 0;      ///< Actual context capacity configured by the daemon, in tokens.
+    uint32_t    n_ctx_train       = 0;      ///< Training context length recorded by the model, in tokens.
+    bool        has_chat_template = false;  ///< Whether the model stores a template; does not guarantee it parses successfully.
 };
 
-// Unset fields use the daemon defaults (see llamad.proto).
+/// Unset fields use the daemon defaults (see llamad.proto).
 struct SamplingParams {
-    std::optional<float>     temperature;
-    std::optional<int32_t>   top_k;
-    std::optional<float>     top_p;
-    std::optional<float>     min_p;
-    std::optional<uint32_t>  seed;
-    std::optional<int32_t>   max_tokens;
-    std::vector<std::string> stop;
+    std::optional<float>     temperature;  ///< Default 0.8; values at or below zero select greedy sampling.
+    std::optional<int32_t>   top_k;        ///< Default 40; values at or below zero disable top-k filtering.
+    std::optional<float>     top_p;        ///< Default 0.95; values at or above one disable nucleus filtering.
+    std::optional<float>     min_p;        ///< Default 0.05; values at or below zero disable min-p filtering.
+    std::optional<uint32_t>  seed;         ///< Random seed; unset asks the daemon to choose randomly.
+    std::optional<int32_t>   max_tokens;   ///< Completion budget; unset or negative means remaining context capacity.
+    std::vector<std::string> stop;         ///< Literal stop strings whose matched bytes are excluded from output.
 };
 
-// A tool the model may call. The daemon executes nothing and keeps no registry: definitions
-// travel with each request, and the caller runs the tool and sends the result back.
+/// A tool the model may call. The daemon executes nothing and keeps no registry: definitions
+/// travel with each request, and the caller runs the tool and sends the result back.
 struct Tool {
-    std::string name;
-    std::string description;
-    std::string parameters_json_schema;  // JSON Schema object for the arguments, as a JSON string
+    std::string name;                    ///< Tool function name.
+    std::string description;             ///< Model-facing explanation of the tool.
+    std::string parameters_json_schema;  ///< JSON Schema object for the arguments, as a JSON string
 };
 
+/// One complete model-requested function call, identified for a matching tool reply.
 struct ToolCall {
-    std::string id;              // assigned by the daemon; echo it back as tool_call_id
-    std::string name;
-    std::string arguments_json;  // complete, valid JSON object
+    std::string id;              ///< Call identifier; echo it in the corresponding tool reply.
+    std::string name;            ///< Tool function name.
+    std::string arguments_json;  ///< Complete JSON arguments; an argument-free call carries an empty object.
 };
 
+/// Implementation details of the reflected function adapter.
 namespace detail {
 
+/// Synthesize aggregate fields from a function's named, cvref-stripped parameter types.
 consteval std::vector<std::meta::info> argument_members(std::meta::info function) {
     std::vector<std::meta::info> members;
     for (std::meta::info parameter : std::meta::parameters_of(function)) {
@@ -66,20 +75,25 @@ consteval std::vector<std::meta::info> argument_members(std::meta::info function
     return members;
 }
 
-// define_aggregate has to be called from a consteval block in the scope that encloses the class
-// it completes, which is why Struct is a member here rather than a class template of its own.
+/// define_aggregate has to be called from a consteval block in the scope that encloses the class
+/// it completes, which is why Struct is a member here rather than a class template of its own.
 template <std::meta::info Function>
 struct ArgumentsHolder {
+    /// Aggregate completed by the enclosing compile-time block.
     struct Struct;
+    // Doxygen misclassifies the consteval block as a data member; Struct is documented above.
+    /// @cond
     consteval { std::meta::define_aggregate(^^Struct, argument_members(Function)); }
+    /// @endcond
 };
 
-// A tool function's parameter list as a struct, so the walk over a type's members that
-// json::schema and json::read already do serves functions and structs alike. Synthesised members
-// carry no annotations, so the parameters' descriptions reach the schema on their own.
+/// A tool function's parameter list as a struct, so the walk over a type's members that
+/// json::schema and json::read already do serves functions and structs alike. Synthesised members
+/// carry no annotations, so the parameters' descriptions reach the schema on their own.
 template <std::meta::info Function>
 using Arguments = typename ArgumentsHolder<Function>::Struct;
 
+/// Preserve parameter descriptions separately from the synthesized argument aggregate.
 template <std::meta::info Function>
 consteval std::span<const char * const> argument_descriptions() {
     std::vector<const char *> texts;
@@ -90,13 +104,14 @@ consteval std::span<const char * const> argument_descriptions() {
     return std::define_static_array(texts);
 }
 
+/// Invoke the reflected function with its argument members in parameter order.
 template <std::meta::info Function, typename Args, std::size_t... I>
 decltype(auto) apply(const Args & arguments, std::index_sequence<I...>) {
     return [:Function:](arguments.[: json::detail::fields_of(^^Args)[I] :]...);
 }
 
-// Parses one call's arguments and runs the function. A std::string result is what the model
-// reads; anything else is written as JSON.
+/// Parses one call's arguments and runs the function. A std::string result is what the model
+/// reads; anything else is written as JSON.
 template <std::meta::info Function>
 std::string run(const std::string & arguments_json) {
     using Args = Arguments<Function>;
@@ -115,36 +130,41 @@ std::string run(const std::string & arguments_json) {
 
 }  // namespace detail
 
-// The tools an application offers the model, each one an ordinary C++ function. Its identifier
-// is the tool's name, its desc annotations are the descriptions, and its parameter list is the
-// argument schema:
-//
-//     [[=desc{"Get the current date and time in a given IANA timezone."}]]
-//     std::string get_current_time([[=desc{"IANA timezone, e.g. Europe/Paris"}]] std::string timezone);
-//
-//     ToolSet tools;
-//     tools.add<^^get_current_time>();
-//
-// Free and static functions only. A tool returning std::string is handed to the model as it is;
-// any other return type is written as JSON.
+/// The tools an application offers the model, each one an ordinary C++ function. Its identifier
+/// is the tool's name, its desc annotations are the descriptions, and its parameter list is the
+/// argument schema:
+///
+///     [[=desc{"Get the current date and time in a given IANA timezone."}]]
+///     std::string get_current_time([[=desc{"IANA timezone, e.g. Europe/Paris"}]] std::string timezone);
+///
+///     ToolSet tools;
+///     tools.add<^^get_current_time>();
+///
+/// Free and static functions only. A tool returning std::string is handed to the model as it is;
+/// any other return type is written as JSON.
 class ToolSet {
 public:
+    /// Register a free or static function, deriving its name, schema and descriptions.
+    /// @tparam Function Reflection of a named function with named, JSON-readable parameters.
+    /// The result must be std::string or supported by json::write(); void is not supported.
+    /// Register before concurrent use; definitions and dispatch share registration order.
     template <std::meta::info Function>
     void add();
 
-    // What travels with a request; this is all the daemon ever sees of a tool.
+    /// What travels with a request; this is all the daemon ever sees of a tool.
     const std::vector<Tool> & definitions() const { return definitions_; }
 
-    // Runs the tool the model asked for and returns what the "tool" message should carry. Never
-    // throws: an unknown name, arguments that do not parse and an exception from the tool itself
-    // all come back as {"error":"..."}, which the model can read and recover from.
+    /// Runs the tool the model asked for and returns what the "tool" message should carry. Never
+    /// throws: an unknown name, arguments that do not parse and an exception from the tool itself
+    /// all come back as {"error":"..."}, which the model can read and recover from.
     std::string call(const ToolCall & call) const;
 
 private:
+    /// Type-erased local function accepting JSON arguments and producing model-facing text.
     using Invoke = std::function<std::string(const std::string & arguments_json)>;
 
-    std::vector<Tool>   definitions_;
-    std::vector<Invoke> invoke_;  // indexed alike
+    std::vector<Tool>   definitions_;  ///< Wire definitions in registration order.
+    std::vector<Invoke> invoke_;       ///< indexed alike
 };
 
 template <std::meta::info Function>
@@ -157,72 +177,113 @@ void ToolSet::add() {
     invoke_.push_back(&detail::run<Function>);
 }
 
+/// One history turn; the full ordered history travels with every chat request.
 struct ChatMessage {
-    std::string           role;  // "system" | "user" | "assistant" | "tool"
-    std::string           content;
-    std::vector<ToolCall> tool_calls;    // assistant turns being replayed from history
-    std::string           tool_call_id;  // role "tool": the call this message answers
+    std::string           role;          ///< "system" | "user" | "assistant" | "tool"
+    std::string           content;       ///< Message text; tool results are opaque strings.
+    std::vector<ToolCall> tool_calls;    ///< Calls from an assistant turn replayed in history.
+    std::string           tool_call_id;  ///< role "tool": the call this message answers
 };
 
-enum class FinishReason { Eog, Length, Stop, Cancelled, ToolCalls };
+/// Reason a generation terminates.
+enum class FinishReason {
+    Eog,  ///< The model emitted an end-of-generation token.
+    Length,  ///< The token budget or context capacity was reached.
+    Stop,  ///< A configured stop string matched; its bytes are withheld.
+    Cancelled,  ///< The callback requested cancellation.
+    ToolCalls  ///< Complete tool calls require client execution.
+};
 
+/// Token counts and wall-clock milliseconds for one generation, excluding queue time.
 struct GenerateStats {
-    int32_t prompt_tokens     = 0;
-    int32_t completion_tokens = 0;
-    double  prompt_ms         = 0;
-    double  completion_ms     = 0;
+    int32_t prompt_tokens     = 0;  ///< Number of prompt tokens decoded, including special tokens.
+    int32_t completion_tokens = 0;  ///< Generated non-EOG tokens, including any withheld stop or tool markup.
+    double  prompt_ms         = 0;  ///< Prompt decoding time in milliseconds, including backend synchronization.
+    double  completion_ms     = 0;  ///< Generation time in milliseconds, including streaming callback time.
 };
 
+/// Generation outcome; streamed text is delivered separately through the callback.
 struct GenerateResult {
-    FinishReason          reason;
-    GenerateStats         stats;
-    std::vector<ToolCall> tool_calls;  // set when reason == ToolCalls
+    FinishReason          reason;      ///< Reason generation ended.
+    GenerateStats         stats;       ///< Counts and timings reported for the generation.
+    std::vector<ToolCall> tool_calls;  ///< Calls from an assistant turn replayed in history.
 };
 
-// Called with each piece of generated text, in order. Return false to cancel the request.
+/// Called with each piece of generated text, in order. Return false to cancel the request.
 using ChunkCallback = std::function<bool(const std::string & text)>;
 
-// Thrown when an RPC fails (daemon unreachable, invalid request, ...).
+/// Thrown when an RPC fails (daemon unreachable, invalid request, ...).
 struct RpcError : std::runtime_error {
+    /// Preserve the numeric gRPC status and human-readable error message.
     RpcError(int code, const std::string & message) : std::runtime_error(message), code(code) {}
-    int code;  // grpc::StatusCode value
+    int code;  ///< grpc::StatusCode value
 };
 
+/// Synchronous client for one Unix socket; calls carry all request state.
+/// RPC failures throw RpcError. Streaming callbacks run on the calling thread and their
+/// exceptions propagate. An empty callback discards text; false requests cancellation.
+/// A cancelled stream can end before final statistics arrive.
 class Client {
 public:
-    // Returns $XDG_RUNTIME_DIR/llamad.sock, falling back to /tmp/llamad-<uid>.sock.
+    /// Return `$XDG_RUNTIME_DIR/llamad.sock`, falling back to `/tmp/llamad-<uid>.sock`.
     static std::string default_socket_path();
 
-    // Connects lazily; the first RPC fails with RpcError if the daemon is not there.
+    /// Connects lazily; the first RPC fails with RpcError if the daemon is not there.
     explicit Client(const std::string & socket_path = default_socket_path());
+    /// Release the channel and stub after outstanding calls have finished.
     ~Client();
 
+    /// Copying is disabled because this object owns its state.
     Client(const Client &)             = delete;
+    /// Copying is disabled because this object owns its state.
     Client & operator=(const Client &) = delete;
 
+    /// Fetch metadata for the daemon's loaded model.
+    /// @throws RpcError If the daemon is unreachable or the request fails.
     ModelInfo get_model_info();
 
+    /// Tokenize using the daemon's vocabulary.
+    /// @param text Input bytes.
+    /// @param add_special Add BOS/EOS as expected by the model.
+    /// @param parse_special Recognize literal special-token spellings.
+    /// @throws RpcError If the daemon rejects or cannot complete the request.
     std::vector<int32_t> tokenize(const std::string & text, bool add_special = true, bool parse_special = false);
 
-    // Both block until the stream ends, invoking on_chunk from the calling thread.
-    // If on_chunk returns false the request is cancelled and reason is Cancelled. Cancelling ends
-    // the stream before the daemon's final chunk, so that result carries no stats.
+    /// Complete a raw prompt without applying the chat template.
+    /// Blocks until the stream ends, invoking on_chunk from the calling thread.
+    /// If on_chunk returns false the request is cancelled and reason is Cancelled. Cancelling ends
+    /// the stream before the daemon's final chunk; stats are available only if that chunk arrives.
+    /// @param prompt Raw model input.
+    /// @param params Optional overrides of the daemon sampling defaults.
+    /// @param on_chunk Text receiver, or empty to discard text.
+    /// @throws RpcError If the RPC fails for a reason other than requested cancellation.
     GenerateResult generate(const std::string & prompt, const SamplingParams & params, const ChunkCallback & on_chunk);
+    /// Generate a single chat turn without tools; messages must contain the full history.
+    /// Uses the blocking callback and cancellation behavior of generate().
+    /// @throws RpcError For transport failure, invalid history or unavailable chat support.
     GenerateResult chat(const std::vector<ChatMessage> & messages, const SamplingParams & params, const ChunkCallback & on_chunk);
 
-    // Same, with tools the model may call, in the form where the caller owns the loop: on
-    // FinishReason::ToolCalls, append an assistant message carrying result.tool_calls
-    // (content = the streamed text, if any), then one "tool" message per call with tool_call_id
-    // set and the tool's result as content, and call chat again.
+    /// Generate one chat turn offering opaque tool definitions; the caller owns execution.
+    /// Uses the blocking callback and cancellation behavior of generate(). On
+    /// FinishReason::ToolCalls, append an assistant message carrying result.tool_calls
+    /// (content = the streamed text, if any), then one "tool" message per call with tool_call_id
+    /// set and the tool's result as content, and call chat again.
     GenerateResult chat(const std::vector<ChatMessage> & messages,
                         const std::vector<Tool> & tools,
                         const SamplingParams & params,
                         const ChunkCallback & on_chunk);
 
-    // The same loop, run here. The caller appends the user message to `history` and gets back a
-    // history holding every assistant and "tool" turn the answer took, with `stats` summed over
-    // the rounds. A result of ToolCalls means max_rounds was spent with the model still asking.
-    // max_rounds must be positive; anything else throws std::invalid_argument.
+    /// The same loop, run here. The caller appends the user message to `history` and gets back a
+    /// history holding every assistant and "tool" turn the answer took, with `stats` summed over
+    /// the rounds. A result of ToolCalls means max_rounds was spent with the model still asking.
+    /// The last round's tools are executed even when no generation budget remains.
+    /// @param history Full conversation, already including the latest user message; updated in place.
+    /// @param tools Registered functions to execute locally.
+    /// @param params Sampling overrides applied to each round.
+    /// @param on_chunk Text receiver shared across rounds; false cancels the current request.
+    /// @param max_rounds Maximum generation requests, including the initial request; must be positive.
+    /// @throws std::invalid_argument If max_rounds is not positive.
+    /// @throws RpcError If any request fails; completed turns remain in history.
     GenerateResult chat(std::vector<ChatMessage> & history,
                         const ToolSet & tools,
                         const SamplingParams & params,
@@ -230,8 +291,9 @@ public:
                         int max_rounds = 8);
 
 private:
+    /// Dependency-specific state hidden behind the public contract.
     struct Impl;
-    std::unique_ptr<Impl> impl_;
+    std::unique_ptr<Impl> impl_;  ///< Sole owner of the hidden implementation.
 };
 
 }  // namespace client
