@@ -2,7 +2,9 @@
 // field. This is the one place all four are visible at once, so it is where that is checked: a
 // field added, removed or renamed on either side fails the build here rather than at a call site.
 
+#include <cstdint>
 #include <cstdio>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -30,6 +32,56 @@ static_assert(wire::mirrors<llamad::GenerateStats, v1::GenerateStats>());
 static_assert(wire::mirrors<llamad::Tool, v1::Tool>());
 static_assert(wire::mirrors<llamad::ToolCall, v1::ToolCall>());
 static_assert(wire::mirrors<llamad::ChatMessage, v1::ChatMessage>());
+
+// And the guard itself. Each struct below differs from the message in exactly one way that the
+// converters would carry out silently, or not at all; drifted() is mirrors() with the compile
+// error it raises caught and reported as a value instead.
+static_assert(!wire::drifted<client::ModelInfo, v1::ModelInfo>());
+
+struct NarrowedParams {
+    std::string description;
+    uint32_t    n_params          = 0;  // the message says uint64
+    uint64_t    size_bytes        = 0;
+    uint32_t    n_ctx             = 0;
+    uint32_t    n_ctx_train       = 0;
+    bool        has_chat_template = false;
+};
+static_assert(wire::drifted<NarrowedParams, v1::ModelInfo>());
+
+struct OptionalNCtx {
+    std::string             description;
+    uint64_t                n_params   = 0;
+    uint64_t                size_bytes = 0;
+    std::optional<uint32_t> n_ctx;  // the message's n_ctx has no presence
+    uint32_t                n_ctx_train       = 0;
+    bool                    has_chat_template = false;
+};
+static_assert(wire::drifted<OptionalNCtx, v1::ModelInfo>());
+
+struct PlainMaxTokens {
+    std::optional<float>     temperature;
+    std::optional<int32_t>   top_k;
+    std::optional<float>     top_p;
+    std::optional<float>     min_p;
+    std::optional<uint32_t>  seed;
+    int32_t                  max_tokens = 0;  // the message says `optional int32`
+    std::vector<std::string> stop;
+};
+static_assert(wire::drifted<PlainMaxTokens, v1::SamplingParams>());
+
+struct ShortTool {
+    std::string name;
+    std::string description;  // no parameters_json_schema
+};
+static_assert(wire::drifted<ShortTool, v1::Tool>());
+
+struct LongTool {
+    std::string name;
+    std::string description;
+    std::string parameters_json_schema;
+    std::string returns_json_schema;  // the message has no such field
+};
+static_assert(wire::drifted<LongTool, v1::Tool>());
 
 // Instantiating enum_cast without a fallback demands a twin for every value of the source enum,
 // so these also fail the build if either FinishReason gains a value llamad.proto does not name.

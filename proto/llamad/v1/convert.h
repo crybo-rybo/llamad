@@ -31,6 +31,20 @@ template <typename T> constexpr bool is_vector<std::vector<T>>     = true;
 template <typename T> constexpr bool is_nested_vector                 = false;
 template <typename T> constexpr bool is_nested_vector<std::vector<T>> = std::is_aggregate_v<T>;
 
+// The element of a repeated field's container, named the way from_proto reads it out.
+template <typename Container> using value_type_of = typename Container::value_type;
+
+// One of the traits above, applied to a reflected type: trait(^^is_optional, t) is
+// is_optional<[:t:]>, so the checks below classify a field exactly as the converters do.
+consteval bool trait(std::meta::info variable_template, std::meta::info type) {
+    return std::meta::extract<bool>(std::meta::substitute(variable_template, {type}));
+}
+
+// std::optional<U> and std::vector<U> each hold one U.
+consteval std::meta::info held_type(std::meta::info type) {
+    return std::meta::template_arguments_of(type)[0];
+}
+
 // The three walks below only ever look at what a caller of the message could call anyway.
 // define_static_array outlives the constant evaluation that builds the list, so `template for`
 // can iterate it.
@@ -74,6 +88,63 @@ consteval std::meta::info accessor(std::meta::info message, std::string_view pre
                                    field);
     }
     return found;
+}
+
+// One field of a mirror struct against the message: same name, same presence, same value type.
+// Throws, so the caller's constant evaluation fails with a message naming what disagrees.
+consteval void check_field(std::meta::info message, std::meta::info field) {
+    const std::string     name   = std::string(std::meta::identifier_of(field));
+    const std::string     drift  = ": the struct and llamad.proto have drifted apart";
+    const std::meta::info stored = std::meta::type_of(field);
+    const std::string     what =
+        std::string(std::meta::display_string_of(std::meta::parent_of(field))) + " field '" + name + "' ";
+
+    // Same name: the getter both converters reach for has to exist.
+    const std::meta::info get = accessor(message, "", field, /*arity*/ 0);
+
+    // Same presence. A proto3 `optional` scalar is what has a has_<name>(), and std::optional is
+    // what the converters pair with it: an unset one stays off the wire so the receiver's default
+    // stands, where a plain field is always sent, zero and all. (protoc gives a singular message
+    // field a has_<name>() as well; no struct mirrored here has one.)
+    const bool optional_here  = trait(^^is_optional, stored);
+    const bool optional_there = find_accessor(message, "has_" + name, /*arity*/ 0) != std::meta::info{};
+    if (optional_here != optional_there) {
+        throw std::meta::exception(what +
+                                       (optional_here ? "is std::optional, the message has no has_" + name + "()"
+                                                      : "is not std::optional, the message has has_" + name + "()") +
+                                       drift,
+                                   field);
+    }
+
+    // A repeated field of messages: the element types mirror one another rather than being the
+    // same type, and contract_test asserts that pair on its own.
+    if (trait(^^is_nested_vector, stored)) {
+        return;
+    }
+
+    // Same type, compared on the value that actually crosses, so a struct field narrower than the
+    // message's cannot truncate in silence.
+    std::meta::info here  = stored;
+    std::meta::info there = std::meta::remove_cvref(std::meta::return_type_of(get));
+    if (optional_here) {
+        here = held_type(stored);
+    } else if (trait(^^is_vector, stored)) {
+        if (!std::meta::can_substitute(^^value_type_of, {there})) {
+            throw std::meta::exception(what + "is a std::vector, the message's " + name +
+                                           "() is not a repeated field" + drift,
+                                       field);
+        }
+        here  = held_type(stored);
+        there = std::meta::substitute(^^value_type_of, {there});
+    }
+    here  = std::meta::dealias(here);
+    there = std::meta::dealias(there);
+    if (here != there) {
+        throw std::meta::exception(what + "is " + std::string(std::meta::display_string_of(here)) +
+                                       ", the message has " + std::string(std::meta::display_string_of(there)) +
+                                       drift,
+                                   field);
+    }
 }
 
 template <std::meta::info Function, typename P, typename V>
@@ -180,14 +251,16 @@ T from_proto(const P & in) {
     return out;
 }
 
-// True when T and message P have exactly the same fields; a compile error naming the odd one
-// out otherwise. to_proto and from_proto already reject a struct field the message lacks; this
-// also catches a field added to the message and not to the struct.
+// True when T and message P have exactly the same fields, each with the same presence —
+// std::optional against a proto3 `optional` — and the same value type; a compile error naming the
+// field and what disagrees otherwise. to_proto and from_proto already reject a struct field the
+// message lacks; this also catches a field added to the message and not to the struct, and one
+// that agrees by name while narrowing or dropping the value it carries.
 template <typename T, typename P>
 consteval bool mirrors() {
-    // Every field of the struct is a field of the message, or accessor() throws.
+    // Every field of the struct is a field of the message and matches it, or check_field throws.
     for (std::meta::info field : detail::fields_of(^^T)) {
-        detail::accessor(^^P, "", field, /*arity*/ 0);
+        detail::check_field(^^P, field);
     }
 
     // And the other way round: protoc gives every field of a message its own clear_<name>().
@@ -210,6 +283,17 @@ consteval bool mirrors() {
         }
     }
     return true;
+}
+
+// The same check as a value: true where mirrors<T, P>() is the compile error instead. It is how
+// contract_test asserts that a struct deliberately out of step with its message is rejected.
+template <typename T, typename P>
+consteval bool drifted() {
+    try {
+        return !mirrors<T, P>();
+    } catch (const std::meta::exception &) {
+        return true;
+    }
 }
 
 // Converts between an enum in llamad.proto and its plain twin by value name, ignoring the
