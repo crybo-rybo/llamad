@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -41,12 +42,12 @@ jobs:
           -DGGML_VULKAN=OFF
           -DGGML_CUDA=OFF
 
-      # Explicit targets make a missing gRPC/Protobuf dependency fail the job,
-      # rather than silently succeeding with CMake's engine-only fallback.
+      # Build every test; explicit daemon/client targets also catch missing gRPC/Protobuf
+      # dependencies instead of accepting CMake's engine-only fallback.
       - name: Build daemon, client, and tests
         run: >-
           cmake --build build --parallel 2
-          --target llamad llamad-chat engine_smoke chat_format_test flags_test contract_test json_test client_tools_test
+          --target all llamad llamad-chat
 
       - name: Run tests
         run: ctest --test-dir build --output-on-failure --no-tests=error

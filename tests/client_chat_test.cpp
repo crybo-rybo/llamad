@@ -1,6 +1,10 @@
-// The tool loop in Client::chat, against a scripted fake daemon on a private Unix socket.
-// No model and no inference: the fake replays canned rounds, so what is under test is the
-// history the loop builds, the requests it sends, its summed stats and where it stops.
+/** @file
+ * @brief Tool-loop and history contracts against a scripted service on a private socket.
+ *
+ * The tool loop in Client::chat, against a scripted fake daemon on a private Unix socket.
+ * No model and no inference: the fake replays canned rounds, so what is under test is the
+ * history the loop builds, the requests it sends, its summed stats and where it stops.
+ */
 
 #include "llamad/client.h"
 

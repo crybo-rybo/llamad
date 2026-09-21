@@ -35,10 +35,53 @@ templates and tool-call parsing; it is the bulk of a first build. The tests need
 model file and no daemon: the chat-template ones render and parse against a template
 checked into the submodule, the rest need nothing but the build.
 
-GitHub Actions builds on Arch Linux (CPU-only) on every push and pull request, and can
-also be started manually. The job builds the daemon, client, and engine smoke executable, and
-runs the tests without a GPU or model download. GPU execution and inference with a real model
-are not covered by CI.
+GitHub Actions builds on Arch Linux (CPU-only) when a pull request is opened, reopened or
+updated, on pushes to `main`, and on manual runs. The job builds the daemon, client, and
+engine smoke executable, and runs the tests without a GPU or model download. GPU execution
+and inference with a real model are not covered by CI.
+
+## API documentation
+
+Doxygen documents llamad's client, JSON adapters, engine, chat layer, service, command-line
+helpers and wire conversions, including internal ownership and streaming contracts. The
+reference includes the commented protobuf schema and executable examples. Vendored llama.cpp
+and generated protobuf code are excluded.
+
+Only CMake and Doxygen (1.17 or later) are needed to generate HTML; no compiler, submodule
+checkout, Graphviz, model or gRPC installation is required:
+
+```sh
+pacman -S cmake doxygen
+./scripts/docs.sh                       # open build-docs/html/index.html
+```
+
+The script accepts extra CMake configure arguments and works from any directory. The equivalent
+standalone build is:
+
+```sh
+cmake -S docs -B build-docs
+cmake --build build-docs --target llamad_docs
+```
+
+Documentation is optional in the normal application build and disabled by default:
+
+```sh
+cmake -S . -B build -G Ninja -DLLAMAD_BUILD_DOCS=ON
+cmake --build build --target llamad_docs  # open build/docs/html/index.html
+```
+
+Enabling the option requires Doxygen at configure time and adds an explicit `llamad_docs`
+target, including in engine-only builds. Normal builds do not generate documentation, and
+leaving the option off does not search for Doxygen. Both entry points use the same configuration
+in `docs/CMakeLists.txt`. Missing documentation and malformed Doxygen comments fail the build.
+
+The Documentation workflow builds when a pull request is opened, reopened or updated, on
+pushes to `main`, and on manual runs. Each build uploads a downloadable `github-pages`
+artifact. Successful builds on the repository's default branch deploy to
+[GitHub Pages](https://crybo-rybo.github.io/llamad/); manual runs deploy only when that branch is
+selected. Pull requests only build. To enable deployment, set **Settings → Pages → Build and
+deployment → Source** to **GitHub Actions** and allow the default branch in the `github-pages`
+environment. The workflow publishes its artifact directly, without a generated-content branch.
 
 ## GPU
 

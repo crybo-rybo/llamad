@@ -1,5 +1,9 @@
-// llamad-chat: a multi-turn chat REPL against a running llamad daemon.
-// It uses only <llamad/client.h>: no gRPC or protobuf headers anywhere.
+/** @file
+ * @brief Interactive chat client and an annotated time-tool example.
+ *
+ * llamad-chat: a multi-turn chat REPL against a running llamad daemon.
+ * It uses only <llamad/client.h>: no gRPC or protobuf headers anywhere.
+ */
 
 #include <atomic>
 #include <cctype>
@@ -24,9 +28,12 @@ namespace {
 // Set by the SIGINT handler while a generation is running; the chunk callback
 // turns it into a cancel. At the prompt there is nothing to cancel, so the
 // handler exits the process instead (via _exit, which is async-signal-safe).
+/// Whether SIGINT should cancel a generation instead of exiting the prompt.
 std::atomic<bool> g_generating{false};
+/// Cancellation flag read by the synchronous chunk callback.
 std::atomic<bool> g_interrupted{false};
 
+/// Request cancellation during generation; otherwise exit using signal-safe operations.
 void on_sigint(int) {
     if (g_generating.load()) {
         g_interrupted.store(true);
@@ -38,6 +45,7 @@ void on_sigint(int) {
     ::_exit(130);
 }
 
+/// Spell the client finish reason for terminal statistics.
 const char * reason_name(llamad::client::FinishReason reason) {
     switch (reason) {
         case llamad::client::FinishReason::Eog:       return "eog";
@@ -51,33 +59,35 @@ const char * reason_name(llamad::client::FinishReason reason) {
 
 using llamad::cli::help;
 
+/// Options specific to this executable; shared flags are composed separately.
 struct Options {
     [[=help{"PATH", "daemon socket (default: the client library default)"}]]
-    std::string socket;
+    std::string socket;  ///< Daemon socket (default: the client library default).
 
     [[=help{"TEXT", "system prompt for the conversation"}]]
-    std::string system;
+    std::string system;  ///< System prompt for the conversation.
 
     [[=help{"sampling temperature (0 = greedy)"}]]
-    std::optional<float> temp;
+    std::optional<float> temp;  ///< Sampling temperature (0 = greedy).
 
     [[=help{"sampling seed"}]]
-    std::optional<uint32_t> seed;
+    std::optional<uint32_t> seed;  ///< Sampling seed.
 
     [[=help{"cap on generated tokens per turn"}]]
-    std::optional<int32_t> max_tokens;
+    std::optional<int32_t> max_tokens;  ///< Cap on generated tokens per turn.
 
     [[=help{"PROMPT", "run a single non-interactive turn and exit"}]]
-    std::optional<std::string> once;
+    std::optional<std::string> once;  ///< Run a single non-interactive turn and exit.
 
     [[=help{"offer the built-in get_current_time tool and run the\n"
             "execute-and-resend loop for any call the model makes"}]]
-    bool demo_tools = false;
+    bool demo_tools = false;  ///< Offer the built-in get_current_time tool and run the  execute-and-resend loop for any call the model makes.
 
     // Hidden, for testing cancellation: cancel the turn after N chunks.
-    std::optional<long> cancel_after;
+    std::optional<long> cancel_after;  ///< Hidden test flag: cancel after this many delivered chunks.
 };
 
+/// Print usage and reflected flag descriptions to stderr.
 void print_usage(const char * argv0) {
     std::fprintf(stderr, "usage: %s [options]\n\n", argv0);
     llamad::cli::print_flags(stderr, Options{}, llamad::cli::HelpFlag{});
@@ -91,8 +101,8 @@ void print_usage(const char * argv0) {
 
 using llamad::client::desc;
 
-// tzset() quietly falls back to UTC for a zone it cannot resolve; checking the zone file
-// first is what lets the result say so.
+/// tzset() quietly falls back to UTC for a zone it cannot resolve; checking the zone file
+/// first is what lets the result say so.
 bool zone_is_known(const std::string & zone) {
     if (zone.empty() || zone.front() == '/' || zone.find("..") != std::string::npos) {
         return false;
@@ -108,13 +118,17 @@ bool zone_is_known(const std::string & zone) {
     return ::access((root + "/" + zone).c_str(), R_OK) == 0;
 }
 
+/// Structured result of the demonstration time tool.
 struct CurrentTime {
-    std::string                timezone;
-    std::string                time;
-    std::optional<std::string> note;  // why the answer is not in the zone that was asked for
+    std::string                timezone;  ///< Resolved IANA timezone, or UTC for an unknown zone.
+    std::string                time;      ///< Formatted local timestamp.
+    std::optional<std::string> note;      ///< Explanation of a fallback zone, omitted on success.
 };
 
 // Local time in an IANA zone, via the C library: TZ is set for the call and restored after.
+/// Read local time in an IANA zone, restoring the process TZ setting before returning.
+/// Unknown zones produce UTC plus an explanatory note. This example mutates process
+/// environment state and is intended for sequential tool execution.
 [[=desc{"Get the current date and time in a given IANA timezone."}]]
 CurrentTime get_current_time([[=desc{"IANA timezone, e.g. Europe/Paris"}]] std::string timezone) {
     std::optional<std::string> note;
@@ -150,10 +164,11 @@ CurrentTime get_current_time([[=desc{"IANA timezone, e.g. Europe/Paris"}]] std::
 }
 
 // Rounds of tool calls per turn. A model that keeps asking is looping; stop instead.
+/// Maximum model requests per terminal turn, bounding repeated tool calls.
 const int kMaxToolRounds = 8;
 
-// Runs one turn: streams the reply to stdout while the client appends every assistant and
-// "tool" turn it takes to the history. Returns false if the turn was cancelled.
+/// Runs one turn: streams the reply to stdout while the client appends every assistant and
+/// "tool" turn it takes to the history. Returns false if the turn was cancelled.
 bool run_turn(llamad::client::Client & client,
               std::vector<llamad::client::ChatMessage> & history,
               const llamad::client::ToolSet & tools,
@@ -215,6 +230,8 @@ bool run_turn(llamad::client::Client & client,
 
 }  // namespace
 
+/// Run the executable.
+/// @return Zero on success, two for invalid command-line usage, or one for a runtime failure.
 int main(int argc, char ** argv) {
     Options               options;
     llamad::cli::HelpFlag help_flag;

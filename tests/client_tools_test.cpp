@@ -1,5 +1,9 @@
-// ToolSet tests: a C++ function becomes a tool definition, and a model's ToolCall runs it.
-// No daemon — this is everything client.h does on its own side of the RPC.
+/** @file
+ * @brief Reflected tool definitions, checked argument dispatch and recoverable failures.
+ *
+ * ToolSet tests: a C++ function becomes a tool definition, and a model's ToolCall runs it.
+ * No daemon — this is everything client.h does on its own side of the RPC.
+ */
 
 #include "llamad/client.h"
 

@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
 project(llamad LANGUAGES C CXX)
 
+option(LLAMAD_BUILD_DOCS "Enable the Doxygen documentation target" OFF)
+if(LLAMAD_BUILD_DOCS)
+    add_subdirectory(docs)
+endif()
+
 # llama.cpp builds at the standard it is written for. The project's own targets are declared
 # after it and use C++26 (see below).
 set(CMAKE_CXX_STANDARD 17)

@@ -1,9 +1,13 @@
-// Manual smoke test for llamad::Engine and the chat layer, in-process and without the daemon.
-// The two arguments are the model and the prompt; --help lists the options.
-//
-//   engine_smoke model.gguf --temp 0 --max-tokens 16 "Count to three"
-//   engine_smoke model.gguf --chat --demo-tool "What time is it in Paris?"
-//   engine_smoke model.gguf --grammar-file digits.gbnf "Pick a number"
+/** @file
+ * @brief In-process engine and chat smoke CLI requiring a local GGUF model.
+ *
+ * Manual smoke test for llamad::Engine and the chat layer, in-process and without the daemon.
+ * The two arguments are the model and the prompt; --help lists the options.
+ *
+ *   engine_smoke model.gguf --temp 0 --max-tokens 16 "Count to three"
+ *   engine_smoke model.gguf --chat --demo-tool "What time is it in Paris?"
+ *   engine_smoke model.gguf --grammar-file digits.gbnf "Pick a number"
+ */
 
 #include "chat_format.h"
 #include "engine.h"
@@ -27,45 +31,47 @@ namespace {
 
 using llamad::cli::help;
 
+/// Options specific to this executable; shared flags are composed separately.
 struct Options {
     [[=help{"wrap the prompt as a single user message via the chat template"}]]
-    bool chat = false;
+    bool chat = false;  ///< Wrap the prompt as a single user message via the chat template.
 
     [[=help{"with --chat: offer the model one get_current_time tool"}]]
-    bool demo_tool = false;
+    bool demo_tool = false;  ///< With --chat: offer the model one get_current_time tool.
 
     [[=help{"PATH", "constrain generation with this GBNF file\n"
                     "(not lazy; overrides --chat's grammar)"}]]
-    std::string grammar_file;
+    std::string grammar_file;  ///< Constrain generation with this GBNF file  (not lazy; overrides --chat's grammar).
 
     [[=help{"sampling temperature (<= 0 means greedy)"}]]
-    std::optional<float> temp;
+    std::optional<float> temp;  ///< Sampling temperature (<= 0 means greedy).
 
     [[=help{"sampling seed"}]]
-    std::optional<uint32_t> seed;
+    std::optional<uint32_t> seed;  ///< Sampling seed.
 
     [[=help{"top-k"}]]
-    std::optional<int32_t> top_k;
+    std::optional<int32_t> top_k;  ///< Top-k.
 
     [[=help{"top-p"}]]
-    std::optional<float> top_p;
+    std::optional<float> top_p;  ///< Top-p.
 
     [[=help{"min-p"}]]
-    std::optional<float> min_p;
+    std::optional<float> min_p;  ///< Min-p.
 
     [[=help{"stop after N generated tokens (< 0 = until the context is full)"}]]
-    std::optional<int32_t> max_tokens;
+    std::optional<int32_t> max_tokens;  ///< Stop after N generated tokens (< 0 = until the context is full).
 
     [[=help{"STR", "stop string (repeatable)"}]]
-    std::vector<std::string> stop;
+    std::vector<std::string> stop;  ///< Stop string (repeatable).
 
     [[=help{"return false from the chunk callback after N chunks"}]]
-    long cancel_after = -1;
+    long cancel_after = -1;  ///< Return false from the chunk callback after N chunks.
 
     [[=help{"run generate() N times in the same process"}]]
-    long repeat = 1;
+    long repeat = 1;  ///< Run generate() N times in the same process.
 };
 
+/// Print usage and reflected flag descriptions to stderr.
 void print_usage(const char * argv0) {
     std::fprintf(stderr,
                  "usage: %s <model.gguf> [options] <prompt>\n"
@@ -75,7 +81,7 @@ void print_usage(const char * argv0) {
     llamad::cli::print_flags(stderr, Options{}, llamad::EngineFlags{}, llamad::cli::HelpFlag{});
 }
 
-// Reads a whole file. Throws if it cannot be opened.
+/// Reads a whole file. Throws if it cannot be opened.
 std::string read_file(const std::string & path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
@@ -84,7 +90,7 @@ std::string read_file(const std::string & path) {
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
-// The one tool --demo-tool offers, so tool calling can be exercised without the daemon.
+/// The one tool --demo-tool offers, so tool calling can be exercised without the daemon.
 llamad::Tool demo_tool() {
     llamad::Tool tool;
     tool.name                   = "get_current_time";
@@ -95,6 +101,7 @@ llamad::Tool demo_tool() {
     return tool;
 }
 
+/// Print available backend devices and their memory without loading a model.
 void print_device_table() {
     const std::vector<llamad::DeviceInfo> devices = llamad::Engine::list_devices();
     size_t w_name = std::strlen("NAME");
@@ -118,7 +125,7 @@ void print_device_table() {
     }
 }
 
-// A sampling flag that was not given leaves the engine's own default in place.
+/// A sampling flag that was not given leaves the engine's own default in place.
 template <typename T>
 void apply(const std::optional<T> & flag, T & field) {
     if (flag) {
@@ -126,6 +133,7 @@ void apply(const std::optional<T> & flag, T & field) {
     }
 }
 
+/// Spell engine finish reasons in smoke-test output.
 const char * reason_name(llamad::FinishReason reason) {
     switch (reason) {
         case llamad::FinishReason::Eog:       return "Eog";
@@ -138,6 +146,8 @@ const char * reason_name(llamad::FinishReason reason) {
 
 }  // namespace
 
+/// Run the executable.
+/// @return Zero on success, two for invalid command-line usage, or one for a runtime failure.
 int main(int argc, char ** argv) {
     Options                  options;
     llamad::EngineFlags      engine_flags;

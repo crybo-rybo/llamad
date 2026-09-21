@@ -1,5 +1,9 @@
-// Tests for src/cli/flags.h: what each member type takes from the command line, what `--help`
-// prints for it, and what is rejected. No daemon, no model, no gRPC.
+/** @file
+ * @brief Reflected flag values, errors, positional arguments and help formatting.
+ *
+ * Tests for src/cli/flags.h: what each member type takes from the command line, what `--help`
+ * prints for it, and what is rejected. No daemon, no model, no gRPC.
+ */
 
 #include "flags.h"
 

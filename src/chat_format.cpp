@@ -1,3 +1,7 @@
+/** @file
+ * @brief The sole adapter to llama.cpp common templates, grammars and chat parsers.
+ */
+
 #include "chat_format.h"
 
 #include "chat.h"
@@ -23,6 +27,7 @@ namespace {
 // chat layer would write template chatter into the daemon's stdout.
 // ---------------------------------------------------------------------------
 
+/// Suppress common-library informational output so daemon stdout stays empty.
 void init_common_log_once() {
     static std::once_flag once;
     std::call_once(once, [] { common_log_set_verbosity_thold(LOG_LEVEL_WARN); });
@@ -32,8 +37,8 @@ void init_common_log_once() {
 // Tool call ids
 // ---------------------------------------------------------------------------
 
-// Same shape as llama-server's: 32 random alphanumeric characters. Ids only have to be
-// unique within one response, so a per-call thread-local generator is plenty.
+/// Same shape as llama-server's: 32 random alphanumeric characters. Ids only have to be
+/// unique within one response, so a per-call thread-local generator is plenty.
 std::string gen_tool_call_id() {
     static const char alnum[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
@@ -51,6 +56,7 @@ std::string gen_tool_call_id() {
 // Conversions
 // ---------------------------------------------------------------------------
 
+/// Translate one history turn without exposing common types in the header.
 common_chat_msg to_common(const ChatMessage & message) {
     common_chat_msg msg;
     msg.role         = message.role;
@@ -68,6 +74,7 @@ common_chat_msg to_common(const ChatMessage & message) {
     return msg;
 }
 
+/// Validate schema syntax and provide common with an object for argument-free tools.
 common_chat_tool to_common(const Tool & tool) {
     // common parses `parameters` with nlohmann and lets the exception escape into the middle of
     // template rendering; validate here instead so the caller gets a useful message.
@@ -84,6 +91,7 @@ common_chat_tool to_common(const Tool & tool) {
     return out;
 }
 
+/// Convert a parsed call, spelling an argument-free call as the JSON object {}.
 ToolCall from_common(const common_chat_tool_call & call) {
     ToolCall out;
     out.id             = call.id;
@@ -93,16 +101,16 @@ ToolCall from_common(const common_chat_tool_call & call) {
     return out;
 }
 
-// The PEG parsers are lenient, so text cut off inside a tool call still parses: the call comes back
-// with a half-finished name or a fragment of its arguments ("{"). Complete calls are the only ones
-// worth handing to a client, and valid JSON arguments are the test for that.
+/// The PEG parsers are lenient, so text cut off inside a tool call still parses: the call comes back
+/// with a half-finished name or a fragment of its arguments ("{"). Complete calls are the only ones
+/// worth handing to a client, and valid JSON arguments are the test for that.
 bool is_complete(const common_chat_tool_call & call) {
     return !call.name.empty() && (call.arguments.empty() || nlohmann::json::accept(call.arguments));
 }
 
-// The engine resolves trigger words against the vocab, so words stay raw here and only regexes
-// get the treatment common/sampling.cpp:220-255 applies. TOKEN triggers cannot occur: they are
-// produced from a vocab, and a ChatFormat is built from a template string with no model.
+/// The engine resolves trigger words against the vocab, so words stay raw here and only regexes
+/// get the treatment common/sampling.cpp:220-255 applies. TOKEN triggers cannot occur: they are
+/// produced from a vocab, and a ChatFormat is built from a template string with no model.
 void split_triggers(const std::vector<common_grammar_trigger> & triggers, GrammarSpec & spec) {
     for (const common_grammar_trigger & trigger : triggers) {
         switch (trigger.type) {
@@ -138,18 +146,19 @@ void split_triggers(const std::vector<common_grammar_trigger> & triggers, Gramma
 // Parser state
 // ---------------------------------------------------------------------------
 
-// Everything common_chat_parse needs, built once per render and shared by every Stream.
+/// Everything common_chat_parse needs, built once per render and shared by every Stream.
 struct ParseState {
-    common_chat_parser_params params;
+    common_chat_parser_params params;  ///< Format identifier, parser and generation prefix fixed by a render.
 };
 
 // ---------------------------------------------------------------------------
 // ChatFormat
 // ---------------------------------------------------------------------------
 
+/// Own immutable compiled templates and their parallel-call capability.
 struct ChatFormat::Impl {
-    common_chat_templates_ptr templates;
-    bool                      parallel_tool_calls = false;
+    common_chat_templates_ptr templates;                    ///< Owned compiled model templates.
+    bool                      parallel_tool_calls = false;  ///< Whether the template supports more than one call in a turn.
 };
 
 ChatFormat::ChatFormat(const std::string & template_source,
@@ -234,22 +243,24 @@ RenderedChat ChatFormat::render(const std::vector<ChatMessage> & messages, const
 // ChatFormat::Stream
 // ---------------------------------------------------------------------------
 
+/// Accumulate one request's output and track exactly which visible bytes were delivered.
 struct ChatFormat::Stream::Impl {
-    std::shared_ptr<const ParseState> state;
+    std::shared_ptr<const ParseState> state;  ///< Shared immutable parser state from the rendered request.
 
-    std::string              accumulated;   // every byte pushed, verbatim
-    common_chat_msg          parsed;        // last successful parse
-    std::vector<std::string> call_ids;      // ids handed out so far, by call index
-    std::string              emitted;       // exactly what push() has returned so far
+    std::string              accumulated;  ///< every byte pushed, verbatim
+    common_chat_msg          parsed;       ///< last successful parse
+    std::vector<std::string> call_ids;     ///< ids handed out so far, by call index
+    std::string              emitted;      ///< exactly what push() has returned so far
 
+    /// Result of reparsing the accumulated output as partial or final text.
     struct Advance {
-        bool        ok = false;   // the parser accepted the text
-        std::string delta;        // content that became visible since the last parse
+        bool        ok = false;  ///< the parser accepted the text
+        std::string delta;       ///< content that became visible since the last parse
     };
 
-    // Re-parses `accumulated`. A partial parse that fails just means "not enough input": the text
-    // stays accumulated and the next push tries again. A non-partial one that fails means the
-    // output does not match the format at all.
+    /// Re-parses `accumulated`. A partial parse that fails just means "not enough input": the text
+    /// stays accumulated and the next push tries again. A non-partial one that fails means the
+    /// output does not match the format at all.
     Advance advance(bool is_partial) {
         Advance result;
 
@@ -285,10 +296,10 @@ struct ChatFormat::Stream::Impl {
         return result;
     }
 
-    // Where the emitted content ends in the raw output. The parser returns content, not offsets,
-    // and content is a verbatim substring of the raw text (with tools, leading whitespace is
-    // trimmed, so it is not always a prefix) -- hence a search rather than an offset.
-    // npos = the emitted text is not a substring of the raw output, so the two cannot be aligned.
+    /// Where the emitted content ends in the raw output. The parser returns content, not offsets,
+    /// and content is a verbatim substring of the raw text (with tools, leading whitespace is
+    /// trimmed, so it is not always a prefix) -- hence a search rather than an offset.
+    /// npos = the emitted text is not a substring of the raw output, so the two cannot be aligned.
     size_t raw_offset_after_emitted() const {
         if (emitted.empty()) {
             return 0;

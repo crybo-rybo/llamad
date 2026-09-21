@@ -1,5 +1,9 @@
-// Parser and renderer tests for src/chat_format.cpp. No model file: ChatFormat is built from a
-// chat template string, so the Qwen2.5 template shipped with llama.cpp is enough.
+/** @file
+ * @brief Model-free template rendering and incremental tool-call parsing regressions.
+ *
+ * Parser and renderer tests for src/chat_format.cpp. No model file: ChatFormat is built from a
+ * chat template string, so the Qwen2.5 template shipped with llama.cpp is enough.
+ */
 
 #include "chat_format.h"
 

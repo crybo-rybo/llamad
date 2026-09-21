@@ -1,3 +1,7 @@
+/** @file
+ * @brief Stateless RPC handlers, stream finalization and error-to-status translation.
+ */
+
 #include "service.h"
 
 #include <chrono>
@@ -13,7 +17,7 @@
 namespace llamad {
 namespace {
 
-// Only fields the client actually set override the engine defaults from engine.h.
+/// Only fields the client actually set override the engine defaults from engine.h.
 SamplingParams from_proto(const v1::SamplingParams & p) {
     SamplingParams out;  // engine defaults
     if (p.has_temperature()) { out.temperature = p.temperature(); }
@@ -26,7 +30,7 @@ SamplingParams from_proto(const v1::SamplingParams & p) {
     return out;
 }
 
-// `tool_calls` < 0 leaves the count out of the line entirely (Generate has no tool calls).
+/// `tool_calls` < 0 leaves the count out of the line entirely (Generate has no tool calls).
 void log_request(const char * rpc_name, const GenerateStats & stats, const char * reason, double wall_ms,
                  int tool_calls) {
     char tools[32] = "";
