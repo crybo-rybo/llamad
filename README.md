@@ -35,10 +35,10 @@ templates and tool-call parsing; it is the bulk of a first build. The tests need
 model file and no daemon: the chat-template ones render and parse against a template
 checked into the submodule, the rest need nothing but the build.
 
-GitHub Actions builds on Arch Linux (CPU-only) on every push and pull request, and can
-also be started manually. The job builds the daemon, client, and engine smoke executable, and
-runs the tests without a GPU or model download. GPU execution and inference with a real model
-are not covered by CI.
+GitHub Actions builds on Arch Linux (CPU-only) when a pull request is opened, reopened or
+updated, on pushes to `main`, and on manual runs. The job builds the daemon, client, and
+engine smoke executable, and runs the tests without a GPU or model download. GPU execution
+and inference with a real model are not covered by CI.
 
 ## API documentation
 
@@ -75,8 +75,9 @@ target, including in engine-only builds. Normal builds do not generate documenta
 leaving the option off does not search for Doxygen. Both entry points use the same configuration
 in `docs/CMakeLists.txt`. Missing documentation and malformed Doxygen comments fail the build.
 
-The Documentation workflow builds on every push and pull request and uploads a downloadable
-`github-pages` artifact. Successful builds on the repository's default branch deploy to
+The Documentation workflow builds when a pull request is opened, reopened or updated, on
+pushes to `main`, and on manual runs. Each build uploads a downloadable `github-pages`
+artifact. Successful builds on the repository's default branch deploy to
 [GitHub Pages](https://crybo-rybo.github.io/llamad/); manual runs deploy only when that branch is
 selected. Pull requests only build. To enable deployment, set **Settings → Pages → Build and
 deployment → Source** to **GitHub Actions** and allow the default branch in the `github-pages`
