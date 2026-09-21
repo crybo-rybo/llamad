@@ -24,6 +24,8 @@ single source of truth for how things work.
 | `src/engine.{h,cpp}` | Wrapper over libllama: model loading, tokenizing, sampling, the generate loop, UTF-8 and stop-string safe streaming. |
 | `src/chat_format.{h,cpp}` | Chat layer: renders messages and tools through the model's Jinja template, builds the tool-call grammar, parses tool calls out of generated text. |
 | `src/service.{h,cpp}`, `src/main.cpp` | gRPC service and the daemon: socket lifecycle, signals, proto ↔ engine type conversion. |
+| `src/cli/flags.h` | The one command-line parser and `--help` printer, over a struct whose members are a binary's flags. Target `llamad_flags` exposes only `src/cli`, so `llamad-chat` uses it without reaching a daemon header. |
+| `src/engine_flags.h` | The context and offload flags `llamad` and `engine_smoke` share, and the `EngineConfig` they describe. |
 | `src/engine_smoke.cpp` | CLI that drives the engine and chat layer in-process, with no daemon and no gRPC. |
 | `client/` | Client library (`include/llamad/client.h`, `src/client.cpp`) and `llamad-chat` (`examples/chat_cli.cpp`). `include/llamad/json.h` + `src/json.cpp` read and write a tool's arguments, its result and its JSON Schema from a type's members; `client.h` includes it, so an application still includes one header. |
 | `tests/` | Plain-executable tests registered with CTest. No model file needed. |
@@ -54,8 +56,8 @@ agreement first, not a clever workaround.
    contain no gRPC or protobuf types. `chat_format.cpp` is the only file that touches llama.cpp's
    `common` library, which is unstable and not a public API; its header exposes no llama.cpp
    types. All gRPC and protobuf knowledge lives in `service.*` and `main.cpp`. `client.h` exposes
-   no gRPC or protobuf types. The point: a submodule bump can break at most one file, and an
-   application needs one header.
+   no gRPC or protobuf types, and `src/cli/flags.h` includes only the standard library. The
+   point: a submodule bump can break at most one file, and an application needs one header.
 2. **llama.cpp is never patched.** It is a pinned submodule. If something is missing, solve it on
    this side of the boundary or raise it.
 3. **The three contracts change deliberately.** `llamad.proto`, `engine.h` and `client.h` are the
@@ -94,8 +96,9 @@ problem while working, mention it — do not fix it in the same change. If you h
 effort on a side issue than on the task itself, step back.
 
 **Reuse before adding.** Read the surrounding code first. This codebase already has a streaming
-holdback filter, RAII wrappers for llama.cpp handles, proto conversion helpers and error types.
-Extend what exists before introducing a parallel mechanism.
+holdback filter, RAII wrappers for llama.cpp handles, proto conversion helpers, a flag parser
+driven by an options struct and error types. Extend what exists before introducing a parallel
+mechanism.
 
 **No new dependencies without asking.** The dependency list is llama.cpp, gRPC and Protobuf.
 Tests are plain executables with a `CHECK` macro; the client reads and writes the JSON a tool

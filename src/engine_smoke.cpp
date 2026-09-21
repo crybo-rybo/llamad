@@ -1,53 +1,78 @@
-// Manual smoke test for llamad::Engine. No third-party dependencies.
+// Manual smoke test for llamad::Engine and the chat layer, in-process and without the daemon.
+// The two arguments are the model and the prompt; --help lists the options.
 //
-//   engine_smoke <model.gguf> [options] <prompt>
-//
-// Options:
-//   --chat              wrap the prompt as a single user message via the chat template
-//   --demo-tool         with --chat: offer the model one get_current_time tool
-//   --grammar-file PATH constrain generation with this GBNF file (not lazy; overrides --chat's grammar)
-//   --temp T            sampling temperature (<= 0 means greedy)
-//   --seed N            sampling seed
-//   --top-k N           top-k
-//   --top-p P           top-p
-//   --min-p P           min-p
-//   --max-tokens N      stop after N generated tokens (< 0 = until the context is full)
-//   --stop STR          stop string (repeatable)
-//   --cancel-after N    return false from the chunk callback after N chunks
-//   --repeat N          run generate() N times in the same process
-//   --ctx N             context size
-//   --threads N         thread count (0 = let llama.cpp decide)
-//   --ngl N             number of layers to offload to the GPU
-//   --devices A[,B...]  offload to these devices only (names from --list-devices)
-//   --tensor-split A[,B...]  share of the model per device, e.g. 3,1
-//   --list-devices      list the devices this build can see and exit
+//   engine_smoke model.gguf --temp 0 --max-tokens 16 "Count to three"
+//   engine_smoke model.gguf --chat --demo-tool "What time is it in Paris?"
+//   engine_smoke model.gguf --grammar-file digits.gbnf "Pick a number"
 
 #include "chat_format.h"
 #include "engine.h"
+#include "engine_flags.h"
+#include "flags.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace {
 
+using llamad::cli::help;
+
+struct Options {
+    [[=help{"wrap the prompt as a single user message via the chat template"}]]
+    bool chat = false;
+
+    [[=help{"with --chat: offer the model one get_current_time tool"}]]
+    bool demo_tool = false;
+
+    [[=help{"PATH", "constrain generation with this GBNF file\n"
+                    "(not lazy; overrides --chat's grammar)"}]]
+    std::string grammar_file;
+
+    [[=help{"sampling temperature (<= 0 means greedy)"}]]
+    std::optional<float> temp;
+
+    [[=help{"sampling seed"}]]
+    std::optional<uint32_t> seed;
+
+    [[=help{"top-k"}]]
+    std::optional<int32_t> top_k;
+
+    [[=help{"top-p"}]]
+    std::optional<float> top_p;
+
+    [[=help{"min-p"}]]
+    std::optional<float> min_p;
+
+    [[=help{"stop after N generated tokens (< 0 = until the context is full)"}]]
+    std::optional<int32_t> max_tokens;
+
+    [[=help{"STR", "stop string (repeatable)"}]]
+    std::vector<std::string> stop;
+
+    [[=help{"return false from the chunk callback after N chunks"}]]
+    long cancel_after = -1;
+
+    [[=help{"run generate() N times in the same process"}]]
+    long repeat = 1;
+};
+
 void print_usage(const char * argv0) {
     std::fprintf(stderr,
-                 "usage: %s <model.gguf> [--chat] [--demo-tool] [--grammar-file PATH] [--temp T]\n"
-                 "          [--seed N] [--top-k N] [--top-p P] [--min-p P] [--max-tokens N]\n"
-                 "          [--stop STR]... [--cancel-after N] [--repeat N] [--ctx N]\n"
-                 "          [--threads N] [--ngl N]\n"
-                 "          [--devices A[,B...]] [--tensor-split A[,B...]] <prompt>\n"
-                 "       %s --list-devices\n",
+                 "usage: %s <model.gguf> [options] <prompt>\n"
+                 "       %s --list-devices\n"
+                 "\n",
                  argv0, argv0);
+    llamad::cli::print_flags(stderr, Options{}, llamad::EngineFlags{}, llamad::cli::HelpFlag{});
 }
 
 // Reads a whole file. Throws if it cannot be opened.
@@ -68,24 +93,6 @@ llamad::Tool demo_tool() {
                                   R"("description":"IANA timezone, e.g. Europe/Paris"}},)"
                                   R"("required":["timezone"]})";
     return tool;
-}
-
-// Splits "a,b,c" on commas. Throws on an empty element.
-std::vector<std::string> split_list(const std::string & text, const char * what) {
-    std::vector<std::string> out;
-    for (size_t start = 0;;) {
-        const size_t comma = text.find(',', start);
-        const size_t len   = comma == std::string::npos ? std::string::npos : comma - start;
-        std::string  part  = text.substr(start, len);
-        if (part.empty()) {
-            throw std::runtime_error(std::string(what) + " has an empty element");
-        }
-        out.push_back(std::move(part));
-        if (comma == std::string::npos) {
-            return out;
-        }
-        start = comma + 1;
-    }
 }
 
 void print_device_table() {
@@ -111,6 +118,14 @@ void print_device_table() {
     }
 }
 
+// A sampling flag that was not given leaves the engine's own default in place.
+template <typename T>
+void apply(const std::optional<T> & flag, T & field) {
+    if (flag) {
+        field = *flag;
+    }
+}
+
 const char * reason_name(llamad::FinishReason reason) {
     switch (reason) {
         case llamad::FinishReason::Eog:       return "Eog";
@@ -124,88 +139,31 @@ const char * reason_name(llamad::FinishReason reason) {
 }  // namespace
 
 int main(int argc, char ** argv) {
-    llamad::EngineConfig    config;
-    llamad::SamplingParams  params;
+    Options                  options;
+    llamad::EngineFlags      engine_flags;
+    llamad::cli::HelpFlag    help_flag;
+    llamad::EngineConfig     config;
+    llamad::SamplingParams   params;
     std::vector<std::string> positional;
 
-    bool        chat         = false;
-    bool        use_tool     = false;
-    bool        list_devices = false;
-    long        cancel_after = -1;
-    long        repeat       = 1;
-    std::string grammar_file;
-
     try {
-        for (int i = 1; i < argc; ++i) {
-            const std::string arg = argv[i];
-
-            auto next = [&](const char * name) -> std::string {
-                if (i + 1 >= argc) {
-                    throw std::runtime_error(std::string("missing value for ") + name);
-                }
-                return argv[++i];
-            };
-
-            if (arg == "--chat") {
-                chat = true;
-            } else if (arg == "--demo-tool") {
-                use_tool = true;
-            } else if (arg == "--grammar-file") {
-                grammar_file = next("--grammar-file");
-            } else if (arg == "--temp") {
-                params.temperature = std::stof(next("--temp"));
-            } else if (arg == "--seed") {
-                params.seed = static_cast<uint32_t>(std::stoul(next("--seed")));
-            } else if (arg == "--top-k") {
-                params.top_k = std::stoi(next("--top-k"));
-            } else if (arg == "--top-p") {
-                params.top_p = std::stof(next("--top-p"));
-            } else if (arg == "--min-p") {
-                params.min_p = std::stof(next("--min-p"));
-            } else if (arg == "--max-tokens") {
-                params.max_tokens = std::stoi(next("--max-tokens"));
-            } else if (arg == "--stop") {
-                params.stop.push_back(next("--stop"));
-            } else if (arg == "--cancel-after") {
-                cancel_after = std::stol(next("--cancel-after"));
-            } else if (arg == "--repeat") {
-                repeat = std::stol(next("--repeat"));
-            } else if (arg == "--ctx") {
-                config.n_ctx = static_cast<uint32_t>(std::stoul(next("--ctx")));
-            } else if (arg == "--threads") {
-                config.n_threads = std::stoi(next("--threads"));
-            } else if (arg == "--ngl") {
-                config.n_gpu_layers = std::stoi(next("--ngl"));
-            } else if (arg == "--devices") {
-                config.devices = split_list(next("--devices"), "--devices");
-            } else if (arg == "--tensor-split") {
-                config.tensor_split.clear();
-                for (const std::string & part : split_list(next("--tensor-split"), "--tensor-split")) {
-                    config.tensor_split.push_back(std::stof(part));
-                }
-            } else if (arg == "--list-devices") {
-                list_devices = true;
-            } else if (arg == "-h" || arg == "--help") {
-                print_usage(argv[0]);
-                return 0;
-            } else if (arg.rfind("--", 0) == 0) {
-                throw std::runtime_error("unknown option: " + arg);
-            } else {
-                positional.push_back(arg);
-            }
+        positional = llamad::cli::parse_flags(argc, argv, options, engine_flags, help_flag);
+        if (help_flag.help) {
+            print_usage(argv[0]);
+            return 0;
         }
-
-        if (use_tool && !chat) {
-            throw std::runtime_error("--demo-tool only makes sense with --chat");
+        if (options.demo_tool && !options.chat) {
+            throw llamad::cli::FlagError("--demo-tool only makes sense with --chat");
         }
-    } catch (const std::exception & e) {
+        config = llamad::to_config(engine_flags);
+    } catch (const llamad::cli::FlagError & e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         print_usage(argv[0]);
         return 2;
     }
 
     // Listing devices needs no model.
-    if (list_devices) {
+    if (engine_flags.list_devices) {
         print_device_table();
         return 0;
     }
@@ -217,6 +175,14 @@ int main(int argc, char ** argv) {
 
     config.model_path        = positional[0];
     const std::string prompt = positional[1];
+
+    apply(options.temp, params.temperature);
+    apply(options.top_k, params.top_k);
+    apply(options.top_p, params.top_p);
+    apply(options.min_p, params.min_p);
+    apply(options.max_tokens, params.max_tokens);
+    params.seed = options.seed;
+    params.stop = options.stop;
 
     try {
         llamad::Engine engine(config);
@@ -234,7 +200,7 @@ int main(int argc, char ** argv) {
         llamad::RenderedChat                rendered;
 
         std::string text = prompt;
-        if (chat) {
+        if (options.chat) {
             const llamad::ChatTemplateInfo tmpl = engine.chat_template();
             if (tmpl.source.empty()) {
                 throw std::runtime_error("the model has no built-in chat template");
@@ -242,7 +208,7 @@ int main(int argc, char ** argv) {
             format.reset(new llamad::ChatFormat(tmpl.source, tmpl.bos_token, tmpl.eos_token));
 
             std::vector<llamad::Tool> tools;
-            if (use_tool) {
+            if (options.demo_tool) {
                 tools.push_back(demo_tool());
             }
 
@@ -260,8 +226,8 @@ int main(int argc, char ** argv) {
 
         // A hand-written grammar replaces whatever the chat layer came up with, so that a
         // constraint can be tried out on its own.
-        if (!grammar_file.empty()) {
-            params.grammar      = read_file(grammar_file);
+        if (!options.grammar_file.empty()) {
+            params.grammar      = read_file(options.grammar_file);
             params.grammar_lazy = false;
             params.grammar_trigger_patterns.clear();
             params.grammar_trigger_words.clear();
@@ -269,9 +235,9 @@ int main(int argc, char ** argv) {
 
         std::fprintf(stderr, "prompt tokens: %zu\n", engine.tokenize(text, true, true).size());
 
-        for (long run = 0; run < repeat; ++run) {
-            if (repeat > 1) {
-                std::fprintf(stderr, "--- run %ld/%ld ---\n", run + 1, repeat);
+        for (long run = 0; run < options.repeat; ++run) {
+            if (options.repeat > 1) {
+                std::fprintf(stderr, "--- run %ld/%ld ---\n", run + 1, options.repeat);
             }
 
             // The parser is what withholds tool-call markup, so only what it returns is printed.
@@ -288,7 +254,7 @@ int main(int argc, char ** argv) {
                     std::fwrite(visible.data(), 1, visible.size(), stdout);
                     std::fflush(stdout);
                 }
-                return !(cancel_after >= 0 && chunks >= cancel_after);
+                return !(options.cancel_after >= 0 && chunks >= options.cancel_after);
             };
 
             const llamad::GenerateResult result = engine.generate(text, params, on_chunk);

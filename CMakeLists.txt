@@ -41,6 +41,12 @@ if(NOT LLAMAD_HAVE_REFLECTION)
 endif()
 add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-freflection>)
 
+# Command-line flags, from a struct whose members are the flags. Header-only and standard
+# library only; its one include directory is src/cli, so llamad-chat parses its flags without
+# any daemon header becoming reachable from the client tree.
+add_library(llamad_flags INTERFACE)
+target_include_directories(llamad_flags INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src/cli)
+
 # Engine: libllama wrapper, no gRPC/protobuf.
 add_library(llamad_engine STATIC src/engine.cpp)
 target_include_directories(llamad_engine PUBLIC src)
@@ -57,7 +63,7 @@ target_include_directories(llamad_chat PUBLIC src)
 target_link_libraries(llamad_chat PRIVATE llama-common)
 
 add_executable(engine_smoke src/engine_smoke.cpp)
-target_link_libraries(engine_smoke PRIVATE llamad_engine llamad_chat)
+target_link_libraries(engine_smoke PRIVATE llamad_engine llamad_chat llamad_flags)
 
 enable_testing()
 
@@ -87,7 +93,7 @@ protobuf_generate(TARGET llamad_proto
     PROTOC_OUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/gen)
 
 add_executable(llamad src/main.cpp src/service.cpp)
-target_link_libraries(llamad PRIVATE llamad_engine llamad_chat llamad_proto gRPC::grpc++_reflection)
+target_link_libraries(llamad PRIVATE llamad_engine llamad_chat llamad_flags llamad_proto gRPC::grpc++_reflection)
 
 add_subdirectory(client)
 

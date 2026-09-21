@@ -23,7 +23,7 @@ git clone --recurse-submodules git@github.com:crybo-rybo/llamad.git
 cd llamad
 cmake -S . -B build -G Ninja
 cmake --build build -j
-ctest --test-dir build --output-on-failure    # chat template, wire contract, JSON and tool set tests
+ctest --test-dir build --output-on-failure    # chat template, flags, wire contract, JSON and tool set tests
 ```
 
 (If you already cloned without submodules: `git submodule update --init --recursive`.)

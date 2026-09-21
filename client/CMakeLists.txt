@@ -11,4 +11,4 @@ target_compile_features(llamad_client PUBLIC cxx_std_26)
 target_compile_options(llamad_client PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-freflection>)
 
 add_executable(llamad-chat examples/chat_cli.cpp)
-target_link_libraries(llamad-chat PRIVATE llamad_client)
+target_link_libraries(llamad-chat PRIVATE llamad_client llamad_flags)

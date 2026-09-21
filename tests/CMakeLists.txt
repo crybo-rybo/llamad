@@ -9,6 +9,12 @@ target_compile_definitions(chat_format_test PRIVATE
 
 add_test(NAME chat_format COMMAND chat_format_test)
 
+# The flag parser is header-only and needs neither gRPC nor a model.
+add_executable(flags_test flags_test.cpp)
+target_link_libraries(flags_test PRIVATE llamad_flags)
+
+add_test(NAME flags COMMAND flags_test)
+
 # The one place the proto, the engine, the chat layer and the client are visible at once, which
 # is what lets it check that every struct mirroring a message still matches it.
 if(TARGET llamad_proto)
