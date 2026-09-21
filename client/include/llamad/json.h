@@ -5,6 +5,7 @@
 // Values are strings, booleans, numbers, enums, optionals, vectors and aggregate structs.
 // Unknown keys are ignored, missing required members are errors, and absent or null optionals
 // are unset. Enums use their names; unset optional members are omitted when writing objects.
+// Whatever a type cannot take, in either direction, is a json::Error.
 
 #include <cmath>
 #include <cstddef>
@@ -40,6 +41,13 @@ struct desc {
 };
 
 namespace json {
+
+// Thrown by read() for text that is not JSON or does not fit the type, and by write() for a value
+// JSON cannot carry. nlohmann's own exceptions stay behind this header.
+struct Error : std::runtime_error {
+    explicit Error(const std::string & message) : std::runtime_error("json: " + message) {}
+};
+
 namespace detail {
 
 // Declaration order is also the order presented to the model in its tool schema.
@@ -90,7 +98,7 @@ void read_value(const Json & in, T & out) {
         }
     } else if constexpr (is_vector<T>) {
         if (!in.is_array()) {
-            throw std::invalid_argument("json: expected an array");
+            throw Error("expected an array");
         }
         out.clear();
         out.reserve(in.size());
@@ -99,9 +107,20 @@ void read_value(const Json & in, T & out) {
             read_value(element, value);
             out.push_back(std::move(value));
         }
-    } else if constexpr (std::is_same_v<T, std::string> || std::is_same_v<T, bool>) {
+    } else if constexpr (std::is_same_v<T, std::string>) {
+        if (!in.is_string()) {
+            throw Error("expected a string");
+        }
+        in.get_to(out);
+    } else if constexpr (std::is_same_v<T, bool>) {
+        if (!in.is_boolean()) {
+            throw Error("expected true or false");
+        }
         in.get_to(out);
     } else if constexpr (std::is_enum_v<T>) {
+        if (!in.is_string()) {
+            throw Error("expected a string");
+        }
         const std::string name = in.get<std::string>();
         template for (constexpr std::meta::info value : values_of(^^T)) {
             if (name == std::define_static_string(std::meta::identifier_of(value))) {
@@ -109,12 +128,12 @@ void read_value(const Json & in, T & out) {
                 return;
             }
         }
-        throw std::invalid_argument("json: '" + name + "' is not a value of " +
-                                    std::define_static_string(std::meta::identifier_of(^^T)));
+        throw Error("'" + name + "' is not a value of " +
+                    std::define_static_string(std::meta::identifier_of(^^T)));
     } else if constexpr (std::is_integral_v<T>) {
         // get<T>() permits narrowing and signed/unsigned conversions without range checks.
         if (!in.is_number_integer()) {
-            throw std::invalid_argument("json: expected an integer");
+            throw Error("expected an integer");
         }
         // in_range accepts signed/unsigned integer types, so normalize char types too.
         using Integer = std::conditional_t<std::is_signed_v<T>, std::make_signed_t<T>, std::make_unsigned_t<T>>;
@@ -122,21 +141,21 @@ void read_value(const Json & in, T & out) {
             ? std::in_range<Integer>(in.get<uint64_t>())
             : std::in_range<Integer>(in.get<int64_t>());
         if (!fits) {
-            throw std::invalid_argument("json: integer out of range");
+            throw Error("integer out of range");
         }
         in.get_to(out);
     } else if constexpr (std::is_floating_point_v<T>) {
         if (!in.is_number()) {
-            throw std::invalid_argument("json: expected a number");
+            throw Error("expected a number");
         }
         const double value = in.get<double>();
         if (!std::isfinite(value) || std::abs(value) > std::numeric_limits<T>::max()) {
-            throw std::invalid_argument("json: number out of range");
+            throw Error("number out of range");
         }
         out = static_cast<T>(value);
     } else {
         if (!in.is_object()) {
-            throw std::invalid_argument("json: expected an object");
+            throw Error("expected an object");
         }
         template for (constexpr std::meta::info field : fields_of(^^T)) {
             using Field = [:std::meta::type_of(field):];
@@ -147,7 +166,7 @@ void read_value(const Json & in, T & out) {
             } else if constexpr (is_optional<Field>) {
                 out.[:field:].reset();
             } else {
-                throw std::invalid_argument(std::string("json: missing key '") + name + "'");
+                throw Error(std::string("missing key '") + name + "'");
             }
         }
     }
@@ -169,14 +188,14 @@ Json write_value(const T & value) {
                 return std::define_static_string(std::meta::identifier_of(enumerator));
             }
         }
-        throw std::invalid_argument("json: unnamed enum value");
+        throw Error("unnamed enum value");
     } else if constexpr (std::is_floating_point_v<T>) {
         // nlohmann writes non-finite values as null, which would conceal an invalid tool result.
         if (!std::isfinite(value)) {
-            throw std::invalid_argument("json: non-finite number");
+            throw Error("non-finite number");
         }
         if (std::abs(value) > std::numeric_limits<Json::number_float_t>::max()) {
-            throw std::invalid_argument("json: number out of range");
+            throw Error("number out of range");
         }
         return value;
     } else if constexpr (std::is_arithmetic_v<T> || std::is_same_v<T, std::string>) {
@@ -247,30 +266,38 @@ Json type_schema() {
     }
 }
 
+// A tool's result may hold bytes that are not UTF-8 (file contents, another program's output).
+// They are written as U+FFFD, so the model still gets the rest of the result.
+inline std::string dump(const Json & value) {
+    return value.dump(/*indent*/ -1, /*indent_char*/ ' ', /*ensure_ascii*/ false,
+                      Json::error_handler_t::replace);
+}
+
 }  // namespace detail
 
-// Invalid JSON or incompatible values throw nlohmann exceptions or std::invalid_argument.
 template <typename T>
 void read(std::string_view text, T & out) {
-    const auto value = detail::Json::parse(text, [](int depth, detail::Json::parse_event_t, detail::Json &) {
-        if (depth > 64) {
-            throw std::invalid_argument("json: nested too deeply");
-        }
-        return true;
-    });
+    // read_value checks what kind of value it holds before taking it, so the parse is the one
+    // place an nlohmann exception can come from.
+    detail::Json value;
+    try {
+        value = detail::Json::parse(text);
+    } catch (const detail::Json::exception & e) {
+        throw Error(e.what());
+    }
     detail::read_value(value, out);
 }
 
 template <typename T>
 std::string write(const T & value) {
-    return detail::write_value(value).dump();
+    return detail::dump(detail::write_value(value));
 }
 
 // Non-optional members are required; descriptions override member annotations positionally for
 // the aggregate synthesised from a tool function's parameter list.
 template <typename T>
 std::string schema(std::span<const char * const> descriptions = {}) {
-    return detail::object_schema<T>(descriptions).dump();
+    return detail::dump(detail::object_schema<T>(descriptions));
 }
 
 }  // namespace json

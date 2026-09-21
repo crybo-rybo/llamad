@@ -124,7 +124,8 @@ int main() {
 
 `llamad/client.h` exposes no gRPC or protobuf types, so your build needs neither
 on its include path. It does reflect over your own tool functions, so linking
-`llamad_client` puts C++26, `-freflection` and nlohmann's include directory on whatever includes it.
+`llamad_client` puts C++26, `-freflection` and nlohmann's include directory on
+whatever includes it.
 
 ## Tool calling
 
@@ -187,7 +188,9 @@ of tool calls, which the caller sees as a `ToolCalls` result.
 Tool arguments use checked C++ conversions: integer arguments must be integers in range,
 floating-point arguments must fit their type, and enums use their enumerator names.
 Absent or null optional arguments are unset; unknown object keys are ignored. JSON parsing
-and serialization use nlohmann/json. Non-finite numbers in tool results are errors.
+and serialization use nlohmann/json. Non-finite numbers in tool results are errors, and bytes
+that are not UTF-8 are written as U+FFFD. `json::read` and `json::write` report all of this as
+`json::Error`, whose message is what the model reads in the `{"error":"..."}` result.
 
 `llamad-chat --demo-tools` is that worked through end to end
 (`client/examples/chat_cli.cpp`): it offers one `get_current_time` tool and answers

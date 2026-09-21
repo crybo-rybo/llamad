@@ -20,9 +20,13 @@ namespace {
     throw RpcError(static_cast<int>(status.error_code()), status.error_message());
 }
 
-// What a tool that could not run reports back to the model.
+// What a tool that could not run reports back to the model: {"error":"..."}.
+struct ToolError {
+    std::string error;
+};
+
 std::string tool_error(const std::string & message) {
-    return nlohmann::json{{"error", message}}.dump();
+    return json::write(ToolError{message});
 }
 
 // The daemon must be there already: a missing socket is an error to report, not

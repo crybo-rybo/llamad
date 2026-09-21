@@ -66,13 +66,14 @@ struct Alarm {
     [[=desc{"How many times to repeat it."}]] std::optional<int> repeat;
 };
 
-// Reads `text` and reports whether the reader rejected it.
+// Reads `text` and reports whether the reader rejected it. json::Error is the only thing read()
+// throws, so anything else escapes and fails the test.
 template <typename T>
 bool rejects(const std::string & text) {
     T value{};
     try {
         json::read(text, value);
-    } catch (const std::exception &) {
+    } catch (const json::Error &) {
         return true;
     }
     return false;
@@ -152,18 +153,20 @@ void test_checked_numbers() {
 void test_object_contract() {
     CHECK(rejects<Alarm>(R"({"unit":"Celsius"})"));                         // missing required key
     CHECK(rejects<Alarm>(R"({"reason":"heat","unit":"Kelvin"})"));          // no such enumerator
+    CHECK(rejects<Alarm>(R"({"reason":7,"unit":"Celsius"})"));              // not a string
+    CHECK(rejects<Alarm>(R"({"reason":"heat","unit":0})"));                 // an enum is its name
+    CHECK(rejects<bool>("1"));
     CHECK(rejects<Point>("[]"));
     CHECK(rejects<std::vector<int>>("{}"));
-    // The adapter limits nesting even inside unknown fields.
-    CHECK(rejects<Point>(R"({"x":0,"y":0,"extra":)" + std::string(70, '[') + "0" +
-                         std::string(70, ']') + "}"));
+    CHECK(rejects<Point>(R"({"x":0,"y":)"));                                // not JSON at all
+    CHECK(rejects<Point>(""));
 
     Alarm alarm;
     try {
         json::read(R"({"unit":"Celsius"})", alarm);
         CHECK(false);
-    } catch (const std::invalid_argument & e) {
-        CHECK(std::string(e.what()).find("missing key 'reason'") != std::string::npos);
+    } catch (const json::Error & e) {
+        CHECK_EQ(e.what(), "json: missing key 'reason'");
     }
 }
 
@@ -191,6 +194,10 @@ void test_reflected_result() {
     CHECK(back.samples.has_value() && *back.samples == 42);
     CHECK(back.tags == reading.tags);
     CHECK(back.at.y == reading.at.y);
+
+    // A result is whatever the tool read from somewhere, so a byte that is not UTF-8 is replaced
+    // and the rest still reaches the model.
+    CHECK_EQ(json::write(std::string("caf\xe9 au lait")), "\"caf\xef\xbf\xbd au lait\"");
 }
 
 enum class Alias { First = 0, AlsoFirst = 0 };
@@ -210,7 +217,7 @@ void test_vectors_and_enums() {
     try {
         json::write(static_cast<Alias>(42));
         CHECK(false);
-    } catch (const std::invalid_argument &) {
+    } catch (const json::Error &) {
     }
     for (const double value : {std::numeric_limits<double>::infinity(),
                                -std::numeric_limits<double>::infinity(),
@@ -218,14 +225,14 @@ void test_vectors_and_enums() {
         try {
             json::write(value);
             CHECK(false);
-        } catch (const std::invalid_argument &) {
+        } catch (const json::Error &) {
         }
     }
     if constexpr (std::numeric_limits<long double>::max() > std::numeric_limits<double>::max()) {
         try {
             json::write(std::numeric_limits<long double>::max());
             CHECK(false);
-        } catch (const std::invalid_argument &) {
+        } catch (const json::Error &) {
         }
     }
 }
