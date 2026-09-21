@@ -33,6 +33,12 @@ if(TARGET llamad_client)
     add_executable(client_tools_test client_tools_test.cpp)
     target_link_libraries(client_tools_test PRIVATE llamad_client)
     add_test(NAME client_tools COMMAND client_tools_test)
+
+    # The tool loop against a scripted fake daemon, which is why this one also links llamad_proto:
+    # the fake implements the generated service base class.
+    add_executable(client_chat_test client_chat_test.cpp)
+    target_link_libraries(client_chat_test PRIVATE llamad_client llamad_proto)
+    add_test(NAME client_chat COMMAND client_chat_test)
 endif()
 
 # The engine and the chat layer in-process, without the daemon. It needs a model file, so it is
