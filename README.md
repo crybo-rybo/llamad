@@ -24,9 +24,8 @@ pacman -S gcc grpc protobuf cmake ninja
 ```sh
 git clone --recurse-submodules git@github.com:crybo-rybo/llamad.git
 cd llamad
-cmake -S . -B build -G Ninja
-cmake --build build -j
-ctest --test-dir build --output-on-failure    # chat template, flags, wire contract, JSON and tool set tests
+./scripts/build.sh cpu                      # builds into build-cpu/
+./scripts/test.sh cpu                       # chat template, flags, wire contract, JSON and tool set tests
 ```
 
 (If you already cloned without submodules: `git submodule update --init --recursive`.)
@@ -71,7 +70,7 @@ fits on neither alone. The daemon prints one line per offload device at startup.
 ## Run the daemon
 
 ```sh
-./build/llamad --model models/qwen2.5-0.5b-instruct-q4_k_m.gguf
+./build-cpu/llamad --model models/qwen2.5-0.5b-instruct-q4_k_m.gguf
 # [llamad] listening on unix:/run/user/1000/llamad.sock
 ```
 
@@ -84,15 +83,15 @@ SIGINT/SIGTERM shut the daemon down and remove the socket.
 ## Chat from the terminal
 
 ```sh
-./build/client/llamad-chat                       # interactive REPL
-./build/client/llamad-chat --once "Hello" --temp 0
-./build/client/llamad-chat --demo-tools          # with one built-in tool, see below
+./build-cpu/client/llamad-chat                       # interactive REPL
+./build-cpu/client/llamad-chat --once "Hello" --temp 0
+./build-cpu/client/llamad-chat --demo-tools          # with one built-in tool, see below
 ```
 
 Also accepts `--socket`, `--system TEXT`, `--seed N`, `--max-tokens N`. Ctrl-C
 cancels the reply in progress; Ctrl-C or Ctrl-D at the prompt quits.
 
-`./build/tests/engine_smoke` drives the engine in-process, with no daemon and no gRPC:
+`./build-cpu/tests/engine_smoke` drives the engine in-process, with no daemon and no gRPC:
 `--chat` renders the prompt through the model's chat template, `--demo-tool`
 adds the same `get_current_time` tool to that rendering, and `--grammar-file
 PATH` constrains generation with a GBNF file of your own.
@@ -203,7 +202,7 @@ that are not UTF-8 are written as U+FFFD. `json::read` and `json::write` report 
 with it.
 
 ```sh
-./build/client/llamad-chat --demo-tools --once "What time is it in Tokyo right now?" --temp 0
+./build-cpu/client/llamad-chat --demo-tools --once "What time is it in Tokyo right now?" --temp 0
 # [tool] get_current_time(Asia/Tokyo) -> 2026-09-21 08:44:44 JST
 # The current time in Tokyo is 2026-09-21 08:44:44 JST.
 # [stats] finish=eog prompt_tokens=461 completion_tokens=52 ...
