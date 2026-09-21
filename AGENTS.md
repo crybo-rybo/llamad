@@ -148,7 +148,9 @@ Match the effort to the risk, and report what you actually ran.
   run canned model output through a real template with no GGUF, so they are cheap — prefer them
   to manual checks wherever the logic can be reached that way.
 - Client changes reachable without a daemon — the JSON reader, a tool's schema or dispatch —
-  belong in `tests/json_test.cpp` or `tests/client_tools_test.cpp`, which need neither.
+  belong in `tests/json_test.cpp` or `tests/client_tools_test.cpp`, which need neither. The
+  `Client::chat` tool loop is covered by `tests/client_chat_test.cpp`, which scripts a fake of
+  the service on a private socket.
 - Engine, service or client changes: exercise the real path. `engine_smoke` covers the engine
   alone (`--stop`, `--cancel-after`, `--grammar-file`, `--chat --demo-tool`); `llamad-chat --once`
   against a running daemon covers the full stack (`--demo-tools` for the tool loop). Use
