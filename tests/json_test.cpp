@@ -1,9 +1,11 @@
-// Reader, writer and schema tests for client/src/json.cpp and the reflective glue in json.h.
-// No daemon and no model: this is the JSON path a tool call travels, on its own.
+// The client's reflection adapter: field mapping, conversion policies and tool schemas.
+// JSON syntax and escaping belong to nlohmann's tests. No daemon or model is needed here.
 
 #include "llamad/json.h"
 
 #include <cstdio>
+#include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -70,21 +72,21 @@ bool rejects(const std::string & text) {
     T value{};
     try {
         json::read(text, value);
-    } catch (const json::Error &) {
+    } catch (const std::exception &) {
         return true;
     }
     return false;
 }
 
 const char * const kReading =
-    R"({"place":"a \"quoted\"\tname","unit":"Fahrenheit","value":-12.5e1,)"
+    R"({"place":"Oslo","unit":"Fahrenheit","value":-125.0,)"
     R"("stale":true,"samples":7,"tags":["a","b"],"at":{"x":1,"y":-2.25},"extra":{"skip":[1,2,{}]}})";
 
-void test_read_reading() {
+void test_reflected_fields() {
     Reading reading;
     json::read(kReading, reading);
 
-    CHECK_EQ(reading.place, "a \"quoted\"\tname");
+    CHECK_EQ(reading.place, "Oslo");
     CHECK(reading.unit == Unit::Fahrenheit);
     CHECK(reading.value == -125.0);
     CHECK(reading.stale);
@@ -93,24 +95,13 @@ void test_read_reading() {
     CHECK(reading.at.x == 1.0 && reading.at.y == -2.25);
 }
 
-// Not raw strings: GCC resolves \uXXXX inside one of those too, so the escape would never reach
-// the reader.
-void test_unicode_escapes() {
-    std::string text;
-    json::read("\"caf\\u00e9 \\u00b5m\"", text);
-    CHECK_EQ(text, "caf\xc3\xa9 \xc2\xb5m");
-
-    json::read("\"a\\ud83d\\ude00b\"", text);  // a surrogate pair is one code point
-    CHECK_EQ(text, "a\xf0\x9f\x98\x80" "b");
-
-    CHECK(rejects<std::string>("\"\\ud83d\""));   // a high surrogate with no low one
-    CHECK(rejects<std::string>("\"\\udc00\""));   // a low surrogate on its own
-    CHECK(rejects<std::string>("\"\\u00g0\""));
-    CHECK(rejects<std::string>("\"\\q\""));
-}
-
 void test_optional() {
     Reading reading;
+    json::read(R"({"place":"x","unit":"Celsius","value":0,"stale":false,"tags":[],"at":{"x":0,"y":0}})",
+               reading);
+    CHECK(!reading.samples.has_value());
+
+    reading.samples = 3;
     json::read(R"({"place":"x","unit":"Celsius","value":0,"stale":false,"tags":[],"at":{"x":0,"y":0}})",
                reading);
     CHECK(!reading.samples.has_value());
@@ -123,54 +114,72 @@ void test_optional() {
     CHECK(!reading.samples.has_value());
 }
 
-void test_numbers() {
-    Point point;
-    json::read(R"({"x":-0.5,"y":2e-3})", point);
-    CHECK(point.x == -0.5);
-    CHECK(point.y == 0.002);
+void test_checked_numbers() {
+    // nlohmann permits narrowing in get<T>(); the tool adapter must reject it before invocation.
+    CHECK(rejects<int32_t>("2147483648"));
+    CHECK(rejects<int32_t>("-2147483649"));
+    CHECK(rejects<int32_t>("4294967296"));
+    CHECK(rejects<uint32_t>("-1"));
+    CHECK(rejects<uint32_t>("4294967296"));
+    CHECK(rejects<int64_t>("9223372036854775808"));
+    CHECK(rejects<int64_t>("-9223372036854775809"));
+    CHECK(rejects<uint64_t>("18446744073709551616"));
+    CHECK(rejects<int>("1.0"));
+    CHECK(rejects<int>("true"));
+    CHECK(rejects<double>("true"));
+    CHECK(rejects<float>("1e100"));
+    CHECK(rejects<float>("-1e100"));
+    CHECK(rejects<char>("256"));
+    CHECK(rejects<int8_t>("128"));
+    char character = 0;
+    json::read("65", character);
+    CHECK(character == 'A');
 
-    Alarm alarm;
-    json::read(R"({"reason":"heat","unit":"Celsius","repeat":-4})", alarm);
-    CHECK(alarm.repeat.has_value() && *alarm.repeat == -4);
-
-    // An integer member will not quietly take a fraction.
-    CHECK(rejects<Alarm>(R"({"reason":"heat","unit":"Celsius","repeat":1.5})"));
+    uint64_t unsigned_value = 0;
+    json::read("18446744073709551615", unsigned_value);
+    CHECK(unsigned_value == std::numeric_limits<uint64_t>::max());
+    CHECK_EQ(json::write(unsigned_value), "18446744073709551615");
+    int64_t signed_value = 0;
+    json::read("-9223372036854775808", signed_value);
+    CHECK(signed_value == std::numeric_limits<int64_t>::min());
+    json::read("9223372036854775807", signed_value);
+    CHECK(signed_value == std::numeric_limits<int64_t>::max());
+    float finite = 0;
+    json::read(json::write(std::numeric_limits<float>::max()), finite);
+    CHECK(finite == std::numeric_limits<float>::max());
 }
 
-void test_rejects() {
+void test_object_contract() {
     CHECK(rejects<Alarm>(R"({"unit":"Celsius"})"));                         // missing required key
     CHECK(rejects<Alarm>(R"({"reason":"heat","unit":"Kelvin"})"));          // no such enumerator
-    CHECK(rejects<Alarm>(R"({"reason":"heat","unit":"Celsius")"));          // truncated
-    CHECK(rejects<Alarm>(R"({"reason":"heat)"));                            // unterminated string
-    CHECK(rejects<Alarm>(R"({"reason":"heat","unit":"Celsius"} tail)"));    // trailing text
-    CHECK(rejects<Point>(""));
-    CHECK(rejects<Point>("["));
-    CHECK(rejects<Point>(R"({"x":,"y":0})"));
-    CHECK(rejects<Point>(std::string(200, '[')));                           // nested too deeply
+    CHECK(rejects<Point>("[]"));
+    CHECK(rejects<std::vector<int>>("{}"));
+    // The adapter limits nesting even inside unknown fields.
+    CHECK(rejects<Point>(R"({"x":0,"y":0,"extra":)" + std::string(70, '[') + "0" +
+                         std::string(70, ']') + "}"));
 
     Alarm alarm;
     try {
         json::read(R"({"unit":"Celsius"})", alarm);
         CHECK(false);
-    } catch (const json::Error & e) {
-        CHECK(e.offset == 18);
+    } catch (const std::invalid_argument & e) {
         CHECK(std::string(e.what()).find("missing key 'reason'") != std::string::npos);
     }
 }
 
-void test_write() {
+void test_reflected_result() {
     Reading reading;
-    reading.place   = "line\nbreak \x01 \"quoted\"";
+    reading.place   = "Oslo";
     reading.unit    = Unit::Fahrenheit;
     reading.value   = 1.5;
     reading.stale   = true;
     reading.tags    = {"a", "b"};
     reading.at      = {1, -2.25};
 
-    // An unset optional is left out, and a control character is escaped.
-    CHECK_EQ(json::write(reading),
-             R"({"place":"line\nbreak \u0001 \"quoted\"","unit":"Fahrenheit","value":1.5,"stale":true,)"
-             R"("tags":["a","b"],"at":{"x":1,"y":-2.25}})");
+    // Field names, enum names and omission of unset members are the adapter's contract.
+    CHECK(nlohmann::json::parse(json::write(reading)) == nlohmann::json::parse(
+        R"({"place":"Oslo","unit":"Fahrenheit","value":1.5,"stale":true,)"
+        R"("tags":["a","b"],"at":{"x":1,"y":-2.25}})"));
 
     reading.samples = 42;
     Reading back;
@@ -184,6 +193,43 @@ void test_write() {
     CHECK(back.at.y == reading.at.y);
 }
 
+enum class Alias { First = 0, AlsoFirst = 0 };
+
+void test_vectors_and_enums() {
+    std::vector<bool> flags;
+    json::read("[true,false,true]", flags);
+    CHECK(flags == std::vector<bool>({true, false, true}));
+    CHECK_EQ(json::write(flags), "[true,false,true]");
+
+    std::vector<std::optional<Alias>> values;
+    json::read(R"(["AlsoFirst",null,"First"])", values);
+    CHECK(values.size() == 3);
+    CHECK(values[0] == Alias::First && !values[1] && values[2] == Alias::First);
+    CHECK_EQ(json::write(values), R"(["First",null,"First"])");
+
+    try {
+        json::write(static_cast<Alias>(42));
+        CHECK(false);
+    } catch (const std::invalid_argument &) {
+    }
+    for (const double value : {std::numeric_limits<double>::infinity(),
+                               -std::numeric_limits<double>::infinity(),
+                               std::numeric_limits<double>::quiet_NaN()}) {
+        try {
+            json::write(value);
+            CHECK(false);
+        } catch (const std::invalid_argument &) {
+        }
+    }
+    if constexpr (std::numeric_limits<long double>::max() > std::numeric_limits<double>::max()) {
+        try {
+            json::write(std::numeric_limits<long double>::max());
+            CHECK(false);
+        } catch (const std::invalid_argument &) {
+        }
+    }
+}
+
 void test_schema() {
     CHECK_EQ(json::schema<Alarm>(),
              R"({"type":"object","properties":{)"
@@ -195,17 +241,26 @@ void test_schema() {
     CHECK_EQ(json::schema<Point>(),
              R"({"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"}},)"
              R"("required":["x","y"]})");
+
+    struct Batch {
+        std::vector<Point> points;
+        std::optional<std::vector<bool>> flags;
+    };
+    const auto schema = nlohmann::json::parse(json::schema<Batch>());
+    CHECK(schema["properties"]["points"]["items"] == nlohmann::json::parse(json::schema<Point>()));
+    CHECK(schema["properties"]["flags"]["items"]["type"] == "boolean");
+    CHECK(schema["required"] == nlohmann::json::array({"points"}));
 }
 
 }  // namespace
 
 int main() {
-    test_read_reading();
-    test_unicode_escapes();
+    test_reflected_fields();
     test_optional();
-    test_numbers();
-    test_rejects();
-    test_write();
+    test_checked_numbers();
+    test_object_contract();
+    test_reflected_result();
+    test_vectors_and_enums();
     test_schema();
 
     std::fprintf(stderr, "%d checks, %d failures\n", checks, failures);

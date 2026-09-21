@@ -19,13 +19,12 @@ add_test(NAME flags COMMAND flags_test)
 # is what lets it check that every struct mirroring a message still matches it.
 if(TARGET llamad_proto)
     add_executable(contract_test contract_test.cpp)
-    target_link_libraries(contract_test PRIVATE llamad_proto llamad_engine llamad_chat)
-    target_include_directories(contract_test PRIVATE ${CMAKE_SOURCE_DIR}/client/include)
+    target_link_libraries(contract_test PRIVATE llamad_proto llamad_engine llamad_chat llamad_client)
 
     add_test(NAME contract COMMAND contract_test)
 endif()
 
-# The JSON reader/writer and the tool set: client.h and json.h only, no daemon.
+# Reflected JSON conversion and tool dispatch: no daemon or model.
 if(TARGET llamad_client)
     add_executable(json_test json_test.cpp)
     target_link_libraries(json_test PRIVATE llamad_client)

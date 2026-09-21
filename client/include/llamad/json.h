@@ -1,18 +1,15 @@
 #pragma once
 
-// The JSON the client needs: the arguments a model sends to a tool, the result the tool sends
-// back, and the JSON Schema that describes either. It is driven by a type's members, so a struct
-// is the schema and the parser at once. This is deliberately not a general JSON library — it
-// reads what a grammar-constrained daemon can produce and rejects the rest.
-//
-// Values: std::string, bool, integers, floating point, enums (by enumerator name),
-// std::optional (absent or null leaves it unset), std::vector, and nested aggregate structs.
-// Unknown object keys are skipped; a key missing for a member that is not std::optional is an
-// error, as is anything the type cannot take.
+// Reflection over tool arguments, results and schemas. nlohmann handles JSON syntax and
+// serialization; this adapter maps ordinary C++ types to it, with checked numeric conversions.
+// Values are strings, booleans, numbers, enums, optionals, vectors and aggregate structs.
+// Unknown keys are ignored, missing required members are errors, and absent or null optionals
+// are unset. Enums use their names; unset optional members are omitted when writing objects.
 
-#include <array>
-#include <charconv>
+#include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <meta>
 #include <optional>
 #include <span>
@@ -20,7 +17,10 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace llamad {
 namespace client {
@@ -40,14 +40,10 @@ struct desc {
 };
 
 namespace json {
-
-// Thrown by read() for input the type cannot take. `offset` is the byte the reader gave up on.
-struct Error : std::runtime_error {
-    Error(std::size_t offset, const std::string & message) : std::runtime_error(message), offset(offset) {}
-    std::size_t offset;
-};
-
 namespace detail {
+
+// Declaration order is also the order presented to the model in its tool schema.
+using Json = nlohmann::ordered_json;
 
 template <typename T> constexpr bool is_optional                   = false;
 template <typename T> constexpr bool is_optional<std::optional<T>> = true;
@@ -84,292 +80,197 @@ consteval const char * description() {
     return std::define_static_string(std::string_view());
 }
 
-// A cursor over the input. Every read skips the whitespace before its value and stops on the
-// character after it. Defined in json.cpp, so this header carries only the reflective glue.
-class Reader {
-public:
-    explicit Reader(std::string_view text) : text_(text) {}
-
-    bool        consume(char c);  // takes `c` when that is what comes next
-    void        expect(char c);
-    void        expect_end();     // nothing but whitespace left
-    std::string read_string();
-    double      read_number();
-    long long   read_integer();
-    bool        read_bool();
-    bool        read_null();      // takes `null` and says whether that is what was next
-    void        skip_value();
-
-    [[noreturn]] void fail(const std::string & message) const;
-
-private:
-    void             skip_whitespace();
-    bool             match(std::string_view word);
-    unsigned         read_hex4();
-    std::string_view scan_number();
-    void             skip_value(std::size_t depth);
-
-    std::string_view text_;
-    std::size_t      at_ = 0;
-};
-
-// Appends `text` as a JSON string, quotes included.
-void write_string(std::string & out, std::string_view text);
-
-// Appends `"name":`, with the comma separating it from whatever is in `out` already.
-void write_key(std::string & out, bool & first, std::string_view name);
-
 template <typename T>
-void read_value(Reader & in, T & out);
-
-template <typename T>
-void read_object(Reader & in, T & out) {
-    std::array<bool, fields_of(^^T).size()> seen{};
-
-    in.expect('{');
-    if (!in.consume('}')) {
-        do {
-            const std::string key = in.read_string();
-            in.expect(':');
-
-            bool        matched = false;
-            std::size_t index   = 0;
-            template for (constexpr std::meta::info field : fields_of(^^T)) {
-                if (!matched && key == std::define_static_string(std::meta::identifier_of(field))) {
-                    read_value(in, out.[:field:]);
-                    seen[index] = true;
-                    matched     = true;
-                }
-                ++index;
-            }
-            if (!matched) {
-                in.skip_value();
-            }
-        } while (in.consume(','));
-        in.expect('}');
-    }
-
-    std::size_t index = 0;
-    template for (constexpr std::meta::info field : fields_of(^^T)) {
-        using Field = [:std::meta::type_of(field):];
-        if constexpr (!is_optional<Field>) {
-            if (!seen[index]) {
-                in.fail(std::string("missing key '") +
-                        std::define_static_string(std::meta::identifier_of(field)) + "'");
-            }
-        }
-        ++index;
-    }
-}
-
-template <typename T>
-void read_value(Reader & in, T & out) {
+void read_value(const Json & in, T & out) {
     if constexpr (is_optional<T>) {
-        // A key that is there but null reads the same as a key that is absent.
-        if (in.read_null()) {
+        if (in.is_null()) {
             out.reset();
         } else {
             read_value(in, out.emplace());
         }
     } else if constexpr (is_vector<T>) {
-        out.clear();
-        in.expect('[');
-        if (!in.consume(']')) {
-            do {
-                read_value(in, out.emplace_back());
-            } while (in.consume(','));
-            in.expect(']');
+        if (!in.is_array()) {
+            throw std::invalid_argument("json: expected an array");
         }
-    } else if constexpr (std::is_same_v<T, std::string>) {
-        out = in.read_string();
-    } else if constexpr (std::is_same_v<T, bool>) {
-        out = in.read_bool();
+        out.clear();
+        out.reserve(in.size());
+        for (const Json & element : in) {
+            typename T::value_type value{};
+            read_value(element, value);
+            out.push_back(std::move(value));
+        }
+    } else if constexpr (std::is_same_v<T, std::string> || std::is_same_v<T, bool>) {
+        in.get_to(out);
     } else if constexpr (std::is_enum_v<T>) {
-        const std::string name    = in.read_string();
-        bool              matched = false;
+        const std::string name = in.get<std::string>();
         template for (constexpr std::meta::info value : values_of(^^T)) {
             if (name == std::define_static_string(std::meta::identifier_of(value))) {
-                out     = [:value:];
-                matched = true;
+                out = [:value:];
+                return;
             }
         }
-        if (!matched) {
-            in.fail("'" + name + "' is not a value of " +
-                    std::define_static_string(std::meta::identifier_of(^^T)));
-        }
+        throw std::invalid_argument("json: '" + name + "' is not a value of " +
+                                    std::define_static_string(std::meta::identifier_of(^^T)));
     } else if constexpr (std::is_integral_v<T>) {
-        out = static_cast<T>(in.read_integer());
+        // get<T>() permits narrowing and signed/unsigned conversions without range checks.
+        if (!in.is_number_integer()) {
+            throw std::invalid_argument("json: expected an integer");
+        }
+        // in_range accepts signed/unsigned integer types, so normalize char types too.
+        using Integer = std::conditional_t<std::is_signed_v<T>, std::make_signed_t<T>, std::make_unsigned_t<T>>;
+        const bool fits = in.is_number_unsigned()
+            ? std::in_range<Integer>(in.get<uint64_t>())
+            : std::in_range<Integer>(in.get<int64_t>());
+        if (!fits) {
+            throw std::invalid_argument("json: integer out of range");
+        }
+        in.get_to(out);
     } else if constexpr (std::is_floating_point_v<T>) {
-        out = static_cast<T>(in.read_number());
+        if (!in.is_number()) {
+            throw std::invalid_argument("json: expected a number");
+        }
+        const double value = in.get<double>();
+        if (!std::isfinite(value) || std::abs(value) > std::numeric_limits<T>::max()) {
+            throw std::invalid_argument("json: number out of range");
+        }
+        out = static_cast<T>(value);
     } else {
-        read_object(in, out);
-    }
-}
-
-template <typename T>
-void write_value(std::string & out, const T & value);
-
-template <typename T>
-void write_object(std::string & out, const T & value) {
-    out += '{';
-    bool first = true;
-    template for (constexpr std::meta::info field : fields_of(^^T)) {
-        using Field                 = [:std::meta::type_of(field):];
-        constexpr const char * name = std::define_static_string(std::meta::identifier_of(field));
-        if constexpr (is_optional<Field>) {
-            // An unset member is left out rather than written as null: absent is how read()
-            // spells it too.
-            if (value.[:field:]) {
-                write_key(out, first, name);
-                write_value(out, *value.[:field:]);
+        if (!in.is_object()) {
+            throw std::invalid_argument("json: expected an object");
+        }
+        template for (constexpr std::meta::info field : fields_of(^^T)) {
+            using Field = [:std::meta::type_of(field):];
+            constexpr const char * name = std::define_static_string(std::meta::identifier_of(field));
+            const auto it = in.find(name);
+            if (it != in.end()) {
+                read_value(*it, out.[:field:]);
+            } else if constexpr (is_optional<Field>) {
+                out.[:field:].reset();
+            } else {
+                throw std::invalid_argument(std::string("json: missing key '") + name + "'");
             }
-        } else {
-            write_key(out, first, name);
-            write_value(out, value.[:field:]);
         }
     }
-    out += '}';
 }
 
 template <typename T>
-void write_value(std::string & out, const T & value) {
+Json write_value(const T & value) {
     if constexpr (is_optional<T>) {
-        if (value) {
-            write_value(out, *value);
-        } else {
-            out += "null";
-        }
+        return value ? write_value(*value) : Json(nullptr);
     } else if constexpr (is_vector<T>) {
-        out += '[';
+        Json out = Json::array();
         for (const auto & element : value) {
-            if (&element != &value.front()) {
-                out += ',';
-            }
-            write_value(out, element);
+            out.push_back(write_value(element));
         }
-        out += ']';
-    } else if constexpr (std::is_same_v<T, std::string>) {
-        write_string(out, value);
-    } else if constexpr (std::is_same_v<T, bool>) {
-        out += value ? "true" : "false";
+        return out;
     } else if constexpr (std::is_enum_v<T>) {
         template for (constexpr std::meta::info enumerator : values_of(^^T)) {
             if (value == [:enumerator:]) {
-                write_string(out, std::define_static_string(std::meta::identifier_of(enumerator)));
+                return std::define_static_string(std::meta::identifier_of(enumerator));
             }
         }
-    } else if constexpr (std::is_integral_v<T>) {
-        out += std::to_string(value);
+        throw std::invalid_argument("json: unnamed enum value");
     } else if constexpr (std::is_floating_point_v<T>) {
-        char buffer[32];
-        out.append(buffer, std::to_chars(buffer, buffer + sizeof(buffer), value).ptr);
+        // nlohmann writes non-finite values as null, which would conceal an invalid tool result.
+        if (!std::isfinite(value)) {
+            throw std::invalid_argument("json: non-finite number");
+        }
+        if (std::abs(value) > std::numeric_limits<Json::number_float_t>::max()) {
+            throw std::invalid_argument("json: number out of range");
+        }
+        return value;
+    } else if constexpr (std::is_arithmetic_v<T> || std::is_same_v<T, std::string>) {
+        return value;
     } else {
-        write_object(out, value);
+        Json out = Json::object();
+        template for (constexpr std::meta::info field : fields_of(^^T)) {
+            using Field = [:std::meta::type_of(field):];
+            constexpr const char * name = std::define_static_string(std::meta::identifier_of(field));
+            if constexpr (is_optional<Field>) {
+                if (value.[:field:]) {
+                    out[name] = write_value(*value.[:field:]);
+                }
+            } else {
+                out[name] = write_value(value.[:field:]);
+            }
+        }
+        return out;
     }
 }
 
-// The body of the schema object for one value of type T: everything between the braces, so the
-// caller can add a "description" of its own.
 template <typename T>
-void write_type_schema(std::string & out);
+Json type_schema();
 
 template <typename T>
-void write_object_schema(std::string & out, std::span<const char * const> descriptions) {
-    out += R"("type":"object","properties":{)";
-
-    std::string required;
-    bool        first_property = true;
-    bool        first_required = true;
-    std::size_t index          = 0;
-
+Json object_schema(std::span<const char * const> descriptions) {
+    Json out = {{"type", "object"}, {"properties", Json::object()}, {"required", Json::array()}};
+    std::size_t index = 0;
     template for (constexpr std::meta::info field : fields_of(^^T)) {
-        using Field                 = [:std::meta::type_of(field):];
+        using Field = [:std::meta::type_of(field):];
         constexpr const char * name = std::define_static_string(std::meta::identifier_of(field));
-
-        write_key(out, first_property, name);
-        out += '{';
-        write_type_schema<Field>(out);
+        Json property = type_schema<Field>();
         const char * text = index < descriptions.size() ? descriptions[index] : description<field>();
         if (text[0] != '\0') {
-            out += R"(,"description":)";
-            write_string(out, text);
+            property["description"] = text;
         }
-        out += '}';
-
+        out["properties"][name] = std::move(property);
         if constexpr (!is_optional<Field>) {
-            if (!first_required) {
-                required += ',';
-            }
-            first_required = false;
-            write_string(required, name);
+            out["required"].push_back(name);
         }
         ++index;
     }
-
-    out += R"(},"required":[)" + required + ']';
+    return out;
 }
 
 template <typename T>
-void write_type_schema(std::string & out) {
+Json type_schema() {
     if constexpr (is_optional<T>) {
-        write_type_schema<typename T::value_type>(out);
+        return type_schema<typename T::value_type>();
     } else if constexpr (is_vector<T>) {
-        out += R"("type":"array","items":{)";
-        write_type_schema<typename T::value_type>(out);
-        out += '}';
+        return {{"type", "array"}, {"items", type_schema<typename T::value_type>()}};
     } else if constexpr (std::is_same_v<T, std::string>) {
-        out += R"("type":"string")";
+        return {{"type", "string"}};
     } else if constexpr (std::is_same_v<T, bool>) {
-        out += R"("type":"boolean")";
+        return {{"type", "boolean"}};
     } else if constexpr (std::is_enum_v<T>) {
-        out += R"("type":"string","enum":[)";
-        bool first = true;
+        Json names = Json::array();
         template for (constexpr std::meta::info enumerator : values_of(^^T)) {
-            if (!first) {
-                out += ',';
-            }
-            first = false;
-            write_string(out, std::define_static_string(std::meta::identifier_of(enumerator)));
+            names.push_back(std::define_static_string(std::meta::identifier_of(enumerator)));
         }
-        out += ']';
+        return {{"type", "string"}, {"enum", std::move(names)}};
     } else if constexpr (std::is_integral_v<T>) {
-        out += R"("type":"integer")";
+        return {{"type", "integer"}};
     } else if constexpr (std::is_floating_point_v<T>) {
-        out += R"("type":"number")";
+        return {{"type", "number"}};
     } else {
-        write_object_schema<T>(out, {});
+        return object_schema<T>({});
     }
 }
 
 }  // namespace detail
 
-// Fills `out` from one JSON value, which must be the whole of `text`.
+// Invalid JSON or incompatible values throw nlohmann exceptions or std::invalid_argument.
 template <typename T>
 void read(std::string_view text, T & out) {
-    detail::Reader in(text);
-    detail::read_value(in, out);
-    in.expect_end();
+    const auto value = detail::Json::parse(text, [](int depth, detail::Json::parse_event_t, detail::Json &) {
+        if (depth > 64) {
+            throw std::invalid_argument("json: nested too deeply");
+        }
+        return true;
+    });
+    detail::read_value(value, out);
 }
 
 template <typename T>
 std::string write(const T & value) {
-    std::string out;
-    detail::write_value(out, value);
-    return out;
+    return detail::write_value(value).dump();
 }
 
-// A JSON Schema object for T: one property per member, its desc annotation as the description,
-// and every member that is not std::optional listed in "required".
-//
-// `descriptions` replaces those annotations positionally. That is for a T whose members were
-// synthesised from somewhere else and so carry none of their own — a tool function's parameter
-// list, where the descriptions are annotations on the parameters.
+// Non-optional members are required; descriptions override member annotations positionally for
+// the aggregate synthesised from a tool function's parameter list.
 template <typename T>
 std::string schema(std::span<const char * const> descriptions = {}) {
-    std::string out = "{";
-    detail::write_object_schema<T>(out, descriptions);
-    out += '}';
-    return out;
+    return detail::object_schema<T>(descriptions).dump();
 }
 
 }  // namespace json

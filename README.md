@@ -10,6 +10,9 @@ without paying the model load time in every process.
 llamad is written in C++26 and uses static reflection, so it needs GCC 16 or later. Clang and
 Apple Clang do not implement reflection, which makes Linux with GCC the supported platform.
 
+The client uses the header-only nlohmann/json library shipped in the pinned llama.cpp
+submodule. It needs no separate package or runtime library.
+
 Arch Linux:
 
 ```sh
@@ -121,7 +124,7 @@ int main() {
 
 `llamad/client.h` exposes no gRPC or protobuf types, so your build needs neither
 on its include path. It does reflect over your own tool functions, so linking
-`llamad_client` puts C++26 and `-freflection` on whatever includes it.
+`llamad_client` puts C++26, `-freflection` and nlohmann's include directory on whatever includes it.
 
 ## Tool calling
 
@@ -180,6 +183,11 @@ is written as JSON, as are the arguments read out of a call. A tool that does no
 exist, arguments that do not parse and an exception thrown by the tool all become an
 `{"error":"..."}` result the model can recover from. The loop stops after eight rounds
 of tool calls, which the caller sees as a `ToolCalls` result.
+
+Tool arguments use checked C++ conversions: integer arguments must be integers in range,
+floating-point arguments must fit their type, and enums use their enumerator names.
+Absent or null optional arguments are unset; unknown object keys are ignored. JSON parsing
+and serialization use nlohmann/json. Non-finite numbers in tool results are errors.
 
 `llamad-chat --demo-tools` is that worked through end to end
 (`client/examples/chat_cli.cpp`): it offers one `get_current_time` tool and answers
