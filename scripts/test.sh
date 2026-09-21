@@ -4,6 +4,7 @@ set -euo pipefail
 if [[ ${1:-} == --help ]]; then
     echo "Usage: $0 [cpu|gpu] [CTest arguments...]"
     echo "Runs tests in an existing build; no model or GPU is needed."
+    echo "For model inference, use smoke-test.sh [cpu|gpu] [model.gguf]."
     exit 0
 fi
 

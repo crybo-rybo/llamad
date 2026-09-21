@@ -3,7 +3,10 @@ set -euo pipefail
 
 if [[ ${1:-} == --help ]]; then
     echo "Usage: $0 [cpu|gpu] [model.gguf]"
-    echo "Runs chat inference in an existing build, using the local Qwen2.5 0.5B model by default."
+    echo "Runs chat inference in an existing build."
+    echo "Model paths may be absolute or relative to your working directory."
+    echo "Default: models/qwen2.5-0.5b-instruct-q4_k_m.gguf under the repository root."
+    echo "Example: $0 gpu /absolute/path/to/model.gguf"
     echo "GPU mode requires Vulkan offload; CPU fallback fails the test."
     exit 0
 fi

@@ -49,8 +49,11 @@ one tested here: it runs on Pascal cards (GTX 10xx), which CUDA 13 no longer tar
 pacman -S vulkan-headers spirv-headers vulkan-icd-loader shaderc
 ./scripts/build.sh gpu                  # cmake -DGGML_VULKAN=ON in build-gpu/
 ./scripts/test.sh gpu
-./scripts/smoke-test.sh gpu
+./scripts/smoke-test.sh gpu /absolute/path/to/model.gguf
 ```
+
+`test.sh` needs no model. `smoke-test.sh` accepts an absolute or working-directory-relative
+model path; omitting it uses `models/qwen2.5-0.5b-instruct-q4_k_m.gguf` under the repository root.
 
 A working Vulkan driver for the GPU is also required. The smoke test fails if
 inference falls back to the CPU; listing devices alone does not test model loading
