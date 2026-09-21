@@ -52,8 +52,8 @@ pacman -S vulkan-headers spirv-headers vulkan-icd-loader shaderc
 ./scripts/smoke-test.sh gpu /absolute/path/to/model.gguf
 ```
 
-`test.sh` needs no model. `smoke-test.sh` accepts an absolute or working-directory-relative
-model path; omitting it uses `models/qwen2.5-0.5b-instruct-q4_k_m.gguf` under the repository root.
+The project does not include a model. `test.sh` needs none; `smoke-test.sh` requires
+an explicit model path, absolute or relative to your working directory.
 
 A working Vulkan driver for the GPU is also required. The smoke test fails if
 inference falls back to the CPU; listing devices alone does not test model loading
@@ -73,7 +73,7 @@ fits on neither alone. The daemon prints one line per offload device at startup.
 ## Run the daemon
 
 ```sh
-./build-cpu/llamad --model models/qwen2.5-0.5b-instruct-q4_k_m.gguf
+./build-cpu/llamad --model /absolute/path/to/model.gguf
 # [llamad] listening on unix:/run/user/1000/llamad.sock
 ```
 

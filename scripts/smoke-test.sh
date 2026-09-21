@@ -2,28 +2,28 @@
 set -euo pipefail
 
 if [[ ${1:-} == --help ]]; then
-    echo "Usage: $0 [cpu|gpu] [model.gguf]"
+    echo "Usage: $0 <cpu|gpu> <model.gguf>"
     echo "Runs chat inference in an existing build."
     echo "Model paths may be absolute or relative to your working directory."
-    echo "Default: models/qwen2.5-0.5b-instruct-q4_k_m.gguf under the repository root."
     echo "Example: $0 gpu /absolute/path/to/model.gguf"
     echo "GPU mode requires Vulkan offload; CPU fallback fails the test."
     exit 0
 fi
 
-mode=${1:-cpu}
+if (( $# != 2 )); then
+    echo "Usage: $0 <cpu|gpu> <model.gguf>" >&2
+    exit 2
+fi
+
+mode=$1
 case "$mode" in
     cpu) ngl=0 ;;
     gpu) ngl=99 ;;
     *) echo "Expected cpu or gpu; see $0 --help" >&2; exit 2 ;;
 esac
-if (( $# > 2 )); then
-    echo "Usage: $0 [cpu|gpu] [model.gguf]" >&2
-    exit 2
-fi
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-model=${2:-"$root/models/qwen2.5-0.5b-instruct-q4_k_m.gguf"}
+model=$2
 if [[ ! -f "$model" ]]; then
     echo "Model not found: $model (pass a local GGUF as the second argument)" >&2
     exit 1

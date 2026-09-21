@@ -154,7 +154,10 @@ Match the effort to the risk, and report what you actually ran.
 - Engine, service or client changes: exercise the real path. `engine_smoke` covers the engine
   alone (`--stop`, `--cancel-after`, `--grammar-file`, `--chat --demo-tool`); `llamad-chat --once`
   against a running daemon covers the full stack (`--demo-tools` for the tool loop). Use
-  `--temp 0` for repeatable output and the 0.5B model unless the behaviour needs a stronger one.
+  `--temp 0` for repeatable output. The preferred local smoke-test model is
+  `models/qwen2.5-0.5b-instruct-q4_k_m.gguf`, unless the behaviour needs a stronger one.
+  Pass its path explicitly to `./scripts/smoke-test.sh cpu` or `./scripts/smoke-test.sh gpu`;
+  the script requires a model argument, and model files are local and gitignored.
 - CI builds Linux CPU-only with GCC and runs the tests. It does not exercise GPU execution or
   load a model, so inference paths are only verified locally. Say so when that is the case
   rather than implying coverage.
