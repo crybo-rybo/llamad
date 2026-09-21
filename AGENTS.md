@@ -34,7 +34,7 @@ single source of truth for how things work.
 ## Build, test, run
 
 ```sh
-cmake -S . -B build -G Ninja            # add -DGGML_VULKAN=ON for GPU
+cmake -S . -B build -G Ninja            # Linux; add -DGGML_VULKAN=ON for GPU
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 
@@ -42,6 +42,9 @@ ctest --test-dir build --output-on-failure
 ./build/client/llamad-chat --socket /tmp/llamad-dev.sock --once "Hello" --temp 0
 ./build/tests/engine_smoke --help       # engine without the daemon
 ```
+
+On macOS the compilers and the gRPC prefix differ, so use `./scripts/build.sh`, which sets them;
+`./scripts/build-deps-macos.sh` builds that prefix once. README.md says why.
 
 `build*/` directories are gitignored. When you start a daemon for testing, give it a private
 `--socket` path and stop it when you are done.
