@@ -302,6 +302,7 @@ void test_round_limit_stops_the_loop() {
 void test_cancellation_stops_the_loop() {
     Round asking = tool_round({{"call_0", "shout", R"({"word":"never"})"}});
     asking.text  = {"thinking"};
+    asking.stats = {10, 5, 1.5, 2.5};
     Round answer;
     answer.text = {"unreachable"};
 
@@ -313,6 +314,11 @@ void test_cancellation_stops_the_loop() {
 
     CHECK(result.reason == client::FinishReason::Cancelled);
     CHECK(harness.daemon.requests().size() == 1);
+
+    // The fake sends its final chunk whether or not anyone is still reading, and a cancelled
+    // stream delivers none of it: no calls beside a reason that is not ToolCalls, and no stats.
+    CHECK(result.tool_calls.empty());
+    CHECK(result.stats.prompt_tokens == 0 && result.stats.completion_tokens == 0);
     CHECK_EQ(tool_log, "");
 
     CHECK(history.size() == 2);

@@ -205,7 +205,8 @@ public:
     std::vector<int32_t> tokenize(const std::string & text, bool add_special = true, bool parse_special = false);
 
     // Both block until the stream ends, invoking on_chunk from the calling thread.
-    // If on_chunk returns false the request is cancelled and reason is Cancelled.
+    // If on_chunk returns false the request is cancelled and reason is Cancelled. Cancelling ends
+    // the stream before the daemon's final chunk, so that result carries no stats.
     GenerateResult generate(const std::string & prompt, const SamplingParams & params, const ChunkCallback & on_chunk);
     GenerateResult chat(const std::vector<ChatMessage> & messages, const SamplingParams & params, const ChunkCallback & on_chunk);
 
