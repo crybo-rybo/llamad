@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -27,25 +28,26 @@
 
 #include "chat_format.h"
 #include "engine.h"
+#include "engine_flags.h"
+#include "flags.h"
 #include "service.h"
 
 namespace {
 
+using llamad::cli::help;
+
+struct Options {
+    [[=help{"PATH", "GGUF model to load (required)"}]]
+    std::string model;
+
+    [[=help{"PATH", "unix socket to listen on\n"
+                    "(default: $XDG_RUNTIME_DIR/llamad.sock, else /tmp/llamad-<uid>.sock)"}]]
+    std::optional<std::string> socket;
+};
+
 void print_usage(const char * argv0) {
-    std::fprintf(stderr,
-                 "usage: %s --model PATH [options]\n"
-                 "\n"
-                 "  --model PATH     GGUF model to load (required)\n"
-                 "  --socket PATH    unix socket to listen on\n"
-                 "                   (default: $XDG_RUNTIME_DIR/llamad.sock, else /tmp/llamad-<uid>.sock)\n"
-                 "  --ctx N          context size (default 4096)\n"
-                 "  --ngl N          layers to offload to the GPU (default 99)\n"
-                 "  --threads N      threads for inference, 0 = auto, half the hardware threads (default 0)\n"
-                 "  --devices NAMES  comma-separated devices to offload to (default: every discrete GPU)\n"
-                 "  --tensor-split S comma-separated share per device, e.g. 3,1 (default: by free memory)\n"
-                 "  --list-devices   list the devices this build can offload to, and exit\n"
-                 "  --help           show this message\n",
-                 argv0);
+    std::fprintf(stderr, "usage: %s --model PATH [options]\n\n", argv0);
+    llamad::cli::print_flags(stderr, Options{}, llamad::EngineFlags{}, llamad::cli::HelpFlag{});
 }
 
 std::string format_gib(uint64_t bytes) {
@@ -141,134 +143,42 @@ bool prepare_socket_path(const std::string & path) {
     return true;
 }
 
-bool parse_int(const char * text, long * out) {
-    char * end = nullptr;
-    errno      = 0;
-    const long value = std::strtol(text, &end, 10);
-    if (errno != 0 || end == text || *end != '\0') {
-        return false;
-    }
-    *out = value;
-    return true;
-}
-
-// Splits "a,b,c" on commas. Fails on an empty element, so "a,,b" and "" are errors.
-bool split_list(const std::string & text, std::vector<std::string> * out) {
-    out->clear();
-    for (size_t start = 0;;) {
-        const size_t comma = text.find(',', start);
-        const size_t len   = comma == std::string::npos ? std::string::npos : comma - start;
-        std::string  part  = text.substr(start, len);
-        if (part.empty()) {
-            return false;
-        }
-        out->push_back(std::move(part));
-        if (comma == std::string::npos) {
-            return true;
-        }
-        start = comma + 1;
-    }
-}
-
-// Parses "3,1" into non-negative floats. The engine owns the remaining checks
-// (all-zero, more entries than devices), which need the device list.
-bool parse_tensor_split(const std::string & text, std::vector<float> * out) {
-    std::vector<std::string> parts;
-    if (!split_list(text, &parts)) {
-        return false;
-    }
-
-    out->clear();
-    for (const std::string & part : parts) {
-        char * end = nullptr;
-        errno      = 0;
-        const float value = std::strtof(part.c_str(), &end);
-        if (errno != 0 || end == part.c_str() || *end != '\0' || !(value >= 0.0f)) {
-            return false;
-        }
-        out->push_back(value);
-    }
-    return true;
-}
-
 }  // namespace
 
 int main(int argc, char ** argv) {
-    std::string model_path;
-    std::string socket_path = default_socket_path();
-    long        n_ctx       = 4096;
-    long        n_gpu_layers = 99;
-    long        n_threads   = 0;
-    bool        list_devices = false;
+    Options               options;
+    llamad::EngineFlags   engine_flags;
+    llamad::cli::HelpFlag help_flag;
+    llamad::EngineConfig  config;
 
-    std::vector<std::string> devices;
-    std::vector<float>       tensor_split;
-
-    for (int i = 1; i < argc; ++i) {
-        const std::string arg = argv[i];
-        auto next = [&](const char * name) -> const char * {
-            if (i + 1 >= argc) {
-                std::fprintf(stderr, "error: %s needs a value\n", name);
-                std::exit(2);
-            }
-            return argv[++i];
-        };
-
-        if (arg == "--help" || arg == "-h") {
+    try {
+        const std::vector<std::string> positional =
+            llamad::cli::parse_flags(argc, argv, options, engine_flags, help_flag);
+        if (!positional.empty()) {
+            throw llamad::cli::FlagError("unknown argument '" + positional.front() + "'");
+        }
+        if (help_flag.help) {
             print_usage(argv[0]);
             return 0;
-        } else if (arg == "--model") {
-            model_path = next("--model");
-        } else if (arg == "--socket") {
-            socket_path = next("--socket");
-        } else if (arg == "--ctx") {
-            if (!parse_int(next("--ctx"), &n_ctx) || n_ctx <= 0) {
-                std::fprintf(stderr, "error: --ctx needs a positive integer\n");
-                return 2;
-            }
-        } else if (arg == "--ngl") {
-            if (!parse_int(next("--ngl"), &n_gpu_layers)) {
-                std::fprintf(stderr, "error: --ngl needs an integer\n");
-                return 2;
-            }
-        } else if (arg == "--threads") {
-            if (!parse_int(next("--threads"), &n_threads) || n_threads < 0) {
-                std::fprintf(stderr, "error: --threads needs a non-negative integer\n");
-                return 2;
-            }
-        } else if (arg == "--devices") {
-            if (!split_list(next("--devices"), &devices)) {
-                std::fprintf(stderr, "error: --devices needs a comma-separated list of device names"
-                                     " (see --list-devices)\n");
-                return 2;
-            }
-        } else if (arg == "--tensor-split") {
-            if (!parse_tensor_split(next("--tensor-split"), &tensor_split)) {
-                std::fprintf(stderr,
-                             "error: --tensor-split needs a comma-separated list of non-negative"
-                             " numbers, e.g. 3,1\n");
-                return 2;
-            }
-        } else if (arg == "--list-devices") {
-            list_devices = true;
-        } else {
-            std::fprintf(stderr, "error: unknown argument '%s'\n", arg.c_str());
-            print_usage(argv[0]);
-            return 2;
         }
-    }
+        config = llamad::to_config(engine_flags);
 
-    // Listing devices needs no model, and is the way to find the names --devices takes.
-    if (list_devices) {
-        print_device_table();
-        return 0;
-    }
-
-    if (model_path.empty()) {
-        std::fprintf(stderr, "error: --model is required\n");
+        // Listing devices needs no model, and is the way to find the names --devices takes.
+        if (engine_flags.list_devices) {
+            print_device_table();
+            return 0;
+        }
+        if (options.model.empty()) {
+            throw llamad::cli::FlagError("--model is required");
+        }
+        config.model_path = options.model;
+    } catch (const llamad::cli::FlagError & e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
         print_usage(argv[0]);
         return 2;
     }
+
+    const std::string socket_path = options.socket.value_or(default_socket_path());
 
     // Block the shutdown signals here, before any other thread exists, so every
     // thread gRPC and llama.cpp later create inherits the mask and only our
@@ -293,14 +203,7 @@ int main(int argc, char ** argv) {
     // that can generate, never one waiting on a half-ready daemon.
     std::unique_ptr<llamad::Engine> engine;
     try {
-        llamad::EngineConfig config;
-        config.model_path   = model_path;
-        config.n_ctx        = static_cast<uint32_t>(n_ctx);
-        config.n_gpu_layers = static_cast<int32_t>(n_gpu_layers);
-        config.n_threads    = static_cast<int32_t>(n_threads);
-        config.devices      = devices;
-        config.tensor_split = tensor_split;
-        std::fprintf(stderr, "[llamad] loading %s ...\n", model_path.c_str());
+        std::fprintf(stderr, "[llamad] loading %s ...\n", config.model_path.c_str());
         engine = std::make_unique<llamad::Engine>(config);
     } catch (const std::exception & e) {
         std::fprintf(stderr, "error: %s\n", e.what());

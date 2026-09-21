@@ -7,22 +7,17 @@ without paying the model load time in every process.
 
 ## Dependencies
 
+llamad is written in C++26 and uses static reflection, so it needs GCC 16 or later. Clang and
+Apple Clang do not implement reflection, which makes Linux with GCC the supported platform.
+
+The client uses the header-only nlohmann/json library shipped in the pinned llama.cpp
+submodule. It needs no separate package or runtime library.
+
 Arch Linux:
 
 ```sh
-pacman -S grpc protobuf cmake ninja
+pacman -S gcc grpc protobuf cmake ninja
 ```
-
-macOS on Apple Silicon, with Apple's Command Line Tools and
-[Homebrew](https://brew.sh/):
-
-```sh
-xcode-select --install                      # if the Command Line Tools are absent
-brew install grpc protobuf cmake ninja
-```
-
-Use a native arm64 terminal and Homebrew installation on Apple Silicon, so the
-compiler and libraries target the same architecture.
 
 ## Build
 
@@ -31,40 +26,22 @@ git clone --recurse-submodules git@github.com:crybo-rybo/llamad.git
 cd llamad
 cmake -S . -B build -G Ninja
 cmake --build build -j
-ctest --test-dir build --output-on-failure    # chat template / tool-call parser tests
+ctest --test-dir build --output-on-failure    # chat template, flags, wire contract, JSON and tool set tests
 ```
 
 (If you already cloned without submodules: `git submodule update --init --recursive`.)
 
-On Apple Silicon, use this configure command in place of the one above:
-
-```sh
-cmake -S . -B build -G Ninja \
-  -DCMAKE_OSX_ARCHITECTURES=arm64 \
-  -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
-  -DGGML_OPENMP=OFF
-```
-
-Apple Clang does not bundle OpenMP; the CPU backend works without it. Metal and
-Apple's Accelerate framework are enabled by default by llama.cpp. These instructions
-target the macOS daemon and CLI; iOS and other Apple app platforms are not covered.
-
 The build includes llama.cpp's `common` library, which the chat layer needs for Jinja
 templates and tool-call parsing; it is the bulk of a first build. The tests need no
-model file: they render and parse against a template checked into the submodule.
+model file and no daemon: the chat-template ones render and parse against a template
+checked into the submodule, the rest need nothing but the build.
 
-GitHub Actions builds on Arch Linux (CPU-only) and macOS arm64 (with Metal both
-enabled and disabled) on every push and pull request, and can also be started
-manually. Each job builds the daemon, client, and engine smoke executable, and
-runs the parser tests without a GPU or model download. Metal compilation is
-covered; GPU execution and inference with a real model are not covered by CI.
+GitHub Actions builds on Arch Linux (CPU-only) on every push and pull request, and can
+also be started manually. The job builds the daemon, client, and engine smoke executable, and
+runs the tests without a GPU or model download. GPU execution and inference with a real model
+are not covered by CI.
 
 ## GPU
-
-On Apple Silicon, the default build includes Metal. Check available devices with
-`./build/llamad --list-devices`; the daemon selects the Metal GPU automatically.
-Use `--ngl 0` to run inference on the CPU, or configure with `-DGGML_METAL=OFF`
-to build without Metal.
 
 llama.cpp's GPU backends are enabled with their usual CMake flags. Vulkan is the
 one tested here: it runs on Pascal cards (GTX 10xx), which CUDA 13 no longer targets.
@@ -110,7 +87,7 @@ SIGINT/SIGTERM shut the daemon down and remove the socket.
 Also accepts `--socket`, `--system TEXT`, `--seed N`, `--max-tokens N`. Ctrl-C
 cancels the reply in progress; Ctrl-C or Ctrl-D at the prompt quits.
 
-`engine_smoke` drives the engine in-process, with no daemon and no gRPC:
+`./build/tests/engine_smoke` drives the engine in-process, with no daemon and no gRPC:
 `--chat` renders the prompt through the model's chat template, `--demo-tool`
 adds the same `get_current_time` tool to that rendering, and `--grammar-file
 PATH` constrains generation with a GBNF file of your own.
@@ -146,7 +123,9 @@ int main() {
 ```
 
 `llamad/client.h` exposes no gRPC or protobuf types, so your build needs neither
-on its include path.
+on its include path. It does reflect over your own tool functions, so linking
+`llamad_client` puts C++26, `-freflection` and nlohmann's include directory on
+whatever includes it.
 
 ## Tool calling
 
@@ -178,41 +157,56 @@ tool      { tool_call_id, content }     one per call, the result, as a string
 assistant "It is 06:28 in Tokyo."       finish_reason = EOG
 ```
 
-`llamad-chat --demo-tools` is that loop, worked through end to end
-(`client/examples/chat_cli.cpp`): it offers one `get_current_time` tool, runs it
-whenever the model asks, and feeds the result back.
-
-```sh
-./build/client/llamad-chat --demo-tools --once "What time is it in Tokyo right now?" --temp 0
-# [stats] finish=tool_calls prompt_tokens=194 completion_tokens=23 ...
-# [tool] get_current_time({"timezone": "Asia/Tokyo"}) -> {"timezone":"Asia/Tokyo","time":"..."}
-# The current time in Tokyo (Japan Standard Time) is ...
-```
-
-From your own code it is the same loop:
+In an application a tool is a C++ function. `ToolSet::add` reads its name off the
+identifier, its descriptions off `desc` annotations and the argument schema off the
+parameter list; the `chat` overload that takes a `ToolSet` runs the loop above, parses
+each call's arguments, invokes the function and sends the result back.
 
 ```cpp
-std::vector<llamad::client::Tool> tools = {
-    {"get_current_time", "Get the current time in a given IANA timezone.",
-     R"({"type":"object","properties":{"timezone":{"type":"string"}},"required":["timezone"]})"}};
+using llamad::client::desc;
+
+[[=desc{"Get the current date and time in a given IANA timezone."}]]
+std::string get_current_time([[=desc{"IANA timezone, e.g. Europe/Paris"}]] std::string timezone);
+
+llamad::client::ToolSet tools;
+tools.add<^^get_current_time>();
 
 std::vector<llamad::client::ChatMessage> history = {{"user", "What time is it in Tokyo?"}};
 
-for (;;) {
-    std::string reply;
-    auto result = client.chat(history, tools, params, [&](const std::string & text) {
-        reply += text;                      // user-visible content only
-        return true;
-    });
-    if (result.reason != llamad::client::FinishReason::ToolCalls) {
-        break;                              // ordinary answer; reply holds it
-    }
-    history.push_back({"assistant", reply, result.tool_calls, ""});
-    for (const llamad::client::ToolCall & call : result.tool_calls) {
-        history.push_back({"tool", run_my_tool(call.name, call.arguments_json), {}, call.id});
-    }                                       // call.id goes in tool_call_id
-}
+auto result = client.chat(history, tools, params, [](const std::string & text) {
+    std::fputs(text.c_str(), stdout);       // user-visible content only
+    return true;
+});                                         // history holds every turn the answer took
 ```
+
+A tool returning `std::string` is handed to the model as it is; any other return type
+is written as JSON, as are the arguments read out of a call. A tool that does not
+exist, arguments that do not parse and an exception thrown by the tool all become an
+`{"error":"..."}` result the model can recover from. The loop stops after eight rounds
+of tool calls, which the caller sees as a `ToolCalls` result; that limit is `chat`'s last
+argument and must be positive.
+
+Tool arguments use checked C++ conversions: integer arguments must be integers in range,
+floating-point arguments must fit their type, and enums use their enumerator names.
+Absent or null optional arguments are unset; unknown object keys are ignored. JSON parsing
+and serialization use nlohmann/json. Non-finite numbers in tool results are errors, and bytes
+that are not UTF-8 are written as U+FFFD. `json::read` and `json::write` report all of this as
+`json::Error`, whose message is what the model reads in the `{"error":"..."}` result.
+
+`llamad-chat --demo-tools` is that worked through end to end
+(`client/examples/chat_cli.cpp`): it offers one `get_current_time` tool and answers
+with it.
+
+```sh
+./build/client/llamad-chat --demo-tools --once "What time is it in Tokyo right now?" --temp 0
+# [tool] get_current_time(Asia/Tokyo) -> 2026-09-21 08:44:44 JST
+# The current time in Tokyo is 2026-09-21 08:44:44 JST.
+# [stats] finish=eog prompt_tokens=461 completion_tokens=52 ...
+```
+
+The `chat` overload taking a `std::vector<Tool>` is the same thing with the loop left
+to the caller: it takes the name, description and JSON Schema as strings, and returns
+each round of `tool_calls` for the caller to answer.
 
 Not supported: `tool_choice` (the model always decides), streamed argument deltas
 (calls are atomic), and reasoning separation (a model's `<think>` block, if any, is

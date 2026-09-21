@@ -3,18 +3,20 @@
 
 #include <atomic>
 #include <cctype>
-#include <cerrno>
 #include <csignal>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <unistd.h>
 
+#include "flags.h"
 #include "llamad/client.h"
 
 namespace {
@@ -47,96 +49,47 @@ const char * reason_name(llamad::client::FinishReason reason) {
     return "unspecified";
 }
 
+using llamad::cli::help;
+
+struct Options {
+    [[=help{"PATH", "daemon socket (default: the client library default)"}]]
+    std::string socket;
+
+    [[=help{"TEXT", "system prompt for the conversation"}]]
+    std::string system;
+
+    [[=help{"sampling temperature (0 = greedy)"}]]
+    std::optional<float> temp;
+
+    [[=help{"sampling seed"}]]
+    std::optional<uint32_t> seed;
+
+    [[=help{"cap on generated tokens per turn"}]]
+    std::optional<int32_t> max_tokens;
+
+    [[=help{"PROMPT", "run a single non-interactive turn and exit"}]]
+    std::optional<std::string> once;
+
+    [[=help{"offer the built-in get_current_time tool and run the\n"
+            "execute-and-resend loop for any call the model makes"}]]
+    bool demo_tools = false;
+
+    // Hidden, for testing cancellation: cancel the turn after N chunks.
+    std::optional<long> cancel_after;
+};
+
 void print_usage(const char * argv0) {
-    std::fprintf(stderr,
-                 "usage: %s [options]\n"
-                 "\n"
-                 "  --socket PATH       daemon socket (default: the client library default)\n"
-                 "  --system TEXT       system prompt for the conversation\n"
-                 "  --temp F            sampling temperature (0 = greedy)\n"
-                 "  --seed N            sampling seed\n"
-                 "  --max-tokens N      cap on generated tokens per turn\n"
-                 "  --once PROMPT       run a single non-interactive turn and exit\n"
-                 "  --demo-tools        offer the built-in get_current_time tool and run the\n"
-                 "                      execute-and-resend loop for any call the model makes\n"
-                 "  --help              show this message\n",
-                 argv0);
-}
-
-bool parse_long(const char * text, long * out) {
-    char * end = nullptr;
-    errno      = 0;
-    const long value = std::strtol(text, &end, 10);
-    if (errno != 0 || end == text || *end != '\0') {
-        return false;
-    }
-    *out = value;
-    return true;
-}
-
-bool parse_float(const char * text, float * out) {
-    char * end = nullptr;
-    errno      = 0;
-    const float value = std::strtof(text, &end);
-    if (errno != 0 || end == text || *end != '\0') {
-        return false;
-    }
-    *out = value;
-    return true;
+    std::fprintf(stderr, "usage: %s [options]\n\n", argv0);
+    llamad::cli::print_flags(stderr, Options{}, llamad::cli::HelpFlag{});
 }
 
 // --- the --demo-tools tool -------------------------------------------------------------------
 //
-// The client library has no JSON dependency and must not gain one, so the demo reads its one
-// string argument by hand and writes its result by hand. Enough for a worked example, not a
-// JSON parser: a real client would use one.
+// A tool is a C++ function: its identifier names it, its desc annotations describe it and its
+// parameters, and its parameter list is the argument schema the daemon constrains the model to.
+// The result struct travels back to the model as JSON.
 
-// Finds "key": "value" and unescapes \" and \\ in the value.
-bool json_string_field(const std::string & json, const std::string & key, std::string * out) {
-    const std::string needle = "\"" + key + "\"";
-    for (size_t at = json.find(needle); at != std::string::npos; at = json.find(needle, at + 1)) {
-        size_t i = at + needle.size();
-        while (i < json.size() && std::isspace(static_cast<unsigned char>(json[i]))) { ++i; }
-        if (i >= json.size() || json[i] != ':') { continue; }
-        ++i;
-        while (i < json.size() && std::isspace(static_cast<unsigned char>(json[i]))) { ++i; }
-        if (i >= json.size() || json[i] != '"') { continue; }
-
-        std::string value;
-        for (++i; i < json.size() && json[i] != '"'; ++i) {
-            if (json[i] == '\\' && i + 1 < json.size()) {
-                ++i;  // only \" and \\ can appear in a timezone name
-            }
-            value += json[i];
-        }
-        if (i >= json.size()) { return false; }  // unterminated string
-        *out = value;
-        return true;
-    }
-    return false;
-}
-
-std::string json_escape(const std::string & text) {
-    std::string out;
-    for (const char c : text) {
-        switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20) {
-                    char escape[7];
-                    std::snprintf(escape, sizeof(escape), "\\u%04x", static_cast<unsigned char>(c));
-                    out += escape;
-                } else {
-                    out += c;
-                }
-        }
-    }
-    return out;
-}
+using llamad::client::desc;
 
 // tzset() quietly falls back to UTC for a zone it cannot resolve; checking the zone file
 // first is what lets the result say so.
@@ -155,22 +108,27 @@ bool zone_is_known(const std::string & zone) {
     return ::access((root + "/" + zone).c_str(), R_OK) == 0;
 }
 
-// Local time in an IANA zone, via the C library: TZ is set for the call and restored after.
-std::string get_current_time(const std::string & arguments_json) {
-    std::string zone;
-    json_string_field(arguments_json, "timezone", &zone);
+struct CurrentTime {
+    std::string                timezone;
+    std::string                time;
+    std::optional<std::string> note;  // why the answer is not in the zone that was asked for
+};
 
-    std::string note;
-    if (!zone_is_known(zone)) {
-        note = zone.empty() ? "no timezone given, answering in UTC" : "unknown timezone '" + zone + "', answering in UTC";
-        zone = "UTC";
+// Local time in an IANA zone, via the C library: TZ is set for the call and restored after.
+[[=desc{"Get the current date and time in a given IANA timezone."}]]
+CurrentTime get_current_time([[=desc{"IANA timezone, e.g. Europe/Paris"}]] std::string timezone) {
+    std::optional<std::string> note;
+    if (!zone_is_known(timezone)) {
+        note     = timezone.empty() ? "no timezone given, answering in UTC"
+                                    : "unknown timezone '" + timezone + "', answering in UTC";
+        timezone = "UTC";
     }
 
     const char *      previous = std::getenv("TZ");
     const bool        had_tz   = previous != nullptr;
     const std::string saved    = had_tz ? previous : "";
 
-    ::setenv("TZ", zone.c_str(), 1);
+    ::setenv("TZ", timezone.c_str(), 1);
     ::tzset();
 
     const std::time_t now = std::time(nullptr);
@@ -187,176 +145,105 @@ std::string get_current_time(const std::string & arguments_json) {
     }
     ::tzset();
 
-    std::string result = "{\"timezone\":\"" + json_escape(zone) + "\",\"time\":\"" + json_escape(stamp) + "\"";
-    if (!note.empty()) {
-        result += ",\"note\":\"" + json_escape(note) + "\"";
-    }
-    return result + "}";
-}
-
-llamad::client::Tool demo_tool() {
-    return {"get_current_time",
-            "Get the current date and time in a given IANA timezone.",
-            "{\"type\":\"object\",\"properties\":{\"timezone\":{\"type\":\"string\","
-            "\"description\":\"IANA timezone, e.g. Europe/Paris\"}},\"required\":[\"timezone\"]}"};
-}
-
-// A tool result is always a string for the model: an unknown name is reported, not fatal.
-std::string run_tool(const llamad::client::ToolCall & call) {
-    if (call.name == "get_current_time") {
-        return get_current_time(call.arguments_json);
-    }
-    return "{\"error\":\"no such tool: " + json_escape(call.name) + "\"}";
+    std::fprintf(stderr, "[tool] get_current_time(%s) -> %s\n", timezone.c_str(), stamp);
+    return {timezone, stamp, note};
 }
 
 // Rounds of tool calls per turn. A model that keeps asking is looping; stop instead.
-const long kMaxToolRounds = 8;
+const int kMaxToolRounds = 8;
 
-// Runs one turn: streams the reply to stdout and appends it to the history. While the model
-// asks for tools, each round appends its tool_calls turn plus one "tool" turn per call and
-// generates again. Returns false if the turn was cancelled.
+// Runs one turn: streams the reply to stdout while the client appends every assistant and
+// "tool" turn it takes to the history. Returns false if the turn was cancelled.
 bool run_turn(llamad::client::Client & client,
               std::vector<llamad::client::ChatMessage> & history,
-              const std::vector<llamad::client::Tool> & tools,
+              const llamad::client::ToolSet & tools,
               const llamad::client::SamplingParams & sampling,
               long cancel_after) {
     // The user turn this reply belongs to, so a cancelled empty reply can drop it along with
     // whatever tool traffic the turn had already accumulated.
     const size_t user_turn = history.empty() ? 0 : history.size() - 1;
 
-    for (long round = 0; round < kMaxToolRounds; ++round) {
-        std::string reply;
-        long        chunks = 0;
+    bool produced_text = false;
+    long chunks        = 0;
 
-        g_interrupted.store(false);
-        g_generating.store(true);
+    g_interrupted.store(false);
+    g_generating.store(true);
 
-        llamad::client::GenerateResult result{};
-        try {
-            result = client.chat(history, tools, sampling, [&](const std::string & text) {
-                reply += text;
-                std::fwrite(text.data(), 1, text.size(), stdout);
-                std::fflush(stdout);
-                ++chunks;
-                if (cancel_after > 0 && chunks >= cancel_after) {
-                    return false;
-                }
-                return !g_interrupted.load();
-            });
-        } catch (...) {
-            g_generating.store(false);
-            throw;
-        }
-        g_generating.store(false);
-
-        std::fputc('\n', stdout);
-        std::fflush(stdout);
-
-        const bool cancelled = result.reason == llamad::client::FinishReason::Cancelled;
-        if (cancelled) {
-            std::fprintf(stderr, "[cancelled]\n");
-        }
-        std::fprintf(stderr,
-                     "[stats] finish=%s prompt_tokens=%d completion_tokens=%d prompt_ms=%.1f completion_ms=%.1f\n",
-                     reason_name(result.reason),
-                     result.stats.prompt_tokens,
-                     result.stats.completion_tokens,
-                     result.stats.prompt_ms,
-                     result.stats.completion_ms);
-
-        if (result.reason == llamad::client::FinishReason::ToolCalls && !result.tool_calls.empty()) {
-            history.push_back({"assistant", reply, result.tool_calls, ""});
-            for (const llamad::client::ToolCall & call : result.tool_calls) {
-                const std::string output = run_tool(call);
-                std::fprintf(stderr, "[tool] %s(%s) -> %s\n",
-                             call.name.c_str(), call.arguments_json.c_str(), output.c_str());
-                history.push_back({"tool", output, {}, call.id});
+    llamad::client::GenerateResult result{};
+    try {
+        result = client.chat(history, tools, sampling, [&](const std::string & text) {
+            produced_text = true;
+            std::fwrite(text.data(), 1, text.size(), stdout);
+            std::fflush(stdout);
+            ++chunks;
+            if (cancel_after > 0 && chunks >= cancel_after) {
+                return false;
             }
-            continue;
-        }
+            return !g_interrupted.load();
+        }, kMaxToolRounds);
+    } catch (...) {
+        g_generating.store(false);
+        throw;
+    }
+    g_generating.store(false);
 
-        if (!reply.empty()) {
-            history.push_back({"assistant", reply});
-        } else if (cancelled) {
-            history.resize(user_turn);  // drop the user turn that produced nothing
-        }
-        return !cancelled;
+    std::fputc('\n', stdout);
+    std::fflush(stdout);
+
+    const bool cancelled = result.reason == llamad::client::FinishReason::Cancelled;
+    if (cancelled) {
+        std::fprintf(stderr, "[cancelled]\n");
+    }
+    std::fprintf(stderr,
+                 "[stats] finish=%s prompt_tokens=%d completion_tokens=%d prompt_ms=%.1f completion_ms=%.1f\n",
+                 reason_name(result.reason),
+                 result.stats.prompt_tokens,
+                 result.stats.completion_tokens,
+                 result.stats.prompt_ms,
+                 result.stats.completion_ms);
+
+    // Tool calls coming back from the loop mean it ran out of rounds with the model still asking.
+    if (result.reason == llamad::client::FinishReason::ToolCalls) {
+        std::fprintf(stderr, "[tool] giving up after %d rounds of tool calls\n", kMaxToolRounds);
     }
 
-    std::fprintf(stderr, "[tool] giving up after %ld rounds of tool calls\n", kMaxToolRounds);
-    return true;
+    if (cancelled && !produced_text) {
+        history.resize(user_turn);  // drop the user turn that produced nothing, tool traffic included
+    }
+    return !cancelled;
 }
 
 }  // namespace
 
 int main(int argc, char ** argv) {
-    std::string socket_path;
-    std::string system_prompt;
-    std::string once_prompt;
-    bool        have_once    = false;
-    bool        demo_tools   = false;
-    long        cancel_after = 0;  // hidden --cancel-after N, for testing cancellation
+    Options               options;
+    llamad::cli::HelpFlag help_flag;
 
-    llamad::client::SamplingParams sampling;
-
-    for (int i = 1; i < argc; ++i) {
-        const std::string arg = argv[i];
-        auto next = [&](const char * name) -> const char * {
-            if (i + 1 >= argc) {
-                std::fprintf(stderr, "error: %s needs a value\n", name);
-                std::exit(2);
-            }
-            return argv[++i];
-        };
-
-        if (arg == "--help" || arg == "-h") {
+    try {
+        const std::vector<std::string> positional = llamad::cli::parse_flags(argc, argv, options, help_flag);
+        if (!positional.empty()) {
+            throw llamad::cli::FlagError("unknown argument '" + positional.front() + "'");
+        }
+        if (help_flag.help) {
             print_usage(argv[0]);
             return 0;
-        } else if (arg == "--socket") {
-            socket_path = next("--socket");
-        } else if (arg == "--system") {
-            system_prompt = next("--system");
-        } else if (arg == "--once") {
-            once_prompt = next("--once");
-            have_once   = true;
-        } else if (arg == "--demo-tools") {
-            demo_tools = true;
-        } else if (arg == "--temp") {
-            float value = 0;
-            if (!parse_float(next("--temp"), &value)) {
-                std::fprintf(stderr, "error: --temp needs a number\n");
-                return 2;
-            }
-            sampling.temperature = value;
-        } else if (arg == "--seed") {
-            long value = 0;
-            if (!parse_long(next("--seed"), &value) || value < 0) {
-                std::fprintf(stderr, "error: --seed needs a non-negative integer\n");
-                return 2;
-            }
-            sampling.seed = static_cast<uint32_t>(value);
-        } else if (arg == "--max-tokens") {
-            long value = 0;
-            if (!parse_long(next("--max-tokens"), &value)) {
-                std::fprintf(stderr, "error: --max-tokens needs an integer\n");
-                return 2;
-            }
-            sampling.max_tokens = static_cast<int32_t>(value);
-        } else if (arg == "--cancel-after") {
-            if (!parse_long(next("--cancel-after"), &cancel_after) || cancel_after < 1) {
-                std::fprintf(stderr, "error: --cancel-after needs a positive integer\n");
-                return 2;
-            }
-        } else {
-            std::fprintf(stderr, "error: unknown argument '%s'\n", arg.c_str());
-            print_usage(argv[0]);
-            return 2;
         }
+        if (options.cancel_after && *options.cancel_after < 1) {
+            throw llamad::cli::FlagError("--cancel-after needs a positive integer");
+        }
+    } catch (const llamad::cli::FlagError & e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        print_usage(argv[0]);
+        return 2;
     }
 
-    if (socket_path.empty()) {
-        socket_path = llamad::client::Client::default_socket_path();
-    }
+    llamad::client::SamplingParams sampling;
+    sampling.temperature = options.temp;
+    sampling.seed        = options.seed;
+    sampling.max_tokens  = options.max_tokens;
+
+    const std::string socket_path =
+        options.socket.empty() ? llamad::client::Client::default_socket_path() : options.socket;
 
     struct sigaction sa {};
     sa.sa_handler = on_sigint;
@@ -365,29 +252,30 @@ int main(int argc, char ** argv) {
     sigaction(SIGINT, &sa, nullptr);
 
     std::vector<llamad::client::ChatMessage> history;
-    if (!system_prompt.empty()) {
-        history.push_back({"system", system_prompt});
+    if (!options.system.empty()) {
+        history.push_back({"system", options.system});
     }
 
-    std::vector<llamad::client::Tool> tools;
-    if (demo_tools) {
-        tools.push_back(demo_tool());
+    llamad::client::ToolSet tools;
+    if (options.demo_tools) {
+        tools.add<^^get_current_time>();
     }
 
     try {
         llamad::client::Client client(socket_path);
 
-        if (have_once) {
-            history.push_back({"user", once_prompt});
-            run_turn(client, history, tools, sampling, cancel_after);
+        if (options.once) {
+            history.push_back({"user", *options.once});
+            run_turn(client, history, tools, sampling, options.cancel_after.value_or(0));
             return 0;
         }
 
         const llamad::client::ModelInfo info = client.get_model_info();
         std::fprintf(stderr, "[llamad-chat] %s on unix:%s\n", info.description.c_str(), socket_path.c_str());
         std::fprintf(stderr, "[llamad-chat] Ctrl-C cancels a reply; Ctrl-D at the prompt quits.\n");
-        if (demo_tools) {
-            std::fprintf(stderr, "[llamad-chat] tools offered: %s\n", tools.front().name.c_str());
+        if (options.demo_tools) {
+            std::fprintf(stderr, "[llamad-chat] tools offered: %s\n",
+                         tools.definitions().front().name.c_str());
         }
 
         std::string line;
@@ -402,7 +290,7 @@ int main(int argc, char ** argv) {
                 continue;
             }
             history.push_back({"user", line});
-            run_turn(client, history, tools, sampling, cancel_after);
+            run_turn(client, history, tools, sampling, options.cancel_after.value_or(0));
         }
         return 0;
     } catch (const llamad::client::RpcError & e) {

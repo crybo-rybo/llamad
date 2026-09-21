@@ -5,7 +5,7 @@ documentation; this file is about how to change the code well.
 
 ## What this project is
 
-llamad is a small C++17 daemon that loads one llama.cpp model once and serves it to local
+llamad is a small C++26 daemon that loads one llama.cpp model once and serves it to local
 applications over gRPC on a Unix domain socket. Applications link a tiny client library and get
 streaming completion, chat and tool calling without embedding llama.cpp.
 
@@ -20,12 +20,14 @@ single source of truth for how things work.
 | Path | Role |
 |---|---|
 | `proto/llamad/v1/llamad.proto` | The wire contract. Engine-agnostic: nothing in it depends on how inference runs. |
+| `proto/llamad/v1/convert.h` | Name-matched conversion between those messages and the plain structs that mirror them, on both sides of the wire. Names no protobuf type: a message is reached only through the accessors protoc generates. |
 | `src/engine.{h,cpp}` | Wrapper over libllama: model loading, tokenizing, sampling, the generate loop, UTF-8 and stop-string safe streaming. |
 | `src/chat_format.{h,cpp}` | Chat layer: renders messages and tools through the model's Jinja template, builds the tool-call grammar, parses tool calls out of generated text. |
 | `src/service.{h,cpp}`, `src/main.cpp` | gRPC service and the daemon: socket lifecycle, signals, proto ↔ engine type conversion. |
-| `src/engine_smoke.cpp` | CLI that drives the engine and chat layer in-process, with no daemon and no gRPC. |
-| `client/` | Client library (`include/llamad/client.h`, `src/client.cpp`) and `llamad-chat` (`examples/chat_cli.cpp`). |
-| `tests/` | Plain-executable tests registered with CTest. No model file needed. |
+| `src/cli/flags.h` | The one command-line parser and `--help` printer, over a struct whose members are a binary's flags. Target `llamad_flags` exposes only `src/cli`, so `llamad-chat` uses it without reaching a daemon header. |
+| `src/engine_flags.h` | The context and offload flags `llamad` and `engine_smoke` share, and the `EngineConfig` they describe. |
+| `client/` | Client library (`include/llamad/client.h`, `src/client.cpp`) and `llamad-chat` (`examples/chat_cli.cpp`). `include/llamad/json.h` maps reflected tool arguments, results and schemas to nlohmann/json and reports what does not fit as `json::Error`; `client.h` includes it, so an application still includes one header. |
+| `tests/` | Plain-executable tests registered with CTest, needing no model file, and `engine_smoke.cpp`: a CLI that drives the engine and chat layer in-process, with no daemon and no gRPC. |
 | `third_party/llama.cpp` | Pinned, unmodified submodule. |
 | `models/` | Local GGUF files. Gitignored; not available in CI. |
 
@@ -38,7 +40,7 @@ ctest --test-dir build --output-on-failure
 
 ./build/llamad --model models/qwen2.5-0.5b-instruct-q4_k_m.gguf --socket /tmp/llamad-dev.sock
 ./build/client/llamad-chat --socket /tmp/llamad-dev.sock --once "Hello" --temp 0
-./build/engine_smoke --help             # engine without the daemon
+./build/tests/engine_smoke --help       # engine without the daemon
 ```
 
 `build*/` directories are gitignored. When you start a daemon for testing, give it a private
@@ -53,14 +55,15 @@ agreement first, not a clever workaround.
    contain no gRPC or protobuf types. `chat_format.cpp` is the only file that touches llama.cpp's
    `common` library, which is unstable and not a public API; its header exposes no llama.cpp
    types. All gRPC and protobuf knowledge lives in `service.*` and `main.cpp`. `client.h` exposes
-   no gRPC or protobuf types. The point: a submodule bump can break at most one file, and an
-   application needs one header.
+   no gRPC or protobuf types, and `src/cli/flags.h` includes only the standard library. The
+   point: a submodule bump can break at most one file, and an application needs one header.
 2. **llama.cpp is never patched.** It is a pinned submodule. If something is missing, solve it on
    this side of the boundary or raise it.
 3. **The three contracts change deliberately.** `llamad.proto`, `engine.h` and `client.h` are the
    seams the rest is built against. Proto changes are additive: never renumber or repurpose a
    field. When one contract changes, update everything that mirrors it in the same change
-   (proto ↔ `service.cpp` ↔ `client.h` / `client.cpp`).
+   (proto ↔ `service.cpp` ↔ `client.h` / `client.cpp`). `tests/contract_test.cpp` fails the build
+   when a mirror struct and the message it mirrors disagree, in either direction.
 4. **The daemon is stateless per request.** No sessions, no registries, no state carried between
    calls. Clients resend history; tools travel with each request as opaque data and are never
    executed or validated by the daemon.
@@ -92,12 +95,14 @@ problem while working, mention it — do not fix it in the same change. If you h
 effort on a side issue than on the task itself, step back.
 
 **Reuse before adding.** Read the surrounding code first. This codebase already has a streaming
-holdback filter, RAII wrappers for llama.cpp handles, proto conversion helpers and error types.
-Extend what exists before introducing a parallel mechanism.
+holdback filter, RAII wrappers for llama.cpp handles, proto conversion helpers, a flag parser
+driven by an options struct and error types. Extend what exists before introducing a parallel
+mechanism.
 
-**No new dependencies without asking.** The dependency list is llama.cpp, gRPC and Protobuf.
-Tests are plain executables with a `CHECK` macro; the demo tool parses its one JSON argument by
-hand rather than pull a JSON library into the client. That restraint is intentional.
+**No new dependencies without asking.** The dependency list is llama.cpp, gRPC, Protobuf and
+nlohmann/json (the header shipped in the pinned llama.cpp vendor tree). Tests are plain
+executables with a `CHECK` macro. The client delegates JSON syntax and serialization to
+nlohmann and keeps only reflection, schema generation and checked C++ conversions in `json.h`.
 
 **Write for the next reader.** Code is read far more than it is written, mostly by someone
 without your current context. Favour names that say what a thing is, straight-line control flow,
@@ -111,7 +116,8 @@ cheap and obvious; do not trade readability for speed without a number that says
 
 Match the file you are in; consistency beats preference.
 
-- C++17. 4-space indent. `const T & name` and `T * name` with spaces around `&` and `*`.
+- C++26 with static reflection (`<meta>`; GCC 16 or later, `-freflection`).
+- 4-space indent. `const T & name` and `T * name` with spaces around `&` and `*`.
 - Aligned declarations and assignments where the surrounding code aligns them.
 - `/*name*/` comments on literal arguments whose meaning is not obvious: `tokenize(text, /*add_special*/ false, ...)`.
 - Anonymous namespaces for file-local helpers. Pimpl where a header must hide a dependency.
@@ -141,13 +147,17 @@ Match the effort to the risk, and report what you actually ran.
 - Chat layer or parsing changes: add or extend a case in `tests/chat_format_test.cpp`. These tests
   run canned model output through a real template with no GGUF, so they are cheap — prefer them
   to manual checks wherever the logic can be reached that way.
+- Client changes reachable without a daemon — the JSON reader, a tool's schema or dispatch —
+  belong in `tests/json_test.cpp` or `tests/client_tools_test.cpp`, which need neither. The
+  `Client::chat` tool loop is covered by `tests/client_chat_test.cpp`, which scripts a fake of
+  the service on a private socket.
 - Engine, service or client changes: exercise the real path. `engine_smoke` covers the engine
   alone (`--stop`, `--cancel-after`, `--grammar-file`, `--chat --demo-tool`); `llamad-chat --once`
   against a running daemon covers the full stack (`--demo-tools` for the tool loop). Use
   `--temp 0` for repeatable output and the 0.5B model unless the behaviour needs a stronger one.
-- CI builds Linux CPU-only and macOS arm64 with Metal enabled and disabled, and runs the tests.
-  It does not exercise GPU execution or load a model, so inference paths are only verified
-  locally. Say so when that is the case rather than implying coverage.
+- CI builds Linux CPU-only with GCC and runs the tests. It does not exercise GPU execution or
+  load a model, so inference paths are only verified locally. Say so when that is the case
+  rather than implying coverage.
 - Report results plainly, including what you did not or could not verify.
 
 ## Git
