@@ -34,17 +34,16 @@ single source of truth for how things work.
 ## Build, test, run
 
 ```sh
-cmake -S . -B build -G Ninja            # Linux; add -DGGML_VULKAN=ON for GPU
-cmake --build build -j
-ctest --test-dir build --output-on-failure
+./scripts/build.sh cpu                   # or gpu: Vulkan on Linux, Metal on macOS
+./scripts/test.sh cpu                    # ctest in build-cpu/; no model or daemon needed
 
-./build/llamad --model models/qwen2.5-0.5b-instruct-q4_k_m.gguf --socket /tmp/llamad-dev.sock
-./build/client/llamad-chat --socket /tmp/llamad-dev.sock --once "Hello" --temp 0
-./build/tests/engine_smoke --help       # engine without the daemon
+./build-cpu/llamad --model models/qwen2.5-0.5b-instruct-q4_k_m.gguf --socket /tmp/llamad-dev.sock
+./build-cpu/client/llamad-chat --socket /tmp/llamad-dev.sock --once "Hello" --temp 0
+./build-cpu/tests/engine_smoke --help    # engine without the daemon
 ```
 
-On macOS the compilers and the gRPC prefix differ, so use `./scripts/build.sh`, which sets them;
-`./scripts/build-deps-macos.sh` builds that prefix once. README.md says why.
+On macOS, run `./scripts/build-deps-macos.sh` once first; `build.sh` selects the macOS
+compilers and the gRPC prefix. README.md says why.
 
 `build*/` directories are gitignored. When you start a daemon for testing, give it a private
 `--socket` path and stop it when you are done.
