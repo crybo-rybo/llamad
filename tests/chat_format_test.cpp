@@ -91,6 +91,11 @@ llamad::ChatFormat make_format() {
     return llamad::ChatFormat(read_file(QWEN25_TEMPLATE_PATH), /*bos*/ "", /*eos*/ "<|im_end|>");
 }
 
+// Qwen3.5 opens a <think> block in its generation prompt unless thinking is turned off.
+llamad::ChatFormat make_thinking_format() {
+    return llamad::ChatFormat(read_file(QWEN35_TEMPLATE_PATH), /*bos*/ "", /*eos*/ "<|im_end|>");
+}
+
 llamad::Tool weather_tool() {
     llamad::Tool tool;
     tool.name                   = "get_weather";
@@ -423,6 +428,41 @@ void test_stream_response_schema_raw() {
     }
 }
 
+void test_render_with_response_schema_thinking() {
+    const llamad::ChatFormat   format   = make_thinking_format();
+    const llamad::RenderedChat rendered = format.render({user("Is this spam?")}, {}, spam_schema());
+
+    CHECK(!rendered.grammar.grammar.empty());
+    CHECK(!rendered.grammar.lazy);
+    CHECK(rendered.grammar.trigger_patterns.empty());
+    CHECK(rendered.grammar.trigger_words.empty());
+
+    // A schema turn turns thinking off, so the template writes a closed, empty think block and the
+    // model starts on the JSON. The grammar's root describes that same opening, which is what lets
+    // the engine advance the grammar past the prefill.
+    CHECK_EQ(rendered.grammar.prefill, std::string("<|im_start|>assistant\n<think>\n\n</think>\n\n"));
+    CHECK(contains(rendered.grammar.grammar, "root ::= \"<|im_start|>assistant\\n\" (\"<think>\""));
+}
+
+// The grammar and the parser are generated from one PEG description, and the parser is run over
+// generation_prompt + output, so a stream that parses says the grammar's root admits the prefill
+// ahead of the JSON. finish()'s raw fallback emits unparsed output verbatim and would mask a
+// rejected parse, hence the assertion that the whole object arrives through push().
+void test_stream_response_schema_thinking() {
+    const llamad::ChatFormat   format   = make_thinking_format();
+    const llamad::RenderedChat rendered = format.render({user("Is this spam?")}, {}, spam_schema());
+
+    const std::string json = R"({"spam":true,"reasons":["link farm"]})";
+
+    for (size_t chunk_size : {size_t(0), size_t(1)}) {
+        const Run run = run_stream(format, rendered, json, chunk_size);
+        CHECK_EQ(normalize_json(run.streamed), json);
+        CHECK(run.tail.empty());
+        CHECK(!contains(run.content(), "think"));
+        CHECK_EQ(run.calls.size(), size_t(0));
+    }
+}
+
 void test_render_schema_with_tools_rejected() {
     const llamad::ChatFormat format = make_format();
 
@@ -494,6 +534,8 @@ int main() {
     test_render_with_response_schema();
     test_stream_response_schema_fenced();
     test_stream_response_schema_raw();
+    test_render_with_response_schema_thinking();
+    test_stream_response_schema_thinking();
     test_render_schema_with_tools_rejected();
     test_render_schema_not_an_object_rejected();
     test_render_empty_schema_object_rejected();

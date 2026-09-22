@@ -29,7 +29,9 @@
   instance, injects its own default system prompt when the client sends no
   `system` message. A response schema on `Chat` takes the same
   JSON-Schema-to-grammar path as tool arguments, so the reply is a JSON object
-  fitting the schema and streams as ordinary text.
+  fitting the schema and streams as ordinary text. A schema turn asks the template
+  to close its `<think>` block, so a thinking model answers with the JSON and
+  nothing else.
 - **Errors are typed.** Caller mistakes map to `INVALID_ARGUMENT`, a missing capability to
   `FAILED_PRECONDITION`, everything else to `INTERNAL`.
 

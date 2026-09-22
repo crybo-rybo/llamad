@@ -150,6 +150,8 @@ reach the model as property descriptions.
 - The JSON still streams through the callback as it is generated, chunk by chunk, exactly as an
   ordinary reply does.
 - Tools are not offered on a typed turn: the daemon refuses a schema alongside tools.
+- Thinking is off on a typed turn. On a template that opens a `<think>` block the daemon asks
+  for it closed, so the reply is the JSON object and nothing else.
 - A complete reply that does not fit `T` throws `json::Error`. The grammar makes that a
   disagreement between the schema and the reader rather than a model mistake.
 
@@ -160,6 +162,6 @@ streams the JSON and prints the fields.
 ### Not supported
 
 `tool_choice` (the model always decides), streamed argument deltas (calls are atomic),
-reasoning separation (a model's `<think>` block, if any, is left in the content), a typed reply
-whose root is not an object, and partial structs during streaming (`value` arrives whole, at
-the end).
+reasoning separation (on an ordinary turn a model's `<think>` block, if any, is left in the
+content; a typed turn turns thinking off), a typed reply whose root is not an object, and
+partial structs during streaming (`value` arrives whole, at the end).
