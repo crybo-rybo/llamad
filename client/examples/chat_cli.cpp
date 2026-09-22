@@ -62,7 +62,7 @@ using llamad::cli::help;
 /// Options specific to this executable; shared flags are composed separately.
 struct Options {
     [[=help{"PATH", "daemon socket (default: the client library default)"}]]
-    std::string socket;  ///< Daemon socket (default: the client library default).
+    std::optional<std::string> socket;  ///< Daemon socket (default: the client library default).
 
     [[=help{"TEXT", "system prompt for the conversation"}]]
     std::string system;  ///< System prompt for the conversation.
@@ -336,8 +336,7 @@ int main(int argc, char ** argv) {
     sampling.seed        = options.seed;
     sampling.max_tokens  = options.max_tokens;
 
-    const std::string socket_path =
-        options.socket.empty() ? llamad::client::Client::default_socket_path() : options.socket;
+    const std::string socket_path = options.socket.value_or(llamad::client::Client::default_socket_path());
 
     struct sigaction sa {};
     sa.sa_handler = on_sigint;

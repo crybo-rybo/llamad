@@ -189,7 +189,7 @@ int main(int argc, char ** argv) {
             if (tmpl.source.empty()) {
                 throw std::runtime_error("the model has no built-in chat template");
             }
-            format.reset(new llamad::ChatFormat(tmpl.source, tmpl.bos_token, tmpl.eos_token));
+            format = std::make_unique<llamad::ChatFormat>(tmpl.source, tmpl.bos_token, tmpl.eos_token);
 
             std::vector<llamad::Tool> tools;
             if (options.demo_tool) {
@@ -223,9 +223,9 @@ int main(int argc, char ** argv) {
             }
 
             // The parser is what withholds tool-call markup, so only what it returns is printed.
-            std::unique_ptr<llamad::ChatFormat::Stream> stream;
+            std::optional<llamad::ChatFormat::Stream> stream;
             if (format) {
-                stream.reset(new llamad::ChatFormat::Stream(format->stream(rendered)));
+                stream.emplace(format->stream(rendered));
             }
 
             long chunks = 0;
