@@ -198,13 +198,9 @@ int main(int argc, char ** argv) {
 
             rendered = format->render({{"user", prompt, {}, {}}}, tools, /*response_json_schema*/ "");
 
-            text                            = rendered.prompt;
-            params.grammar                  = rendered.grammar.grammar;
-            params.grammar_lazy             = rendered.grammar.lazy;
-            params.grammar_trigger_patterns = rendered.grammar.trigger_patterns;
-            params.grammar_trigger_words    = rendered.grammar.trigger_words;
-            params.grammar_prefill          = rendered.grammar.prefill;
-            params.preserved_tokens         = rendered.preserved_tokens;
+            text                    = rendered.prompt;
+            params.grammar          = rendered.grammar;
+            params.preserved_tokens = rendered.preserved_tokens;
             params.stop.insert(params.stop.end(), rendered.additional_stops.begin(),
                                rendered.additional_stops.end());
         }
@@ -212,13 +208,11 @@ int main(int argc, char ** argv) {
         // A hand-written grammar replaces whatever the chat layer came up with, so that a
         // constraint can be tried out on its own.
         if (!options.grammar_file.empty()) {
-            params.grammar      = read_file(options.grammar_file);
-            params.grammar_lazy = false;
-            params.grammar_trigger_patterns.clear();
-            params.grammar_trigger_words.clear();
-            // A hand-written grammar describes the output alone, so it must not be advanced past
-            // the prompt's generation prefix the way the chat layer's grammars are.
-            params.grammar_prefill.clear();
+            // A fresh GrammarSpec is not lazy and has no prefill: a hand-written grammar describes
+            // the output alone, so it must not be advanced past the prompt's generation prefix the
+            // way the chat layer's grammars are.
+            params.grammar         = llamad::GrammarSpec{};
+            params.grammar.grammar = read_file(options.grammar_file);
         }
 
         std::fprintf(stderr, "prompt tokens: %zu\n", engine.tokenize(text, true, true).size());

@@ -386,7 +386,7 @@ private:
         // because llama_sampler_sample() accepts the sampled token into the chain, which forwards
         // accept() to every sampler in it: that is what advances the grammar and fires its
         // lazy triggers.
-        if (!params.grammar.empty()) {
+        if (!params.grammar.grammar.empty()) {
             add_grammar(vocab, params, resolved);
         }
 
@@ -421,12 +421,12 @@ private:
         // A non-empty grammar string that does not parse (bad syntax, no root rule, left recursion)
         // makes both of these return null; they never hand back a sampler with no grammar in it.
         llama_sampler * grammar =
-            params.grammar_lazy
-                ? llama_sampler_init_grammar_lazy_patterns(vocab, params.grammar.c_str(), /*grammar_root*/ "root",
+            params.grammar.lazy
+                ? llama_sampler_init_grammar_lazy_patterns(vocab, params.grammar.grammar.c_str(), /*grammar_root*/ "root",
                                                            patterns.data(), patterns.size(),
                                                            resolved.trigger_tokens.data(),
                                                            resolved.trigger_tokens.size())
-                : llama_sampler_init_grammar(vocab, params.grammar.c_str(), /*grammar_root*/ "root");
+                : llama_sampler_init_grammar(vocab, params.grammar.grammar.c_str(), /*grammar_root*/ "root");
         if (grammar == nullptr) {
             throw EngineError("failed to parse the grammar");
         }
@@ -537,23 +537,23 @@ struct Engine::Impl {
             }
         }
 
-        if (!params.grammar.empty() && !params.grammar_lazy && !params.grammar_prefill.empty()) {
-            out.prefill = tokenize(params.grammar_prefill, /*add_special*/ false, /*parse_special*/ true);
+        if (!params.grammar.grammar.empty() && !params.grammar.lazy && !params.grammar.prefill.empty()) {
+            out.prefill = tokenize(params.grammar.prefill, /*add_special*/ false, /*parse_special*/ true);
             // Some tokenizers put a space in front of the first piece. That space is not in the
             // prompt, so feeding it would send the grammar down the wrong branch.
             const std::string first = out.prefill.empty() ? "" : token_to_piece(out.prefill[0], /*special*/ true);
             if (!first.empty() && std::isspace(static_cast<unsigned char>(first[0])) &&
-                !std::isspace(static_cast<unsigned char>(params.grammar_prefill[0]))) {
+                !std::isspace(static_cast<unsigned char>(params.grammar.prefill[0]))) {
                 out.prefill.erase(out.prefill.begin());
             }
         }
 
-        if (params.grammar.empty() || !params.grammar_lazy) {
+        if (params.grammar.grammar.empty() || !params.grammar.lazy) {
             return out;   // triggers only mean something for a lazy grammar
         }
 
-        out.trigger_patterns = params.grammar_trigger_patterns;
-        for (const std::string & word : params.grammar_trigger_words) {
+        out.trigger_patterns = params.grammar.trigger_patterns;
+        for (const std::string & word : params.grammar.trigger_words) {
             const std::vector<int32_t> ids = tokenize(word, /*add_special*/ false, /*parse_special*/ true);
             // A word that is one token and is preserved becomes a token trigger, the cheap exact
             // form; llama-server insists on that pairing and rejects the request otherwise.
