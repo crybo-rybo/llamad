@@ -100,6 +100,11 @@ llamad::Tool weather_tool() {
     return tool;
 }
 
+std::string spam_schema() {
+    return R"({"type":"object","properties":{"spam":{"type":"boolean"},)"
+           R"("reasons":{"type":"array","items":{"type":"string"}}},"required":["spam","reasons"]})";
+}
+
 llamad::ChatMessage user(const std::string & text) {
     llamad::ChatMessage msg;
     msg.role    = "user";
@@ -148,7 +153,8 @@ Run run_stream(const llamad::ChatFormat & format, const llamad::RenderedChat & r
 
 void test_render_with_tool() {
     const llamad::ChatFormat format   = make_format();
-    const llamad::RenderedChat rendered = format.render({user("What is the weather in Paris?")}, {weather_tool()});
+    const llamad::RenderedChat rendered =
+        format.render({user("What is the weather in Paris?")}, {weather_tool()}, "");
 
     CHECK(contains(rendered.prompt, "get_weather"));
     CHECK(contains(rendered.prompt, "Get the current weather in a city"));
@@ -162,7 +168,7 @@ void test_render_with_tool() {
 
 void test_render_without_tools() {
     const llamad::ChatFormat format   = make_format();
-    const llamad::RenderedChat rendered = format.render({user("hi")}, {});
+    const llamad::RenderedChat rendered = format.render({user("hi")}, {}, "");
 
     CHECK(rendered.grammar.grammar.empty());
     CHECK(!rendered.grammar.lazy);
@@ -193,7 +199,7 @@ void test_render_tool_result_history() {
 
     const llamad::ChatFormat format = make_format();
     const llamad::RenderedChat rendered =
-        format.render({user("What is the weather in Paris?"), assistant, result}, {weather_tool()});
+        format.render({user("What is the weather in Paris?"), assistant, result}, {weather_tool()}, "");
 
     CHECK(contains(rendered.prompt, "<tool_call>"));
     CHECK(contains(rendered.prompt, "<tool_response>"));
@@ -202,7 +208,8 @@ void test_render_tool_result_history() {
 
 void test_stream_single_tool_call() {
     const llamad::ChatFormat format   = make_format();
-    const llamad::RenderedChat rendered = format.render({user("What is the weather in Paris?")}, {weather_tool()});
+    const llamad::RenderedChat rendered =
+        format.render({user("What is the weather in Paris?")}, {weather_tool()}, "");
 
     llamad::ChatFormat::Stream stream = format.stream(rendered);
 
@@ -234,7 +241,8 @@ void test_stream_single_tool_call() {
 
 void test_stream_two_tool_calls() {
     const llamad::ChatFormat format   = make_format();
-    const llamad::RenderedChat rendered = format.render({user("Weather in Paris and Berlin?")}, {weather_tool()});
+    const llamad::RenderedChat rendered =
+        format.render({user("Weather in Paris and Berlin?")}, {weather_tool()}, "");
 
     llamad::ChatFormat::Stream stream = format.stream(rendered);
 
@@ -267,7 +275,7 @@ void test_stream_plain_text() {
     // With tools offered but not used, and with none offered at all: both must pass text through.
     for (const std::vector<llamad::Tool> & tools : {std::vector<llamad::Tool>{weather_tool()},
                                                     std::vector<llamad::Tool>{}}) {
-        const llamad::RenderedChat rendered = format.render({user("Say something nice.")}, tools);
+        const llamad::RenderedChat rendered = format.render({user("Say something nice.")}, tools, "");
         llamad::ChatFormat::Stream stream   = format.stream(rendered);
 
         // A euro sign and a two-code-point emoji, fed one byte at a time. The engine's StreamFilter
@@ -284,7 +292,7 @@ void test_stream_plain_text() {
 
 void test_stream_malformed_tool_call() {
     const llamad::ChatFormat format   = make_format();
-    const llamad::RenderedChat rendered = format.render({user("Weather in Paris?")}, {weather_tool()});
+    const llamad::RenderedChat rendered = format.render({user("Weather in Paris?")}, {weather_tool()}, "");
 
     // Cut off inside the arguments object, as a length limit or a cancellation would leave it.
     const std::string generated = "Checking.\n<tool_call>\n" R"({"name": "get_weather", "argum)";
@@ -332,7 +340,7 @@ void test_chunking_invariant() {
 
     for (const std::vector<llamad::Tool> & tools : {std::vector<llamad::Tool>{weather_tool()},
                                                     std::vector<llamad::Tool>{}}) {
-        const llamad::RenderedChat rendered = format.render({user("go")}, tools);
+        const llamad::RenderedChat rendered = format.render({user("go")}, tools, "");
 
         for (const Case & test_case : cases) {
             const std::string text = test_case.text;
@@ -367,6 +375,80 @@ void test_chunking_invariant() {
     }
 }
 
+void test_render_with_response_schema() {
+    const llamad::ChatFormat   format   = make_format();
+    const llamad::RenderedChat rendered = format.render({user("Is this spam?")}, {}, spam_schema());
+
+    // The schema becomes a plain grammar the sampler is held to from the first token, so there is
+    // nothing to trigger on.
+    CHECK(!rendered.grammar.grammar.empty());
+    CHECK(!rendered.grammar.lazy);
+    CHECK(rendered.grammar.trigger_patterns.empty());
+    CHECK(rendered.grammar.trigger_words.empty());
+
+    CHECK(contains(rendered.prompt, "Is this spam?"));
+
+    // The grammar's root opens with the assistant turn the prompt already ends with, so the engine
+    // is given that text to advance the grammar past before the first token is sampled.
+    CHECK_EQ(rendered.grammar.prefill, std::string("<|im_start|>assistant\n"));
+    CHECK(contains(rendered.grammar.grammar, "root ::= \"<|im_start|>assistant"));
+}
+
+// A model may wrap the object in a ```json fence; the fence is markup, so only the JSON is content.
+void test_stream_response_schema_fenced() {
+    const llamad::ChatFormat   format   = make_format();
+    const llamad::RenderedChat rendered = format.render({user("Is this spam?")}, {}, spam_schema());
+
+    const std::string json      = R"({"spam":true,"reasons":["link farm"]})";
+    const std::string generated = "```json\n" + json + "\n```";
+
+    for (size_t chunk_size : {size_t(0), size_t(1)}) {
+        const Run run = run_stream(format, rendered, generated, chunk_size);
+        CHECK_EQ(normalize_json(run.content()), json);
+        CHECK(!contains(run.content(), "`"));
+        CHECK_EQ(run.calls.size(), size_t(0));
+    }
+}
+
+void test_stream_response_schema_raw() {
+    const llamad::ChatFormat   format   = make_format();
+    const llamad::RenderedChat rendered = format.render({user("Is this spam?")}, {}, spam_schema());
+
+    const std::string json = R"({"spam":false,"reasons":["known sender"]})";
+
+    for (size_t chunk_size : {size_t(0), size_t(1)}) {
+        const Run run = run_stream(format, rendered, json, chunk_size);
+        CHECK_EQ(normalize_json(run.content()), json);
+        CHECK_EQ(run.calls.size(), size_t(0));
+    }
+}
+
+void test_render_schema_with_tools_rejected() {
+    const llamad::ChatFormat format = make_format();
+
+    bool threw = false;
+    try {
+        format.render({user("Is this spam?")}, {weather_tool()}, spam_schema());
+    } catch (const llamad::ChatFormatError &) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
+void test_render_schema_not_an_object_rejected() {
+    const llamad::ChatFormat format = make_format();
+
+    for (const char * schema : {"[1,2]", "not json"}) {
+        bool threw = false;
+        try {
+            format.render({user("hi")}, {}, schema);
+        } catch (const llamad::ChatFormatError &) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
+}
+
 void test_invalid_tool_schema() {
     const llamad::ChatFormat format = make_format();
 
@@ -375,7 +457,7 @@ void test_invalid_tool_schema() {
 
     bool threw = false;
     try {
-        format.render({user("hi")}, {broken});
+        format.render({user("hi")}, {broken}, "");
     } catch (const llamad::ChatFormatError &) {
         threw = true;
     }
@@ -394,6 +476,11 @@ int main() {
     test_stream_malformed_tool_call();
     test_chunking_invariant();
     test_invalid_tool_schema();
+    test_render_with_response_schema();
+    test_stream_response_schema_fenced();
+    test_stream_response_schema_raw();
+    test_render_schema_with_tools_rejected();
+    test_render_schema_not_an_object_rejected();
 
     std::fprintf(stderr, "%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

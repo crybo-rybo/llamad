@@ -27,7 +27,9 @@
 
   The template is in charge of the prompt, defaults included: Qwen2.5, for
   instance, injects its own default system prompt when the client sends no
-  `system` message.
+  `system` message. A response schema on `Chat` takes the same
+  JSON-Schema-to-grammar path as tool arguments, so the reply is a JSON object
+  fitting the schema and streams as ordinary text.
 - **Errors are typed.** Caller mistakes map to `INVALID_ARGUMENT`, a missing capability to
   `FAILED_PRECONDITION`, everything else to `INTERNAL`.
 

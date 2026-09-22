@@ -44,6 +44,9 @@ struct GrammarSpec {
     std::vector<std::string> trigger_patterns;  ///< regexes (PATTERN as-is, PATTERN_FULL anchored ^...$)
     /// Literal words; the engine resolves preserved single tokens or escapes them as regexes.
     std::vector<std::string> trigger_words;
+    /// The prompt's trailing generation prefix, which a non-lazy grammar's root expects ahead of
+    /// the generated text; the engine advances the grammar past it before the first token.
+    std::string              prefill;
 };
 
 /// Opaque parser state shared by a RenderedChat and every Stream made from it.
@@ -86,9 +89,13 @@ public:
     /// Render complete history and request-local tool definitions through the model template.
     /// @param messages Conversation in template order, including prior calls and tool replies.
     /// @param tools Opaque tool definitions offered during this generation; empty disables tools.
+    /// @param response_json_schema JSON Schema object, as a JSON string, the reply must fit; empty
+    ///        leaves the reply unconstrained. The JSON reaches the caller as ordinary content.
     /// @return Prompt, grammar, stops and shared parser state for a matching output stream.
-    /// @throws ChatFormatError For invalid schema JSON, rejected messages or parser setup failure.
-    RenderedChat render(const std::vector<ChatMessage> & messages, const std::vector<Tool> & tools) const;
+    /// @throws ChatFormatError For invalid schema JSON, rejected messages or parser setup failure;
+    ///         also if response_json_schema is not a JSON object, or is combined with tools.
+    RenderedChat render(const std::vector<ChatMessage> & messages, const std::vector<Tool> & tools,
+                        const std::string & response_json_schema) const;
 
     /// One parser per request; not thread-safe. Recognized tool-call markup is withheld.
     class Stream {

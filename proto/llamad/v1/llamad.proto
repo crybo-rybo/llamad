@@ -93,6 +93,9 @@ message ChatRequest {
   repeated ChatMessage messages = 1;  ///< Entire ordered conversation; must not be empty.
   SamplingParams sampling = 2;  ///< Unset fields use the daemon defaults.
   repeated Tool tools = 3;  ///< Tools available in this request; the daemon never executes them.
+  /// JSON Schema object the reply must fit, as a JSON string; empty leaves the reply
+  /// unconstrained. Mutually exclusive with `tools`. The reply's `text` chunks carry the JSON.
+  string response_json_schema = 4;
 }
 
 /// Why generation ended; UNSPECIFIED marks an ordinary text chunk.

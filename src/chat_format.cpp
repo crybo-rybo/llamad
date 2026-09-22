@@ -188,13 +188,33 @@ ChatFormat::ChatFormat(const std::string & template_source,
 
 ChatFormat::~ChatFormat() = default;
 
-RenderedChat ChatFormat::render(const std::vector<ChatMessage> & messages, const std::vector<Tool> & tools) const {
+RenderedChat ChatFormat::render(const std::vector<ChatMessage> & messages, const std::vector<Tool> & tools,
+                                const std::string & response_json_schema) const {
+    if (!response_json_schema.empty()) {
+        if (!tools.empty()) {
+            // common's parser matches the response format before tools, so under a response schema
+            // a tool call would never be parsed as one. Refusing beats ignoring one of the two.
+            throw ChatFormatError("tools and response_json_schema cannot be used together");
+        }
+        // common parses the schema in the middle of template rendering, and silently ignores it
+        // unless it is an object; both are better caught here, where the message can say what is wrong.
+        const nlohmann::json schema =
+            nlohmann::json::parse(response_json_schema, /*cb*/ nullptr, /*allow_exceptions*/ false);
+        if (schema.is_discarded()) {
+            throw ChatFormatError("response_json_schema is not valid JSON");
+        }
+        if (!schema.is_object()) {
+            throw ChatFormatError("response_json_schema is not a JSON object");
+        }
+    }
+
     common_chat_templates_inputs inputs;
     inputs.use_jinja             = true;
     inputs.add_generation_prompt = true;
     inputs.tool_choice           = COMMON_CHAT_TOOL_CHOICE_AUTO;
     inputs.parallel_tool_calls   = impl_->parallel_tool_calls;
     inputs.reasoning_format      = COMMON_REASONING_FORMAT_NONE;   // thinking text stays in the content
+    inputs.json_schema           = response_json_schema;           // empty leaves the reply unconstrained
 
     inputs.messages.reserve(messages.size());
     for (const ChatMessage & message : messages) {
@@ -216,6 +236,7 @@ RenderedChat ChatFormat::render(const std::vector<ChatMessage> & messages, const
     rendered.prompt           = std::move(params.prompt);
     rendered.grammar.grammar  = std::move(params.grammar);
     rendered.grammar.lazy     = params.grammar_lazy;
+    rendered.grammar.prefill  = params.generation_prompt;
     rendered.preserved_tokens = std::move(params.preserved_tokens);
     rendered.additional_stops = std::move(params.additional_stops);
     split_triggers(params.grammar_triggers, rendered.grammar);
