@@ -204,6 +204,25 @@ GenerateResult Client::chat(const std::vector<ChatMessage> & messages,
     return impl_->consume(context, reader, on_chunk);
 }
 
+GenerateResult Client::chat_constrained(const std::vector<ChatMessage> & messages,
+                                        const std::string & response_json_schema,
+                                        const SamplingParams & params,
+                                        const ChunkCallback & on_chunk) {
+    grpc::ClientContext context;
+    init_context(context);
+
+    v1::ChatRequest request;
+    for (const ChatMessage & m : messages) {
+        wire::to_proto(m, request.add_messages());
+    }
+    // The daemon refuses a schema alongside tools, so a constrained turn offers none.
+    request.set_response_json_schema(response_json_schema);
+    wire::to_proto(params, request.mutable_sampling());
+
+    auto reader = impl_->stub->Chat(&context, request);
+    return impl_->consume(context, reader, on_chunk);
+}
+
 GenerateResult Client::chat(std::vector<ChatMessage> & history,
                             const ToolSet & tools,
                             const SamplingParams & params,

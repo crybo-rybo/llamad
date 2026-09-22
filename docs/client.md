@@ -121,7 +121,44 @@ The `chat` overload taking a `std::vector<Tool>` is the same thing with the loop
 to the caller: it takes the name, description and JSON Schema as strings, and returns
 each round of `tool_calls` for the caller to answer.
 
+## Typed replies
+
+`chat<T>` asks for a struct instead of prose:
+
+```cpp
+enum class Confidence { low, medium, high };
+
+struct Verdict {
+    [[=desc{"whether the message is spam"}]]         bool                     spam;
+    [[=desc{"short reasons, most important first"}]] std::vector<std::string> reasons;
+    Confidence                                       confidence;
+    std::optional<std::string>                       note;
+};
+
+auto reply = client.chat<Verdict>(history, params, on_chunk);
+if (reply.value) { use(*reply.value); }
+```
+
+`json::schema<T>()` travels with the request, the daemon builds a grammar from it, and the
+sampler can only produce a JSON object of that shape; the finished reply is read back with
+`json::read`. `T` is an aggregate whose members `json.h` supports, and its `desc` annotations
+reach the model as property descriptions.
+
+- `value` is set when the reply ran to completion (`Eog` or `Stop`). A reply cut short by
+  `max_tokens` or by a cancel is not whole JSON, so `value` is empty and `result.reason` says why.
+- The JSON still streams through the callback as it is generated, chunk by chunk, exactly as an
+  ordinary reply does.
+- Tools are not offered on a typed turn: the daemon refuses a schema alongside tools.
+- A completed reply that does not fit `T` throws `json::Error`. The grammar makes that a
+  disagreement between the schema and the reader rather than a model mistake.
+
+`llamad-chat --demo-json` is that worked through end to end
+(`client/examples/chat_cli.cpp`): it asks for a verdict like this one on a single message,
+streams the JSON and prints the fields.
+
 ### Not supported
 
-`tool_choice` (the model always decides), streamed argument deltas (calls are atomic), and
-reasoning separation (a model's `<think>` block, if any, is left in the content).
+`tool_choice` (the model always decides), streamed argument deltas (calls are atomic),
+reasoning separation (a model's `<think>` block, if any, is left in the content), a typed reply
+whose root is not an object, and partial structs during streaming (`value` arrives whole, at
+the end).
