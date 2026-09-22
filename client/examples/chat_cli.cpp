@@ -243,16 +243,20 @@ bool run_turn(llamad::client::Client & client,
 // the daemon holds the model to it, and the JSON that streams back is parsed into the struct.
 
 /// How sure the model says its verdict is.
-enum class Confidence { low, medium, high };
+enum class Confidence {
+    low,     ///< Little confidence in the verdict.
+    medium,  ///< Moderate confidence in the verdict.
+    high,    ///< Strong confidence in the verdict.
+};
 
 /// Structured reply of the --demo-json turn.
 struct Verdict {
     [[=desc{"whether the message is spam"}]]
-    bool                     spam;
+    bool                     spam;        ///< Whether the message is spam.
     [[=desc{"short reasons for the verdict, most important first"}]]
-    std::vector<std::string> reasons;
+    std::vector<std::string> reasons;     ///< Reasons for the verdict, most important first.
     [[=desc{"how sure the verdict is"}]]
-    Confidence               confidence;
+    Confidence               confidence;  ///< Reported certainty of the verdict.
 };
 
 /// The message the demonstration turn asks about.

@@ -312,7 +312,10 @@ public:
 
 private:
     /// One chat turn the daemon constrains to a JSON Schema; the typed chat() is written over it.
+    /// @param messages Complete conversation history in template order.
     /// @param response_json_schema JSON Schema object, as a JSON string, the reply must fit.
+    /// @param params Sampling controls and stop strings for this turn.
+    /// @param on_chunk Receives generated JSON text; return false to cancel.
     GenerateResult chat_constrained(const std::vector<ChatMessage> & messages,
                                     const std::string & response_json_schema,
                                     const SamplingParams & params,
