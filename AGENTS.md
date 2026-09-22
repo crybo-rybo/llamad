@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Guidance for AI coding agents working in this repository. `README.md` is the user-facing
+Guidance for AI coding agents working in this repository. `README.md` and `docs/*.md` are the user-facing
 documentation; this file is about how to change the code well.
 
 ## What this project is
@@ -43,7 +43,7 @@ single source of truth for how things work.
 ```
 
 On macOS, run `./scripts/build-deps-macos.sh` once first; `build.sh` selects the macOS
-compilers and the gRPC prefix. README.md says why.
+compilers and the gRPC prefix. docs/building.md says why.
 
 `build*/` directories are gitignored. When you start a daemon for testing, give it a private
 `--socket` path and stop it when you are done.

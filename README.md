@@ -2,138 +2,49 @@
 
 A small daemon that loads one llama.cpp model once and serves it to local C++
 applications over gRPC on a Unix domain socket. Applications link a tiny client
-library and get streaming completions and chat without embedding llama.cpp, and
-without paying the model load time in every process.
+library and get streaming completions, chat and tool calling without embedding
+llama.cpp, and without paying the model load time in every process.
 
-## Dependencies
+- Local only: a Unix socket created 0600, no TCP listener.
+- Stateless: clients resend history; tools travel with each request and are never executed by the daemon.
+- llama.cpp is an unmodified, pinned submodule. CPU, Vulkan (Linux) and Metal (macOS) backends.
 
-llamad is written in C++26 and uses static reflection, so it needs GCC 16 or later. Clang and
-Apple Clang do not implement reflection. Linux and macOS on Apple silicon are the supported
-platforms; on both, GCC compiles every C++ source, including your own if you link the client.
+## Requirements
 
-Arch Linux:
-
-```sh
-pacman -S gcc grpc protobuf cmake ninja
-```
-
-macOS:
+C++26 with static reflection, so GCC 16 or later; Clang does not implement reflection.
+Linux and macOS on Apple silicon are the supported platforms.
 
 ```sh
-brew install gcc cmake ninja openssl@3
+pacman -S gcc grpc protobuf cmake ninja        # Arch Linux
+brew install gcc cmake ninja openssl@3         # macOS; gRPC is built from source, see below
 ```
-
-Homebrew's gRPC, Protobuf and Abseil are built against libc++, and `std::string` and its
-relatives cross their APIs, so GCC's libstdc++ cannot link against them.
-`./scripts/build-deps-macos.sh` builds gRPC from source instead, with the same compilers the
-project uses, and installs it under `build-deps/`. Run it once after cloning; it takes about
-fifteen minutes and a gigabyte.
-
-`./scripts/build.sh` then compiles llama.cpp's C and Objective-C Metal sources with Apple clang,
-which GCC cannot parse, and every C++ source with `g++-16`. Accelerate and BLAS are off, because
-their headers do not compile with GCC; that costs only prompt-processing speed on the CPU path.
 
 ## Build
 
-Clone Repo
 ```sh
 git clone --recurse-submodules git@github.com:crybo-rybo/llamad.git
 cd llamad
-```
-
-Arch Linux Build
-```sh
-./scripts/build.sh cpu                      # builds into build-cpu/
-./scripts/test.sh cpu                       # chat template, flags, wire contract, JSON and tool set tests
-```
-
-MacOS Build
-```sh
 ./scripts/build-deps-macos.sh               # macOS only, once: builds gRPC into build-deps/
-./scripts/build.sh cpu                      # builds into build-cpu/
-./scripts/test.sh cpu                       # chat template, flags, wire contract, JSON and tool set tests
+./scripts/build.sh cpu                      # builds into build-cpu/; `gpu` for Vulkan or Metal
+./scripts/test.sh cpu                       # no model needed
 ```
 
-(If you already cloned without submodules: `git submodule update --init --recursive`.)
+[docs/building.md](docs/building.md) covers the compiler and dependency choices, GPU
+builds, multi-GPU selection and the smoke test that needs a model.
 
-The build includes llama.cpp's `common` library, which the chat layer needs for Jinja
-templates and tool-call parsing; it is the bulk of a first build. The tests need no
-model file and no daemon: the chat-template ones render and parse against a template
-checked into the submodule, the rest need nothing but the build.
-
-## GPU
-
-llama.cpp's GPU backends are enabled with their usual CMake flags, and `build.sh gpu` passes the
-one for the platform: Vulkan on Linux, Metal on macOS. `build.sh cpu` turns that backend off.
-Vulkan is the Linux backend tested here: it runs on Pascal cards (GTX 10xx), which CUDA 13 no
-longer targets.
-
-```sh
-pacman -S vulkan-headers spirv-headers vulkan-icd-loader shaderc   # Linux; Metal needs nothing
-./scripts/build.sh gpu                  # -DGGML_VULKAN=ON or -DGGML_METAL=ON, in build-gpu/
-./scripts/test.sh gpu
-./scripts/smoke-test.sh gpu /absolute/path/to/model.gguf
-```
-
-The project does not include a model. `test.sh` needs none; `smoke-test.sh` requires
-an explicit model path, absolute or relative to your working directory.
-
-On Linux a working Vulkan driver for the GPU is also required. The smoke test fails if
-inference falls back to the CPU; listing devices alone does not test model loading
-or token generation.
-
-Under Vulkan every discrete GPU is used by default: llama.cpp splits the model's
-layers across them in proportion to each card's free memory, and ignores an
-integrated GPU whenever a discrete one exists. Two 8 GB cards therefore hold a
-model that fits on neither alone. Apple silicon offers one Metal device, `MTL0`,
-over unified memory. The daemon prints one line per offload device at startup.
-
-```sh
-./build-gpu/llamad --list-devices                    # names, types, free/total memory
-./build-gpu/llamad --model M --devices Vulkan0       # this card only; MTL0 on macOS
-./build-gpu/llamad --model M --tensor-split 3,1      # 3:1 share, in device order
-```
-
-## Run the daemon
+## Run
 
 ```sh
 ./build-cpu/llamad --model /absolute/path/to/model.gguf
 # [llamad] listening on unix:/run/user/1000/llamad.sock
-```
 
-Options: `--socket PATH` (default `$XDG_RUNTIME_DIR/llamad.sock`, else
-`/tmp/llamad-<uid>.sock`), `--ctx N` (4096), `--ngl N` (99), `--threads N` (0 =
-auto, half the hardware threads). The socket is created mode 0600, so only your
-user can talk to it.
-SIGINT/SIGTERM shut the daemon down and remove the socket. A daemon put in the background by a
-script inherits SIGINT ignored, and macOS discards a signal that is both ignored and blocked, so
-stop one started that way with SIGTERM.
-
-## API documentation
-
-Only CMake and Doxygen (1.17 or later) are needed to generate HTML; no compiler, submodule
-checkout, Graphviz, model or gRPC installation is required:
-
-```sh
-pacman -S cmake doxygen
-./scripts/docs.sh                       # open build-docs/html/index.html
-```
-
-## Chat from the terminal
-
-```sh
-./build-cpu/client/llamad-chat                       # interactive REPL
+./build-cpu/client/llamad-chat                          # interactive REPL
 ./build-cpu/client/llamad-chat --once "Hello" --temp 0
-./build-cpu/client/llamad-chat --demo-tools          # with one built-in tool, see below
+./build-cpu/client/llamad-chat --demo-tools             # tool calling, end to end
 ```
 
-Also accepts `--socket`, `--system TEXT`, `--seed N`, `--max-tokens N`. Ctrl-C
-cancels the reply in progress; Ctrl-C or Ctrl-D at the prompt quits.
-
-`./build-cpu/tests/engine_smoke` drives the engine in-process, with no daemon and no gRPC:
-`--chat` renders the prompt through the model's chat template, `--demo-tool`
-adds the same `get_current_time` tool to that rendering, and `--grammar-file
-PATH` constrains generation with a GBNF file of your own.
+The project ships no model. Any GGUF works; the daemon takes `--socket`, `--ctx`, `--ngl`,
+`--threads`, `--devices` and `--tensor-split`, described in [docs/daemon.md](docs/daemon.md).
 
 ## Use it from your own project
 
@@ -142,138 +53,31 @@ add_subdirectory(llamad EXCLUDE_FROM_ALL)   # the repo root, not client/
 target_link_libraries(myapp PRIVATE llamad_client)
 ```
 
-`EXCLUDE_FROM_ALL` means only what `myapp` links gets built: the client and the
-generated protobuf code, not llama.cpp or the daemon.
-
 ```cpp
 #include <llamad/client.h>
-#include <cstdio>
 
-int main() {
-    llamad::client::Client client;                 // default socket path
-    llamad::client::SamplingParams params;
-    params.temperature = 0.0f;
-    params.max_tokens  = 128;
+llamad::client::Client client;                 // default socket path
+llamad::client::SamplingParams params;
+params.temperature = 0.0f;
 
-    auto result = client.chat({{"user", "Name three primes."}}, params,
-                              [](const std::string & text) {
-                                  std::fwrite(text.data(), 1, text.size(), stdout);
-                                  std::fflush(stdout);
-                                  return true;      // false cancels the request
-                              });
-    std::printf("\n%d tokens\n", result.stats.completion_tokens);
-}
+auto result = client.chat({{"user", "Name three primes."}}, params,
+                          [](const std::string & text) {
+                              std::fputs(text.c_str(), stdout);
+                              return true;      // false cancels the request
+                          });
 ```
 
-`llamad/client.h` exposes no gRPC or protobuf types, so your build needs neither
-on its include path. It does reflect over your own tool functions, so linking
-`llamad_client` puts C++26, `-freflection` and nlohmann's include directory on
-whatever includes it.
+`llamad/client.h` exposes no gRPC or protobuf types. Tools are plain C++ functions
+registered with `ToolSet::add`; the client runs the execute-and-resend loop.
+[docs/client.md](docs/client.md) has the full walkthrough.
 
-## Tool calling
+## Documentation
 
-The daemon is a formatter and a parser, not a tool registry. Tools are opaque
-per-request data — a name, a description and a JSON Schema — carried alongside the
-messages, exactly like the history. The daemon never executes a tool, never checks
-that one exists, and remembers nothing between requests. **The client owns the
-execute-and-resend loop.**
-
-What the daemon does do: render the tools into the prompt the way the model was
-trained to see them, constrain the arguments to the tool's JSON Schema while they
-are being generated, and parse the model's output back into structured calls.
-
-- Tool calls arrive **whole, on the final chunk**, together with
-  `FINISH_REASON_TOOL_CALLS`. There are no argument deltas.
-- Streamed `text` chunks only ever carry user-visible content. Tool-call markup
-  (`<tool_call>` and friends) never reaches the client.
-- `tool_calls` is non-empty **iff** the finish reason is `TOOL_CALLS`. A reply cut
-  short by `max_tokens` or by a cancel reports `LENGTH`/`CANCELLED` and no calls.
-- Arguments are always a complete, valid JSON object, because a grammar built from
-  the schema is what the sampler was allowed to produce.
-
-The message sequence for one tool round is:
-
-```
-user                                    "what time is it in Tokyo?"
-assistant { tool_calls: [...] }         finish_reason = TOOL_CALLS
-tool      { tool_call_id, content }     one per call, the result, as a string
-assistant "It is 06:28 in Tokyo."       finish_reason = EOG
-```
-
-In an application a tool is a C++ function. `ToolSet::add` reads its name off the
-identifier, its descriptions off `desc` annotations and the argument schema off the
-parameter list; the `chat` overload that takes a `ToolSet` runs the loop above, parses
-each call's arguments, invokes the function and sends the result back.
-
-```cpp
-using llamad::client::desc;
-
-[[=desc{"Get the current date and time in a given IANA timezone."}]]
-std::string get_current_time([[=desc{"IANA timezone, e.g. Europe/Paris"}]] std::string timezone);
-
-llamad::client::ToolSet tools;
-tools.add<^^get_current_time>();
-
-std::vector<llamad::client::ChatMessage> history = {{"user", "What time is it in Tokyo?"}};
-
-auto result = client.chat(history, tools, params, [](const std::string & text) {
-    std::fputs(text.c_str(), stdout);       // user-visible content only
-    return true;
-});                                         // history holds every turn the answer took
-```
-
-A tool returning `std::string` is handed to the model as it is; any other return type
-is written as JSON, as are the arguments read out of a call. A tool that does not
-exist, arguments that do not parse and an exception thrown by the tool all become an
-`{"error":"..."}` result the model can recover from. The loop stops after eight rounds
-of tool calls, which the caller sees as a `ToolCalls` result; that limit is `chat`'s last
-argument and must be positive.
-
-Tool arguments use checked C++ conversions: integer arguments must be integers in range,
-floating-point arguments must fit their type, and enums use their enumerator names.
-Absent or null optional arguments are unset; unknown object keys are ignored. JSON parsing
-and serialization use nlohmann/json. Non-finite numbers in tool results are errors, and bytes
-that are not UTF-8 are written as U+FFFD. `json::read` and `json::write` report all of this as
-`json::Error`, whose message is what the model reads in the `{"error":"..."}` result.
-
-`llamad-chat --demo-tools` is that worked through end to end
-(`client/examples/chat_cli.cpp`): it offers one `get_current_time` tool and answers
-with it.
-
-```sh
-./build-cpu/client/llamad-chat --demo-tools --once "What time is it in Tokyo right now?" --temp 0
-# [tool] get_current_time(Asia/Tokyo) -> 2026-09-21 08:44:44 JST
-# The current time in Tokyo is 2026-09-21 08:44:44 JST.
-# [stats] finish=eog prompt_tokens=461 completion_tokens=52 ...
-```
-
-The `chat` overload taking a `std::vector<Tool>` is the same thing with the loop left
-to the caller: it takes the name, description and JSON Schema as strings, and returns
-each round of `tool_calls` for the caller to answer.
-
-Not supported: `tool_choice` (the model always decides), streamed argument deltas
-(calls are atomic), and reasoning separation (a model's `<think>` block, if any, is
-left in the content).
-
-## Design notes
-
-- **No TCP listener.** gRPC here is HTTP/2 over a Unix domain socket. There is
-  no port to firewall; access control is the socket's file permissions (0600).
-- **llama.cpp is an unmodified pinned submodule**, not a fork. `src/engine.cpp`
-  uses only the public `llama.h` C API. `src/chat_format.cpp` is the one file that
-  touches llama.cpp's `common` library — its Jinja chat templates, its per-model
-  tool-call parsers and its JSON-Schema-to-grammar converter — which is unstable
-  and not a public API, so a submodule bump can break at most that single file.
-- **v1 serves one generation at a time.** The engine serializes `generate`, so
-  concurrent clients queue rather than sharing the context. Each request starts
-  from an empty KV cache.
-- **Chat renders the model's own Jinja template**, the one stored in the GGUF,
-  through llama.cpp's `common` library — the same path `llama-server` takes. So
-  whatever scaffolding the model was trained on (tool blocks, role markers, its
-  default system prompt) is what it actually sees. A model with no template, or
-  with one that will not parse, still serves `Generate`, `Tokenize` and
-  `GetModelInfo`; only `Chat` is refused, with `FAILED_PRECONDITION`.
-
-  The template is in charge of the prompt, defaults included: Qwen2.5, for
-  instance, injects its own default system prompt when the client sends no
-  `system` message.
+| Page | Contents |
+|---|---|
+| [docs/building.md](docs/building.md) | Dependencies, platform notes, GPU builds, tests, smoke test |
+| [docs/daemon.md](docs/daemon.md) | Daemon flags, socket, signals, `llamad-chat` and `engine_smoke` |
+| [docs/client.md](docs/client.md) | Client library, tool calling, JSON conversions |
+| [docs/design.md](docs/design.md) | Design notes: layering, stream shape, chat templates |
+| `./scripts/docs.sh` | Doxygen API reference in `build-docs/html/` (needs CMake and Doxygen 1.17) |
+| `AGENTS.md` | Layout and rules for changing the code |

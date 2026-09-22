@@ -36,6 +36,10 @@ set(DOXYGEN_WARN_IF_DOC_ERROR YES)
 doxygen_add_docs(llamad_docs
     "${LLAMAD_SOURCE_DIR}/README.md"
     "${CMAKE_CURRENT_SOURCE_DIR}/reference.dox"
+    "${CMAKE_CURRENT_SOURCE_DIR}/building.md"
+    "${CMAKE_CURRENT_SOURCE_DIR}/daemon.md"
+    "${CMAKE_CURRENT_SOURCE_DIR}/client.md"
+    "${CMAKE_CURRENT_SOURCE_DIR}/design.md"
     "${LLAMAD_SOURCE_DIR}/src"
     "${LLAMAD_SOURCE_DIR}/client"
     "${LLAMAD_SOURCE_DIR}/proto/llamad/v1/convert.h"

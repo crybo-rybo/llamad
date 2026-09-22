@@ -46,5 +46,5 @@
  * client/examples/chat_cli.cpp demonstrates streaming chat and reflected tools.
  * tests/engine_smoke.cpp exercises raw generation, grammar constraints, cancellation
  * and chat rendering in-process. It needs a local GGUF model and is not a CTest test.
- * See the README for the build, test and smoke-test scripts.
+ * docs/building.md describes the build, test and smoke-test scripts.
  */

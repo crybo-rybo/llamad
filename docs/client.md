@@ -1,0 +1,127 @@
+# The client library
+
+## Linking
+
+```cmake
+add_subdirectory(llamad EXCLUDE_FROM_ALL)   # the repo root, not client/
+target_link_libraries(myapp PRIVATE llamad_client)
+```
+
+`EXCLUDE_FROM_ALL` means only what `myapp` links gets built: the client and the
+generated protobuf code, not llama.cpp or the daemon.
+
+`llamad/client.h` exposes no gRPC or protobuf types, so your build needs neither
+on its include path. It does reflect over your own tool functions, so linking
+`llamad_client` puts C++26, `-freflection` and nlohmann's include directory on
+whatever includes it.
+
+## Streaming chat
+
+```cpp
+#include <llamad/client.h>
+#include <cstdio>
+
+int main() {
+    llamad::client::Client client;                 // default socket path
+    llamad::client::SamplingParams params;
+    params.temperature = 0.0f;
+    params.max_tokens  = 128;
+
+    auto result = client.chat({{"user", "Name three primes."}}, params,
+                              [](const std::string & text) {
+                                  std::fwrite(text.data(), 1, text.size(), stdout);
+                                  std::fflush(stdout);
+                                  return true;      // false cancels the request
+                              });
+    std::printf("\n%d tokens\n", result.stats.completion_tokens);
+}
+```
+
+The callback receives user-visible text only: never tool-call markup, never partial UTF-8,
+never part of a matched stop string. The result carries the finish reason and the stats from
+the stream's final chunk.
+
+## Tool calling
+
+The daemon is a formatter and a parser, not a tool registry. Tools are opaque
+per-request data, a name, a description and a JSON Schema, carried alongside the
+messages, exactly like the history. The daemon never executes a tool, never checks
+that one exists, and remembers nothing between requests. **The client owns the
+execute-and-resend loop.**
+
+What the daemon does do: render the tools into the prompt the way the model was
+trained to see them, constrain the arguments to the tool's JSON Schema while they
+are being generated, and parse the model's output back into structured calls.
+
+- Tool calls arrive **whole, on the final chunk**, together with
+  `FINISH_REASON_TOOL_CALLS`. There are no argument deltas.
+- Streamed `text` chunks only ever carry user-visible content. Tool-call markup
+  (`<tool_call>` and friends) never reaches the client.
+- `tool_calls` is non-empty **iff** the finish reason is `TOOL_CALLS`. A reply cut
+  short by `max_tokens` or by a cancel reports `LENGTH`/`CANCELLED` and no calls.
+- Arguments are always a complete, valid JSON object, because a grammar built from
+  the schema is what the sampler was allowed to produce.
+
+The message sequence for one tool round is:
+
+```
+user                                    "what time is it in Tokyo?"
+assistant { tool_calls: [...] }         finish_reason = TOOL_CALLS
+tool      { tool_call_id, content }     one per call, the result, as a string
+assistant "It is 06:28 in Tokyo."       finish_reason = EOG
+```
+
+### Tools as C++ functions
+
+In an application a tool is a C++ function. `ToolSet::add` reads its name off the
+identifier, its descriptions off `desc` annotations and the argument schema off the
+parameter list; the `chat` overload that takes a `ToolSet` runs the loop above, parses
+each call's arguments, invokes the function and sends the result back.
+
+```cpp
+using llamad::client::desc;
+
+[[=desc{"Get the current date and time in a given IANA timezone."}]]
+std::string get_current_time([[=desc{"IANA timezone, e.g. Europe/Paris"}]] std::string timezone);
+
+llamad::client::ToolSet tools;
+tools.add<^^get_current_time>();
+
+std::vector<llamad::client::ChatMessage> history = {{"user", "What time is it in Tokyo?"}};
+
+auto result = client.chat(history, tools, params, [](const std::string & text) {
+    std::fputs(text.c_str(), stdout);       // user-visible content only
+    return true;
+});                                         // history holds every turn the answer took
+```
+
+A tool returning `std::string` is handed to the model as it is; any other return type
+is written as JSON, as are the arguments read out of a call. A tool that does not
+exist, arguments that do not parse and an exception thrown by the tool all become an
+`{"error":"..."}` result the model can recover from. The loop stops after eight rounds
+of tool calls, which the caller sees as a `ToolCalls` result; that limit is `chat`'s last
+argument and must be positive.
+
+`llamad-chat --demo-tools` is that worked through end to end
+(`client/examples/chat_cli.cpp`): it offers one `get_current_time` tool and answers
+with it.
+
+### JSON conversions
+
+Tool arguments use checked C++ conversions: integer arguments must be integers in range,
+floating-point arguments must fit their type, and enums use their enumerator names.
+Absent or null optional arguments are unset; unknown object keys are ignored. JSON parsing
+and serialization use nlohmann/json. Non-finite numbers in tool results are errors, and bytes
+that are not UTF-8 are written as U+FFFD. `json::read` and `json::write` report all of this as
+`json::Error`, whose message is what the model reads in the `{"error":"..."}` result.
+
+### Running the loop yourself
+
+The `chat` overload taking a `std::vector<Tool>` is the same thing with the loop left
+to the caller: it takes the name, description and JSON Schema as strings, and returns
+each round of `tool_calls` for the caller to answer.
+
+### Not supported
+
+`tool_choice` (the model always decides), streamed argument deltas (calls are atomic), and
+reasoning separation (a model's `<think>` block, if any, is left in the content).
