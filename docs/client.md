@@ -144,12 +144,13 @@ sampler can only produce a JSON object of that shape; the finished reply is read
 `json::read`. `T` is an aggregate whose members `json.h` supports, and its `desc` annotations
 reach the model as property descriptions.
 
-- `value` is set when the reply ran to completion (`Eog` or `Stop`). A reply cut short by
-  `max_tokens` or by a cancel is not whole JSON, so `value` is empty and `result.reason` says why.
+- `value` is set when the reply is a complete JSON document: the model finished it, or a stop
+  string matched after it. A reply cut short by `max_tokens`, by a cancel, or by a stop string
+  matched inside the JSON is not whole, so `value` is empty and `result.reason` says which.
 - The JSON still streams through the callback as it is generated, chunk by chunk, exactly as an
   ordinary reply does.
 - Tools are not offered on a typed turn: the daemon refuses a schema alongside tools.
-- A completed reply that does not fit `T` throws `json::Error`. The grammar makes that a
+- A complete reply that does not fit `T` throws `json::Error`. The grammar makes that a
   disagreement between the schema and the reader rather than a model mistake.
 
 `llamad-chat --demo-json` is that worked through end to end

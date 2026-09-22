@@ -209,11 +209,13 @@ struct GenerateResult {
     std::vector<ToolCall> tool_calls;  ///< Calls from an assistant turn replayed in history.
 };
 
-/// A reply constrained to T's JSON Schema. value is set when the reply ran to completion (Eog or
-/// Stop); a reply cut short by the token budget or a cancel leaves it empty and result says why.
+/// A reply constrained to T's JSON Schema. value is set when the reply is a complete JSON
+/// document: the model finished it, or a stop string matched after it. A reply cut short by the
+/// token budget, a cancel, or a stop string matched inside the JSON leaves value empty, and
+/// result.reason says which.
 template <typename T>
 struct Typed {
-    std::optional<T> value;   ///< The parsed reply, or unset when the reply did not run to completion.
+    std::optional<T> value;   ///< The parsed reply, or unset when the reply is not a complete document.
     GenerateResult   result;  ///< Reason generation ended, plus the stats for it.
 };
 
@@ -303,7 +305,9 @@ public:
     /// an aggregate whose members json.h supports; its desc annotations reach the model as property
     /// descriptions. The JSON still streams through on_chunk as it is generated. Tools are not
     /// offered on a typed turn. Messages must contain the full history, as for chat().
-    /// @throws RpcError As chat(). json::Error if a completed reply does not fit T, which the
+    /// The reply is read back when it is a complete JSON document; a reply the token budget, a
+    /// cancel or a stop string cut short leaves value empty, with result.reason saying which.
+    /// @throws RpcError As chat(). json::Error if a complete reply does not fit T, which the
     ///         grammar makes a disagreement between schema and reader rather than a model mistake.
     template <typename T>
     Typed<T> chat(const std::vector<ChatMessage> & messages,
@@ -339,9 +343,13 @@ Typed<T> Client::chat(const std::vector<ChatMessage> & messages,
         return on_chunk ? on_chunk(text) : true;
     });
 
-    // Only a reply the model finished is whole JSON; a truncated or cancelled one cannot parse,
-    // and the reason already says why there is no value.
-    if (typed.result.reason == FinishReason::Eog || typed.result.reason == FinishReason::Stop) {
+    // The grammar makes a reply the model finished whole JSON. A stop string is matched on the
+    // generated text and removed from it, so it can just as well land inside the document: parse
+    // a stopped reply only once it is complete, and otherwise let the reason say why there is no
+    // value. A truncated or cancelled reply cannot parse either.
+    const bool complete = typed.result.reason == FinishReason::Eog ||
+                          (typed.result.reason == FinishReason::Stop && json::detail::Json::accept(reply));
+    if (complete) {
         json::read(reply, typed.value.emplace());
     }
     return typed;

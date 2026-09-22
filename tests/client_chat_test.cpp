@@ -478,6 +478,27 @@ void test_typed_reply_with_stop_reason() {
     CHECK_EQ(*reply.value->note, "allowlisted");
 }
 
+// A stop string is removed from the text before it is delivered, so it can cut the JSON in half.
+// The text still reaches the caller; there is just no document to parse.
+void test_typed_reply_stopped_mid_document() {
+    Round answer;
+    answer.text   = {"{\n  \"spam\": true\n"};
+    answer.reason = v1::FINISH_REASON_STOP;
+
+    Harness harness({answer});
+
+    std::string streamed;
+    const client::Typed<Verdict> reply =
+        harness.client.chat<Verdict>({{"user", "Is this spam?"}}, params, [&](const std::string & text) {
+            streamed += text;
+            return true;
+        });
+
+    CHECK(!reply.value.has_value());
+    CHECK(reply.result.reason == client::FinishReason::Stop);
+    CHECK_EQ(streamed, "{\n  \"spam\": true\n");
+}
+
 }  // namespace
 
 int main() {
@@ -492,6 +513,7 @@ int main() {
     test_typed_reply_cancelled();
     test_typed_reply_that_does_not_fit_throws();
     test_typed_reply_with_stop_reason();
+    test_typed_reply_stopped_mid_document();
 
     std::fprintf(stderr, "%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
