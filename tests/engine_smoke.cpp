@@ -14,10 +14,8 @@
 #include "engine_flags.h"
 #include "flags.h"
 
-#include <algorithm>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 #include <exception>
 #include <fstream>
 #include <iterator>
@@ -101,30 +99,6 @@ llamad::Tool demo_tool() {
     return tool;
 }
 
-/// Print available backend devices and their memory without loading a model.
-void print_device_table() {
-    const std::vector<llamad::DeviceInfo> devices = llamad::Engine::list_devices();
-    size_t w_name = std::strlen("NAME");
-    size_t w_type = std::strlen("TYPE");
-    for (const llamad::DeviceInfo & device : devices) {
-        w_name = std::max(w_name, device.name.size());
-        w_type = std::max(w_type, device.type.size());
-    }
-
-    std::printf("%-*s  %-*s  %9s  %9s  %s\n", (int) w_name, "NAME", (int) w_type, "TYPE", "FREE",
-                "TOTAL", "DESCRIPTION");
-    for (const llamad::DeviceInfo & device : devices) {
-        char free_buf[32];
-        char total_buf[32];
-        std::snprintf(free_buf, sizeof(free_buf), "%.1f GiB",
-                      (double) device.memory_free / (1024.0 * 1024.0 * 1024.0));
-        std::snprintf(total_buf, sizeof(total_buf), "%.1f GiB",
-                      (double) device.memory_total / (1024.0 * 1024.0 * 1024.0));
-        std::printf("%-*s  %-*s  %9s  %9s  %s\n", (int) w_name, device.name.c_str(), (int) w_type,
-                    device.type.c_str(), free_buf, total_buf, device.description.c_str());
-    }
-}
-
 /// A sampling flag that was not given leaves the engine's own default in place.
 template <typename T>
 void apply(const std::optional<T> & flag, T & field) {
@@ -174,7 +148,7 @@ int main(int argc, char ** argv) {
 
     // Listing devices needs no model.
     if (engine_flags.list_devices) {
-        print_device_table();
+        llamad::print_device_table(stdout);
         return 0;
     }
 

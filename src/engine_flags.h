@@ -1,9 +1,9 @@
 /** @file
  * @brief Shared context and offload options for the daemon and engine smoke CLI.
  *
- * The context and offload flags the daemon and engine_smoke both take, and the EngineConfig they
- * describe. The comma-separated lists arrive as text and are split here, so both binaries accept
- * the same spelling and report the same errors.
+ * The context and offload flags the daemon and engine_smoke both take, the EngineConfig they
+ * describe, and the device table --list-devices prints. The comma-separated lists arrive as text
+ * and are split here, so both binaries accept the same spelling and report the same errors.
  */
 
 #pragma once
@@ -11,8 +11,11 @@
 #include "engine.h"
 #include "flags.h"
 
+#include <algorithm>
 #include <charconv>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <optional>
 #include <string>
 #include <system_error>
@@ -111,6 +114,37 @@ inline EngineConfig to_config(const EngineFlags & flags) {
     }
 
     return config;
+}
+
+/// Prints the --list-devices table to `out`: one row per backend device with its free and total
+/// memory, found without loading a model.
+inline void print_device_table(std::FILE * out) {
+    const std::vector<DeviceInfo> devices = Engine::list_devices();
+    if (devices.empty()) {
+        std::fprintf(out, "no devices (this build has no ggml backend registered)\n");
+        return;
+    }
+
+    const auto format_gib = [](uint64_t bytes) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.1f GiB", static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0));
+        return std::string(buf);
+    };
+
+    size_t w_name = std::strlen("NAME");
+    size_t w_type = std::strlen("TYPE");
+    for (const DeviceInfo & device : devices) {
+        w_name = std::max(w_name, device.name.size());
+        w_type = std::max(w_type, device.type.size());
+    }
+
+    std::fprintf(out, "%-*s  %-*s  %9s  %9s  %s\n", static_cast<int>(w_name), "NAME", static_cast<int>(w_type),
+                 "TYPE", "FREE", "TOTAL", "DESCRIPTION");
+    for (const DeviceInfo & device : devices) {
+        std::fprintf(out, "%-*s  %-*s  %9s  %9s  %s\n", static_cast<int>(w_name), device.name.c_str(),
+                     static_cast<int>(w_type), device.type.c_str(), format_gib(device.memory_free).c_str(),
+                     format_gib(device.memory_total).c_str(), device.description.c_str());
+    }
 }
 
 }  // namespace llamad
