@@ -6,7 +6,7 @@ if [[ ${1:-} == --help ]]; then
     echo "Runs chat inference in an existing build."
     echo "Model paths may be absolute or relative to your working directory."
     echo "Example: $0 gpu /absolute/path/to/model.gguf"
-    echo "GPU mode requires Vulkan offload; CPU fallback fails the test."
+    echo "GPU mode requires offload to the GPU; CPU fallback fails the test."
     exit 0
 fi
 
@@ -34,8 +34,10 @@ trap 'rm -f -- "$log"' EXIT
 "$root/build-$mode/tests/engine_smoke" "$model" --ngl "$ngl" \
     --chat --temp 0 --max-tokens 32 "Count from one to three." 2>&1 | tee "$log"
 
-if [[ "$mode" == gpu ]] && ! grep -Eq '^\[llamad\] device Vulkan[0-9]+:' "$log"; then
-    echo "FAIL: inference did not report Vulkan GPU offload." >&2
+# Offload devices are named after their backend: Vulkan0 on Linux, MTL0 on macOS.
+if [[ $(uname -s) == Darwin ]]; then backend=MTL; else backend=Vulkan; fi
+if [[ "$mode" == gpu ]] && ! grep -Eq "^\[llamad\] device ${backend}[0-9]+:" "$log"; then
+    echo "FAIL: inference did not report $backend GPU offload." >&2
     exit 1
 fi
 if ! grep -Eq 'finish: (Eog|Length) .*completion_tokens: [1-9][0-9]* ' "$log"; then
