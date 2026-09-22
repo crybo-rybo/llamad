@@ -315,15 +315,18 @@ public:
                   const ChunkCallback & on_chunk);
 
 private:
-    /// One chat turn the daemon constrains to a JSON Schema; the typed chat() is written over it.
+    /// One Chat request: the tools overload of chat() and the typed chat() are both written over it.
     /// @param messages Complete conversation history in template order.
-    /// @param response_json_schema JSON Schema object, as a JSON string, the reply must fit.
+    /// @param tools Opaque tool definitions offered on this turn; empty offers none.
+    /// @param response_json_schema JSON Schema object, as a JSON string, the reply must fit; empty
+    ///        leaves the reply unconstrained.
     /// @param params Sampling controls and stop strings for this turn.
-    /// @param on_chunk Receives generated JSON text; return false to cancel.
-    GenerateResult chat_constrained(const std::vector<ChatMessage> & messages,
-                                    const std::string & response_json_schema,
-                                    const SamplingParams & params,
-                                    const ChunkCallback & on_chunk);
+    /// @param on_chunk Receives generated text; return false to cancel.
+    GenerateResult chat_request(const std::vector<ChatMessage> & messages,
+                                const std::vector<Tool> & tools,
+                                const std::string & response_json_schema,
+                                const SamplingParams & params,
+                                const ChunkCallback & on_chunk);
 
     /// Dependency-specific state hidden behind the public contract.
     struct Impl;
@@ -338,7 +341,8 @@ Typed<T> Client::chat(const std::vector<ChatMessage> & messages,
 
     std::string reply;
     Typed<T>    typed;
-    typed.result = chat_constrained(messages, json::schema<T>(), params, [&](const std::string & text) {
+    // The daemon refuses a schema alongside tools, so a constrained turn offers none.
+    typed.result = chat_request(messages, /*tools*/ {}, json::schema<T>(), params, [&](const std::string & text) {
         reply += text;
         return on_chunk ? on_chunk(text) : true;
     });
