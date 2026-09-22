@@ -11,9 +11,6 @@ llamad is written in C++26 and uses static reflection, so it needs GCC 16 or lat
 Apple Clang do not implement reflection. Linux and macOS on Apple silicon are the supported
 platforms; on both, GCC compiles every C++ source, including your own if you link the client.
 
-The client uses the header-only nlohmann/json library shipped in the pinned llama.cpp
-submodule. It needs no separate package or runtime library.
-
 Arch Linux:
 
 ```sh
@@ -38,9 +35,20 @@ their headers do not compile with GCC; that costs only prompt-processing speed o
 
 ## Build
 
+Clone Repo
 ```sh
 git clone --recurse-submodules git@github.com:crybo-rybo/llamad.git
 cd llamad
+```
+
+Arch Linux Build
+```sh
+./scripts/build.sh cpu                      # builds into build-cpu/
+./scripts/test.sh cpu                       # chat template, flags, wire contract, JSON and tool set tests
+```
+
+MacOS Build
+```sh
 ./scripts/build-deps-macos.sh               # macOS only, once: builds gRPC into build-deps/
 ./scripts/build.sh cpu                      # builds into build-cpu/
 ./scripts/test.sh cpu                       # chat template, flags, wire contract, JSON and tool set tests
@@ -52,54 +60,6 @@ The build includes llama.cpp's `common` library, which the chat layer needs for 
 templates and tool-call parsing; it is the bulk of a first build. The tests need no
 model file and no daemon: the chat-template ones render and parse against a template
 checked into the submodule, the rest need nothing but the build.
-
-GitHub Actions builds on Arch Linux (CPU-only) when a pull request is opened, reopened or
-updated, on pushes to `main`, and on manual runs. The job builds the daemon, client, and
-engine smoke executable, and runs the tests without a GPU or model download. CI covers Linux
-only; GPU execution, inference with a real model and the macOS build are verified locally.
-
-## API documentation
-
-Doxygen documents llamad's client, JSON adapters, engine, chat layer, service, command-line
-helpers and wire conversions, including internal ownership and streaming contracts. The
-reference includes the commented protobuf schema and executable examples. Vendored llama.cpp
-and generated protobuf code are excluded.
-
-Only CMake and Doxygen (1.17 or later) are needed to generate HTML; no compiler, submodule
-checkout, Graphviz, model or gRPC installation is required:
-
-```sh
-pacman -S cmake doxygen
-./scripts/docs.sh                       # open build-docs/html/index.html
-```
-
-The script accepts extra CMake configure arguments and works from any directory. The equivalent
-standalone build is:
-
-```sh
-cmake -S docs -B build-docs
-cmake --build build-docs --target llamad_docs
-```
-
-Documentation is optional in the normal application build and disabled by default:
-
-```sh
-cmake -S . -B build -G Ninja -DLLAMAD_BUILD_DOCS=ON
-cmake --build build --target llamad_docs  # open build/docs/html/index.html
-```
-
-Enabling the option requires Doxygen at configure time and adds an explicit `llamad_docs`
-target, including in engine-only builds. Normal builds do not generate documentation, and
-leaving the option off does not search for Doxygen. Both entry points use the same configuration
-in `docs/CMakeLists.txt`. Missing documentation and malformed Doxygen comments fail the build.
-
-The Documentation workflow builds when a pull request is opened, reopened or updated, on
-pushes to `main`, and on manual runs. Each build uploads a downloadable `github-pages`
-artifact. Successful builds on the repository's default branch deploy to
-[GitHub Pages](https://crybo-rybo.github.io/llamad/); manual runs deploy only when that branch is
-selected. Pull requests only build. To enable deployment, set **Settings → Pages → Build and
-deployment → Source** to **GitHub Actions** and allow the default branch in the `github-pages`
-environment. The workflow publishes its artifact directly, without a generated-content branch.
 
 ## GPU
 
@@ -148,6 +108,16 @@ user can talk to it.
 SIGINT/SIGTERM shut the daemon down and remove the socket. A daemon put in the background by a
 script inherits SIGINT ignored, and macOS discards a signal that is both ignored and blocked, so
 stop one started that way with SIGTERM.
+
+## API documentation
+
+Only CMake and Doxygen (1.17 or later) are needed to generate HTML; no compiler, submodule
+checkout, Graphviz, model or gRPC installation is required:
+
+```sh
+pacman -S cmake doxygen
+./scripts/docs.sh                       # open build-docs/html/index.html
+```
 
 ## Chat from the terminal
 
