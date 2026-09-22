@@ -93,7 +93,8 @@ public:
     ///        leaves the reply unconstrained. The JSON reaches the caller as ordinary content.
     /// @return Prompt, grammar, stops and shared parser state for a matching output stream.
     /// @throws ChatFormatError For invalid schema JSON, rejected messages or parser setup failure;
-    ///         also if response_json_schema is not a JSON object, or is combined with tools.
+    ///         also if response_json_schema is not a JSON object, is the empty object, or is
+    ///         combined with tools.
     RenderedChat render(const std::vector<ChatMessage> & messages, const std::vector<Tool> & tools,
                         const std::string & response_json_schema) const;
 

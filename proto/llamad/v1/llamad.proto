@@ -94,7 +94,8 @@ message ChatRequest {
   SamplingParams sampling = 2;  ///< Unset fields use the daemon defaults.
   repeated Tool tools = 3;  ///< Tools available in this request; the daemon never executes them.
   /// JSON Schema object the reply must fit, as a JSON string; empty leaves the reply
-  /// unconstrained. Mutually exclusive with `tools`. The reply's `text` chunks carry the JSON.
+  /// unconstrained, and an empty object is refused because it constrains nothing.
+  /// Mutually exclusive with `tools`. The reply's `text` chunks carry the JSON.
   string response_json_schema = 4;
 }
 

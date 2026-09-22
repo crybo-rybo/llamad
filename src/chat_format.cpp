@@ -206,6 +206,12 @@ RenderedChat ChatFormat::render(const std::vector<ChatMessage> & messages, const
         if (!schema.is_object()) {
             throw ChatFormatError("response_json_schema is not a JSON object");
         }
+        // common only builds a response grammar from a nonempty object, so `{}` would leave the
+        // reply unconstrained prose while the request promised JSON. A schema that constrains
+        // nothing has no useful reading here, so say so rather than quietly dropping it.
+        if (schema.empty()) {
+            throw ChatFormatError("response_json_schema is an empty object, which constrains nothing");
+        }
     }
 
     common_chat_templates_inputs inputs;

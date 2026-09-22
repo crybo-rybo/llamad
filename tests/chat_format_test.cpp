@@ -449,6 +449,21 @@ void test_render_schema_not_an_object_rejected() {
     }
 }
 
+// `{}` is a JSON Schema that admits any JSON value, but common builds no grammar from it, so the
+// reply would be unconstrained prose while the request promised JSON. It is refused rather than
+// silently treated as no schema at all.
+void test_render_empty_schema_object_rejected() {
+    const llamad::ChatFormat format = make_format();
+
+    bool threw = false;
+    try {
+        format.render({user("hi")}, {}, "{}");
+    } catch (const llamad::ChatFormatError &) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
 void test_invalid_tool_schema() {
     const llamad::ChatFormat format = make_format();
 
@@ -481,6 +496,7 @@ int main() {
     test_stream_response_schema_raw();
     test_render_schema_with_tools_rejected();
     test_render_schema_not_an_object_rejected();
+    test_render_empty_schema_object_rejected();
 
     std::fprintf(stderr, "%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
