@@ -31,7 +31,10 @@
   JSON-Schema-to-grammar path as tool arguments, so the reply is a JSON object
   fitting the schema and streams as ordinary text. A schema turn asks the template
   to close its `<think>` block, so a thinking model answers with the JSON and
-  nothing else.
+  nothing else. The schema goes into the prompt too, as a system instruction to
+  reply with one matching JSON object; that is what carries its property
+  descriptions to the model, and it takes the place of a template's own default
+  system prompt.
 - **Errors are typed.** Caller mistakes map to `INVALID_ARGUMENT`, a missing capability to
   `FAILED_PRECONDITION`, everything else to `INTERNAL`.
 

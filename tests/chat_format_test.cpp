@@ -392,6 +392,10 @@ void test_render_with_response_schema() {
     CHECK(rendered.grammar.trigger_words.empty());
 
     CHECK(contains(rendered.prompt, "Is this spam?"));
+    // The schema is in the prompt as well as in the grammar: the grammar fixes the shape, the
+    // prompt is the only place the schema's descriptions can reach the model.
+    CHECK(contains(rendered.prompt, "Reply with a single JSON object that matches this JSON Schema:"));
+    CHECK(contains(rendered.prompt, spam_schema()));
 
     // The grammar's root opens with the assistant turn the prompt already ends with, so the engine
     // is given that text to advance the grammar past before the first token is sampled.
@@ -461,6 +465,50 @@ void test_stream_response_schema_thinking() {
         CHECK(!contains(run.content(), "think"));
         CHECK_EQ(run.calls.size(), size_t(0));
     }
+}
+
+// The grammar is built from the schema's shape alone, so two schemas that differ only in a
+// description compile to the same grammar. Only the prompt can carry that difference.
+void test_render_schema_descriptions_reach_the_prompt() {
+    const llamad::ChatFormat format = make_format();
+
+    const std::string sentiment =
+        R"({"type":"object","properties":{"answer":{"type":"string",)"
+        R"("description":"the message's sentiment, one of positive, neutral or negative"}},)"
+        R"("required":["answer"]})";
+    const std::string language =
+        R"({"type":"object","properties":{"answer":{"type":"string",)"
+        R"("description":"the ISO 639-1 code of the language the message is written in"}},)"
+        R"("required":["answer"]})";
+
+    const llamad::RenderedChat a = format.render({user("Bonjour!")}, {}, sentiment);
+    const llamad::RenderedChat b = format.render({user("Bonjour!")}, {}, language);
+
+    CHECK(contains(a.prompt, "one of positive, neutral or negative"));
+    CHECK(contains(b.prompt, "the ISO 639-1 code of the language"));
+    CHECK(a.prompt != b.prompt);
+}
+
+// The instruction joins an existing system turn instead of adding a second one, so the model sees
+// one system section however the history was built.
+void test_render_schema_with_system_message() {
+    const llamad::ChatFormat format = make_format();
+
+    llamad::ChatMessage system;
+    system.role    = "system";
+    system.content = "You are a terse spam filter.";
+
+    const llamad::RenderedChat rendered = format.render({system, user("Is this spam?")}, {}, spam_schema());
+
+    CHECK(contains(rendered.prompt, "You are a terse spam filter."));
+    CHECK(contains(rendered.prompt, "Reply with a single JSON object that matches this JSON Schema:"));
+
+    size_t sections = 0;
+    for (size_t pos = rendered.prompt.find("<|im_start|>system"); pos != std::string::npos;
+         pos        = rendered.prompt.find("<|im_start|>system", pos + 1)) {
+        ++sections;
+    }
+    CHECK_EQ(sections, size_t(1));
 }
 
 void test_render_schema_with_tools_rejected() {
@@ -536,6 +584,8 @@ int main() {
     test_stream_response_schema_raw();
     test_render_with_response_schema_thinking();
     test_stream_response_schema_thinking();
+    test_render_schema_descriptions_reach_the_prompt();
+    test_render_schema_with_system_message();
     test_render_schema_with_tools_rejected();
     test_render_schema_not_an_object_rejected();
     test_render_empty_schema_object_rejected();

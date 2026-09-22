@@ -141,8 +141,9 @@ if (reply.value) { use(*reply.value); }
 
 `json::schema<T>()` travels with the request, the daemon builds a grammar from it, and the
 sampler can only produce a JSON object of that shape; the finished reply is read back with
-`json::read`. `T` is an aggregate whose members `json.h` supports, and its `desc` annotations
-reach the model as property descriptions.
+`json::read`. `T` is an aggregate whose members `json.h` supports. The schema also goes into the
+prompt, as a system instruction to reply with one matching JSON object, which is how the `desc`
+annotations on `T` reach the model as property descriptions and can steer the answer.
 
 - `value` is set when the reply is a complete JSON document: the model finished it, or a stop
   string matched after it. A reply cut short by `max_tokens`, by a cancel, or by a stop string

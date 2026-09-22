@@ -242,6 +242,23 @@ RenderedChat ChatFormat::render(const std::vector<ChatMessage> & messages, const
         inputs.tools.push_back(to_common(tool));
     }
 
+    if (schema_turn) {
+        // common builds a grammar from the schema but never writes the schema into the prompt, so
+        // everything expressed only in it — what a property means, which units, which value to
+        // pick — would never reach the model. The instruction goes on this copy of the history;
+        // the caller's messages are untouched.
+        const std::string instruction =
+            "Reply with a single JSON object that matches this JSON Schema:\n" + response_json_schema;
+        if (!inputs.messages.empty() && inputs.messages.front().role == "system") {
+            inputs.messages.front().content += "\n\n" + instruction;
+        } else {
+            common_chat_msg system;
+            system.role    = "system";
+            system.content = instruction;
+            inputs.messages.insert(inputs.messages.begin(), std::move(system));
+        }
+    }
+
     common_chat_params params;
     try {
         params = common_chat_templates_apply(impl_->templates.get(), inputs);
