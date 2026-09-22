@@ -7,10 +7,10 @@
  * reply the daemon says is finished.
  */
 
+#include "check.h"
 #include "llamad/client.h"
 
 #include <algorithm>
-#include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
@@ -33,31 +33,6 @@ namespace client = llamad::client;
 namespace v1     = llamad::v1;
 
 using llamad::client::desc;
-
-int failures = 0;
-int checks   = 0;
-
-#define CHECK(cond)                                                                       \
-    do {                                                                                  \
-        ++checks;                                                                         \
-        if (!(cond)) {                                                                    \
-            ++failures;                                                                   \
-            std::fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #cond); \
-        }                                                                                 \
-    } while (0)
-
-#define CHECK_EQ(a, b)                                                                           \
-    do {                                                                                         \
-        ++checks;                                                                                \
-        const std::string lhs_ = (a);                                                            \
-        const std::string rhs_ = (b);                                                            \
-        if (lhs_ != rhs_) {                                                                      \
-            ++failures;                                                                          \
-            std::fprintf(stderr, "%s:%d: CHECK failed: %s == %s\n", __FILE__, __LINE__, #a, #b); \
-            std::fprintf(stderr, "    left:  '%s'\n", lhs_.c_str());                             \
-            std::fprintf(stderr, "    right: '%s'\n", rhs_.c_str());                             \
-        }                                                                                        \
-    } while (0)
 
 // Tools run in the calling thread, so this records what ran, in order, without a lock.
 std::string tool_log;
@@ -515,6 +490,5 @@ int main() {
     test_typed_reply_with_stop_reason();
     test_typed_reply_stopped_mid_document();
 
-    std::fprintf(stderr, "%d checks, %d failures\n", checks, failures);
-    return failures == 0 ? 0 : 1;
+    return tests::report();
 }

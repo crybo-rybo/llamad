@@ -27,7 +27,7 @@ single source of truth for how things work.
 | `src/cli/flags.h` | The one command-line parser and `--help` printer, over a struct whose members are a binary's flags. Target `llamad_flags` exposes only `src/cli`, so `llamad-chat` uses it without reaching a daemon header. |
 | `src/engine_flags.h` | The context and offload flags `llamad` and `engine_smoke` share, and the `EngineConfig` they describe. |
 | `client/` | Client library (`include/llamad/client.h`, `src/client.cpp`) and `llamad-chat` (`examples/chat_cli.cpp`). `include/llamad/json.h` maps reflected tool arguments, results and schemas to nlohmann/json and reports what does not fit as `json::Error`; `client.h` includes it, so an application still includes one header. |
-| `tests/` | Plain-executable tests registered with CTest, needing no model file, and `engine_smoke.cpp`: a CLI that drives the engine and chat layer in-process, with no daemon and no gRPC. |
+| `tests/` | Plain-executable tests registered with CTest, needing no model file and sharing the `CHECK` macros in `check.h`, and `engine_smoke.cpp`: a CLI that drives the engine and chat layer in-process, with no daemon and no gRPC. |
 | `third_party/llama.cpp` | Pinned, unmodified submodule. |
 | `models/` | Local GGUF files. Gitignored; not available in CI. |
 
