@@ -76,6 +76,10 @@ struct SamplingParams {
     bool                     grammar_lazy = false;      ///< only constrain once a trigger fires
     std::vector<std::string> grammar_trigger_patterns;  ///< regexes
     std::vector<std::string> grammar_trigger_words;     ///< literal words: token trigger if a single token, else escaped to a regex
+    /// Text at the end of the prompt that a non-lazy grammar's root expects before the generated
+    /// output; its tokens advance the grammar, so the model continues rather than repeats it.
+    /// Only for a grammar built from the prompt, never for one a caller wrote.
+    std::string              grammar_prefill;
     /// Special tokens whose text must be rendered into the output stream (e.g. "<tool_call>" where it is an added token).
     std::vector<std::string> preserved_tokens;
 };

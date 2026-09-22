@@ -209,6 +209,16 @@ struct GenerateResult {
     std::vector<ToolCall> tool_calls;  ///< Calls from an assistant turn replayed in history.
 };
 
+/// A reply constrained to T's JSON Schema. value is set when the reply is a complete JSON
+/// document: the model finished it, or a stop string matched after it. A reply cut short by the
+/// token budget, a cancel, or a stop string matched inside the JSON leaves value empty, and
+/// result.reason says which.
+template <typename T>
+struct Typed {
+    std::optional<T> value;   ///< The parsed reply, or unset when the reply is not a complete document.
+    GenerateResult   result;  ///< Reason generation ended, plus the stats for it.
+};
+
 /// Called with each piece of generated text, in order. Return false to cancel the request.
 using ChunkCallback = std::function<bool(const std::string & text)>;
 
@@ -290,11 +300,60 @@ public:
                         const ChunkCallback & on_chunk,
                         int max_rounds = 8);
 
+    /// One chat turn whose reply is an instance of T: json::schema<T>() travels with the request,
+    /// the daemon holds the model to it, and the finished reply is read back with json::read. T is
+    /// an aggregate whose members json.h supports; its desc annotations reach the model as property
+    /// descriptions. The JSON still streams through on_chunk as it is generated. Tools are not
+    /// offered on a typed turn. Messages must contain the full history, as for chat().
+    /// The reply is read back when it is a complete JSON document; a reply the token budget, a
+    /// cancel or a stop string cut short leaves value empty, with result.reason saying which.
+    /// @throws RpcError As chat(). json::Error if a complete reply does not fit T, which the
+    ///         grammar makes a disagreement between schema and reader rather than a model mistake.
+    template <typename T>
+    Typed<T> chat(const std::vector<ChatMessage> & messages,
+                  const SamplingParams & params,
+                  const ChunkCallback & on_chunk);
+
 private:
+    /// One chat turn the daemon constrains to a JSON Schema; the typed chat() is written over it.
+    /// @param messages Complete conversation history in template order.
+    /// @param response_json_schema JSON Schema object, as a JSON string, the reply must fit.
+    /// @param params Sampling controls and stop strings for this turn.
+    /// @param on_chunk Receives generated JSON text; return false to cancel.
+    GenerateResult chat_constrained(const std::vector<ChatMessage> & messages,
+                                    const std::string & response_json_schema,
+                                    const SamplingParams & params,
+                                    const ChunkCallback & on_chunk);
+
     /// Dependency-specific state hidden behind the public contract.
     struct Impl;
     std::unique_ptr<Impl> impl_;  ///< Sole owner of the hidden implementation.
 };
+
+template <typename T>
+Typed<T> Client::chat(const std::vector<ChatMessage> & messages,
+                      const SamplingParams & params,
+                      const ChunkCallback & on_chunk) {
+    static_assert(std::is_aggregate_v<T>, "chat<T>: T must be an aggregate; json::schema describes an object");
+
+    std::string reply;
+    Typed<T>    typed;
+    typed.result = chat_constrained(messages, json::schema<T>(), params, [&](const std::string & text) {
+        reply += text;
+        return on_chunk ? on_chunk(text) : true;
+    });
+
+    // The grammar makes a reply the model finished whole JSON. A stop string is matched on the
+    // generated text and removed from it, so it can just as well land inside the document: parse
+    // a stopped reply only once it is complete, and otherwise let the reason say why there is no
+    // value. A truncated or cancelled reply cannot parse either.
+    const bool complete = typed.result.reason == FinishReason::Eog ||
+                          (typed.result.reason == FinishReason::Stop && json::detail::Json::accept(reply));
+    if (complete) {
+        json::read(reply, typed.value.emplace());
+    }
+    return typed;
+}
 
 }  // namespace client
 }  // namespace llamad

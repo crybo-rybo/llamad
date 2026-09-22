@@ -210,15 +210,16 @@ grpc::Status LlamaService::Chat(grpc::ServerContext * context,
             tools.push_back(wire::from_proto<llamad::Tool>(t));
         }
 
-        rendered = chat_format_->render(messages, tools);
+        rendered = chat_format_->render(messages, tools, request->response_json_schema());
 
         params = from_proto(request->sampling());
-        // With tools the model's arguments are grammar-constrained; without them the chat layer
-        // leaves the grammar empty and this is all a no-op.
+        // With tools or a response schema the output is grammar-constrained; with neither the chat
+        // layer leaves the grammar empty and this is all a no-op.
         params.grammar                  = rendered.grammar.grammar;
         params.grammar_lazy             = rendered.grammar.lazy;
         params.grammar_trigger_patterns = rendered.grammar.trigger_patterns;
         params.grammar_trigger_words    = rendered.grammar.trigger_words;
+        params.grammar_prefill          = rendered.grammar.prefill;
         params.preserved_tokens         = rendered.preserved_tokens;
         params.stop.insert(params.stop.end(), rendered.additional_stops.begin(),
                            rendered.additional_stops.end());

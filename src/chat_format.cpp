@@ -188,13 +188,50 @@ ChatFormat::ChatFormat(const std::string & template_source,
 
 ChatFormat::~ChatFormat() = default;
 
-RenderedChat ChatFormat::render(const std::vector<ChatMessage> & messages, const std::vector<Tool> & tools) const {
+RenderedChat ChatFormat::render(const std::vector<ChatMessage> & messages, const std::vector<Tool> & tools,
+                                const std::string & response_json_schema) const {
+    if (!response_json_schema.empty()) {
+        if (!tools.empty()) {
+            // common's parser matches the response format before tools, so under a response schema
+            // a tool call would never be parsed as one. Refusing beats ignoring one of the two.
+            throw ChatFormatError("tools and response_json_schema cannot be used together");
+        }
+        // common parses the schema in the middle of template rendering, and silently ignores it
+        // unless it is an object; both are better caught here, where the message can say what is wrong.
+        const nlohmann::json schema =
+            nlohmann::json::parse(response_json_schema, /*cb*/ nullptr, /*allow_exceptions*/ false);
+        if (schema.is_discarded()) {
+            throw ChatFormatError("response_json_schema is not valid JSON");
+        }
+        if (!schema.is_object()) {
+            throw ChatFormatError("response_json_schema is not a JSON object");
+        }
+        // common only builds a response grammar from a nonempty object, so `{}` would leave the
+        // reply unconstrained prose while the request promised JSON. A schema that constrains
+        // nothing has no useful reading here, so say so rather than quietly dropping it.
+        if (schema.empty()) {
+            throw ChatFormatError("response_json_schema is an empty object, which constrains nothing");
+        }
+    }
+
+    // A schema turn and a thinking template disagree about how the assistant turn opens: the
+    // template writes an unclosed <think> block into the generation prompt, while the response
+    // grammar admits only JSON after the assistant header, so the engine's prefill is rejected.
+    // Asking the template to close the block, and the parser to treat thinking as reasoning
+    // rather than content, makes the two agree and keeps thinking text out of the JSON stream.
+    // Plain and tool turns leave a model's thinking inline in the content.
+    const bool                    schema_turn = !response_json_schema.empty();
+    const common_reasoning_format reasoning =
+        schema_turn ? COMMON_REASONING_FORMAT_AUTO : COMMON_REASONING_FORMAT_NONE;
+
     common_chat_templates_inputs inputs;
     inputs.use_jinja             = true;
     inputs.add_generation_prompt = true;
     inputs.tool_choice           = COMMON_CHAT_TOOL_CHOICE_AUTO;
     inputs.parallel_tool_calls   = impl_->parallel_tool_calls;
-    inputs.reasoning_format      = COMMON_REASONING_FORMAT_NONE;   // thinking text stays in the content
+    inputs.reasoning_format      = reasoning;
+    inputs.enable_thinking       = !schema_turn;
+    inputs.json_schema           = response_json_schema;           // empty leaves the reply unconstrained
 
     inputs.messages.reserve(messages.size());
     for (const ChatMessage & message : messages) {
@@ -203,6 +240,23 @@ RenderedChat ChatFormat::render(const std::vector<ChatMessage> & messages, const
     inputs.tools.reserve(tools.size());
     for (const Tool & tool : tools) {
         inputs.tools.push_back(to_common(tool));
+    }
+
+    if (schema_turn) {
+        // common builds a grammar from the schema but never writes the schema into the prompt, so
+        // everything expressed only in it — what a property means, which units, which value to
+        // pick — would never reach the model. The instruction goes on this copy of the history;
+        // the caller's messages are untouched.
+        const std::string instruction =
+            "Reply with a single JSON object that matches this JSON Schema:\n" + response_json_schema;
+        if (!inputs.messages.empty() && inputs.messages.front().role == "system") {
+            inputs.messages.front().content += "\n\n" + instruction;
+        } else {
+            common_chat_msg system;
+            system.role    = "system";
+            system.content = instruction;
+            inputs.messages.insert(inputs.messages.begin(), std::move(system));
+        }
     }
 
     common_chat_params params;
@@ -216,6 +270,7 @@ RenderedChat ChatFormat::render(const std::vector<ChatMessage> & messages, const
     rendered.prompt           = std::move(params.prompt);
     rendered.grammar.grammar  = std::move(params.grammar);
     rendered.grammar.lazy     = params.grammar_lazy;
+    rendered.grammar.prefill  = params.generation_prompt;
     rendered.preserved_tokens = std::move(params.preserved_tokens);
     rendered.additional_stops = std::move(params.additional_stops);
     split_triggers(params.grammar_triggers, rendered.grammar);
@@ -223,7 +278,7 @@ RenderedChat ChatFormat::render(const std::vector<ChatMessage> & messages, const
     auto state                       = std::make_shared<ParseState>();
     state->params.format             = params.format;
     state->params.generation_prompt  = params.generation_prompt;
-    state->params.reasoning_format   = COMMON_REASONING_FORMAT_NONE;
+    state->params.reasoning_format   = reasoning;   // the parser must match what the grammar was built from
     state->params.parse_tool_calls   = true;
     if (!params.parser.empty()) {
         // The serialized PEG parser: without it common_chat_parse falls back to "everything is

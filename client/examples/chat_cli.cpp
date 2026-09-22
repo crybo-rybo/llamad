@@ -1,5 +1,5 @@
 /** @file
- * @brief Interactive chat client and an annotated time-tool example.
+ * @brief Interactive chat client with annotated time-tool and typed-reply examples.
  *
  * llamad-chat: a multi-turn chat REPL against a running llamad daemon.
  * It uses only <llamad/client.h>: no gRPC or protobuf headers anywhere.
@@ -82,6 +82,10 @@ struct Options {
     [[=help{"offer the built-in get_current_time tool and run the\n"
             "execute-and-resend loop for any call the model makes"}]]
     bool demo_tools = false;  ///< Offer the built-in get_current_time tool and run the  execute-and-resend loop for any call the model makes.
+
+    [[=help{"ask the model to fill a fixed struct (a spam verdict) and print\n"
+            "its fields; one turn, then exit"}]]
+    bool demo_json = false;  ///< Ask the model for a fixed struct and print the fields; one turn, then exit.
 
     // Hidden, for testing cancellation: cancel the turn after N chunks.
     std::optional<long> cancel_after;  ///< Hidden test flag: cancel after this many delivered chunks.
@@ -167,6 +171,17 @@ CurrentTime get_current_time([[=desc{"IANA timezone, e.g. Europe/Paris"}]] std::
 /// Maximum model requests per terminal turn, bounding repeated tool calls.
 const int kMaxToolRounds = 8;
 
+/// Print the one-line generation summary every turn ends with.
+void print_stats(const llamad::client::GenerateResult & result) {
+    std::fprintf(stderr,
+                 "[stats] finish=%s prompt_tokens=%d completion_tokens=%d prompt_ms=%.1f completion_ms=%.1f\n",
+                 reason_name(result.reason),
+                 result.stats.prompt_tokens,
+                 result.stats.completion_tokens,
+                 result.stats.prompt_ms,
+                 result.stats.completion_ms);
+}
+
 /// Runs one turn: streams the reply to stdout while the client appends every assistant and
 /// "tool" turn it takes to the history. Returns false if the turn was cancelled.
 bool run_turn(llamad::client::Client & client,
@@ -209,13 +224,7 @@ bool run_turn(llamad::client::Client & client,
     if (cancelled) {
         std::fprintf(stderr, "[cancelled]\n");
     }
-    std::fprintf(stderr,
-                 "[stats] finish=%s prompt_tokens=%d completion_tokens=%d prompt_ms=%.1f completion_ms=%.1f\n",
-                 reason_name(result.reason),
-                 result.stats.prompt_tokens,
-                 result.stats.completion_tokens,
-                 result.stats.prompt_ms,
-                 result.stats.completion_ms);
+    print_stats(result);
 
     // Tool calls coming back from the loop mean it ran out of rounds with the model still asking.
     if (result.reason == llamad::client::FinishReason::ToolCalls) {
@@ -226,6 +235,71 @@ bool run_turn(llamad::client::Client & client,
         history.resize(user_turn);  // drop the user turn that produced nothing, tool traffic included
     }
     return !cancelled;
+}
+
+// --- the --demo-json struct ------------------------------------------------------------------
+//
+// A typed turn asks for a struct rather than prose: the struct's schema travels with the request,
+// the daemon holds the model to it, and the JSON that streams back is parsed into the struct.
+
+/// How sure the model says its verdict is.
+enum class Confidence {
+    low,     ///< Little confidence in the verdict.
+    medium,  ///< Moderate confidence in the verdict.
+    high,    ///< Strong confidence in the verdict.
+};
+
+/// Structured reply of the --demo-json turn.
+struct Verdict {
+    [[=desc{"whether the message is spam"}]]
+    bool                     spam;        ///< Whether the message is spam.
+    [[=desc{"short reasons for the verdict, most important first"}]]
+    std::vector<std::string> reasons;     ///< Reasons for the verdict, most important first.
+    [[=desc{"how sure the verdict is"}]]
+    Confidence               confidence;  ///< Reported certainty of the verdict.
+};
+
+/// The message the demonstration turn asks about.
+const char kDemoMessage[] =
+    "Congratulations! You have WON a free cruise. Click the link now to claim your prize!";
+
+/// Spell the reported confidence for terminal output.
+const char * confidence_name(Confidence confidence) {
+    switch (confidence) {
+        case Confidence::low:    return "low";
+        case Confidence::medium: return "medium";
+        case Confidence::high:   return "high";
+    }
+    return "unknown";
+}
+
+/// Runs the single typed turn: the JSON streams to stdout as any reply does, then its fields
+/// are printed one per line.
+void run_json_demo(llamad::client::Client & client,
+                   std::vector<llamad::client::ChatMessage> & history,
+                   const llamad::client::SamplingParams & sampling) {
+    history.push_back({"user", std::string("Is this message spam?\n\n") + kDemoMessage});
+
+    const llamad::client::Typed<Verdict> reply =
+        client.chat<Verdict>(history, sampling, [](const std::string & text) {
+            std::fwrite(text.data(), 1, text.size(), stdout);
+            std::fflush(stdout);
+            return true;
+        });
+
+    std::fputc('\n', stdout);
+    std::fflush(stdout);
+
+    if (reply.value) {
+        std::fprintf(stderr, "[demo-json] spam: %s\n", reply.value->spam ? "true" : "false");
+        for (const std::string & reason : reply.value->reasons) {
+            std::fprintf(stderr, "[demo-json] reason: %s\n", reason.c_str());
+        }
+        std::fprintf(stderr, "[demo-json] confidence: %s\n", confidence_name(reply.value->confidence));
+    } else {
+        std::fprintf(stderr, "[demo-json] no value: finish=%s\n", reason_name(reply.result.reason));
+    }
+    print_stats(reply.result);
 }
 
 }  // namespace
@@ -247,6 +321,9 @@ int main(int argc, char ** argv) {
         }
         if (options.cancel_after && *options.cancel_after < 1) {
             throw llamad::cli::FlagError("--cancel-after needs a positive integer");
+        }
+        if (options.demo_json && (options.once || options.demo_tools)) {
+            throw llamad::cli::FlagError("--demo-json cannot be combined with --once or --demo-tools");
         }
     } catch (const llamad::cli::FlagError & e) {
         std::fprintf(stderr, "error: %s\n", e.what());
@@ -280,6 +357,11 @@ int main(int argc, char ** argv) {
 
     try {
         llamad::client::Client client(socket_path);
+
+        if (options.demo_json) {
+            run_json_demo(client, history, sampling);
+            return 0;
+        }
 
         if (options.once) {
             history.push_back({"user", *options.once});

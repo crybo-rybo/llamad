@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -335,6 +336,7 @@ struct ResolvedTokens {
     std::unordered_set<llama_token> preserved;         ///< tokens whose special text is emitted
     std::vector<llama_token>        trigger_tokens;    ///< lazy grammar: trigger on this token
     std::vector<std::string>        trigger_patterns;  ///< lazy grammar: trigger on this regex
+    std::vector<llama_token>        prefill;           ///< non-lazy grammar: tokens it consumes before sampling
 };
 
 /// RAII wrapper so the sampler chain is freed on every path, exceptions included.
@@ -430,6 +432,17 @@ private:
         }
 
         llama_sampler_chain_add(chain_, grammar);
+
+        // The chat layer's grammars describe the whole assistant turn, whose opening the template
+        // has already written into the prompt. Advancing the grammar past that text is what makes
+        // the model continue the turn instead of being constrained to repeat its opening.
+        try {
+            for (const llama_token token : resolved.prefill) {
+                llama_sampler_accept(grammar, token);
+            }
+        } catch (const std::exception & e) {
+            throw EngineError(std::string("the grammar does not accept the prompt's final text: ") + e.what());
+        }
     }
 
     llama_sampler * chain_ = nullptr;  ///< Owned sampler chain, including its grammar sampler.
@@ -521,6 +534,17 @@ struct Engine::Impl {
             const std::vector<int32_t> ids = tokenize(text, /*add_special*/ false, /*parse_special*/ true);
             if (ids.size() == 1) {
                 out.preserved.insert(ids[0]);
+            }
+        }
+
+        if (!params.grammar.empty() && !params.grammar_lazy && !params.grammar_prefill.empty()) {
+            out.prefill = tokenize(params.grammar_prefill, /*add_special*/ false, /*parse_special*/ true);
+            // Some tokenizers put a space in front of the first piece. That space is not in the
+            // prompt, so feeding it would send the grammar down the wrong branch.
+            const std::string first = out.prefill.empty() ? "" : token_to_piece(out.prefill[0], /*special*/ true);
+            if (!first.empty() && std::isspace(static_cast<unsigned char>(first[0])) &&
+                !std::isspace(static_cast<unsigned char>(params.grammar_prefill[0]))) {
+                out.prefill.erase(out.prefill.begin());
             }
         }
 

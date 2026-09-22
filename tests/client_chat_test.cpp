@@ -1,9 +1,10 @@
 /** @file
- * @brief Tool-loop and history contracts against a scripted service on a private socket.
+ * @brief Tool-loop, typed-reply and history contracts against a scripted service on a private socket.
  *
- * The tool loop in Client::chat, against a scripted fake daemon on a private Unix socket.
- * No model and no inference: the fake replays canned rounds, so what is under test is the
- * history the loop builds, the requests it sends, its summed stats and where it stops.
+ * Client::chat, against a scripted fake daemon on a private Unix socket. No model and no
+ * inference: the fake replays canned rounds, so what is under test is the history the loop
+ * builds, the requests it sends, its summed stats, where it stops, and what chat<T> makes of a
+ * reply the daemon says is finished.
  */
 
 #include "llamad/client.h"
@@ -13,6 +14,7 @@
 #include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -72,6 +74,17 @@ int add([[=desc{"First addend."}]] int a, [[=desc{"Second addend."}]] int b) {
     return a + b;
 }
 
+// A struct a typed turn asks the model to fill; the desc annotations reach it as property
+// descriptions in the schema.
+enum class Confidence { low, medium, high };
+
+struct Verdict {
+    [[=desc{"whether the message is spam"}]]         bool                     spam;
+    [[=desc{"short reasons, most important first"}]] std::vector<std::string> reasons;
+    Confidence                                                                confidence;
+    std::optional<std::string>                                                note;
+};
+
 client::ToolSet make_tools() {
     client::ToolSet tools;
     tools.add<^^shout>();
@@ -103,6 +116,8 @@ public:
                 messages.push_back(llamad::wire::from_proto<client::ChatMessage>(m));
             }
             requests_.push_back(std::move(messages));
+            schemas_.push_back(request->response_json_schema());
+            had_tools_.push_back(request->tools_size() > 0);
             // A script shorter than the loop is long replays its last round, which is how a fake
             // that never stops asking for a tool is written.
             round = script_[std::min(requests_.size() - 1, script_.size() - 1)];
@@ -130,10 +145,24 @@ public:
         return requests_;
     }
 
+    /// The response schema each request carried, indexed alongside requests().
+    std::vector<std::string> schemas() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return schemas_;
+    }
+
+    /// Whether each request offered tools, indexed alongside requests().
+    std::vector<bool> had_tools() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return had_tools_;
+    }
+
 private:
     mutable std::mutex                            mutex_;
     std::vector<Round>                            script_;
     std::vector<std::vector<client::ChatMessage>> requests_;
+    std::vector<std::string>                      schemas_;     ///< indexed alike
+    std::vector<bool>                             had_tools_;   ///< indexed alike
 };
 
 // A socket of this test's own, gone again when the harness is.
@@ -347,6 +376,129 @@ void test_max_rounds_must_be_positive() {
     CHECK(history.size() == 1);
 }
 
+// A reply arriving in chunks that fall mid-string, mid-word and inside the array is still one
+// JSON document by the time the turn ends.
+void test_typed_reply_parses() {
+    Round answer;
+    answer.text  = {R"({"spam":tr)", R"(ue,"reasons":["link fa)", R"(rm","urgent to)",
+                    R"(ne"],"confid)", R"(ence":"high"})"};
+    answer.stats = {31, 17, 2.5, 4.5};
+
+    Harness harness({answer});
+
+    std::string streamed;
+    const client::Typed<Verdict> reply =
+        harness.client.chat<Verdict>({{"user", "Is this spam?"}}, params, [&](const std::string & text) {
+            streamed += text;
+            return true;
+        });
+
+    CHECK(reply.value.has_value());
+    CHECK(reply.value->spam);
+    CHECK(reply.value->reasons.size() == 2);
+    CHECK_EQ(reply.value->reasons[0], "link farm");
+    CHECK_EQ(reply.value->reasons[1], "urgent tone");
+    CHECK(reply.value->confidence == Confidence::high);
+    CHECK(!reply.value->note.has_value());   // absent from the JSON, so the optional stays unset
+
+    CHECK_EQ(streamed, R"({"spam":true,"reasons":["link farm","urgent tone"],"confidence":"high"})");
+    CHECK(reply.result.reason == client::FinishReason::Eog);
+    CHECK(reply.result.stats.prompt_tokens == 31);
+    CHECK(reply.result.stats.completion_tokens == 17);
+    CHECK(reply.result.stats.prompt_ms == 2.5);
+    CHECK(reply.result.stats.completion_ms == 4.5);
+
+    // The request carries T's schema and nothing else: a schema alongside tools is refused.
+    CHECK(harness.daemon.schemas().size() == 1);
+    CHECK_EQ(harness.daemon.schemas()[0], client::json::schema<Verdict>());
+    CHECK(!harness.daemon.had_tools()[0]);
+}
+
+// A reply the budget cut off is not JSON, so there is nothing to parse and the reason says so.
+void test_typed_reply_cut_short() {
+    Round answer;
+    answer.text   = {R"({"spam":true,"reas)"};
+    answer.reason = v1::FINISH_REASON_LENGTH;
+
+    Harness harness({answer});
+
+    const client::Typed<Verdict> reply =
+        harness.client.chat<Verdict>({{"user", "Is this spam?"}}, params, nullptr);
+
+    CHECK(!reply.value.has_value());
+    CHECK(reply.result.reason == client::FinishReason::Length);
+}
+
+void test_typed_reply_cancelled() {
+    Round answer;
+    answer.text = {R"({"spam":true,)", R"("reasons":[]})"};
+
+    Harness harness({answer});
+
+    const client::Typed<Verdict> reply =
+        harness.client.chat<Verdict>({{"user", "Is this spam?"}}, params,
+                                     [](const std::string &) { return false; });
+
+    CHECK(!reply.value.has_value());
+    CHECK(reply.result.reason == client::FinishReason::Cancelled);
+}
+
+// The grammar makes this impossible from a real daemon, so it is a schema the reader disagrees
+// with rather than a model mistake: it throws instead of quietly leaving no value.
+void test_typed_reply_that_does_not_fit_throws() {
+    Round answer;
+    answer.text = {R"({"spam":"yes","reasons":[],"confidence":"low"})"};
+
+    Harness harness({answer});
+
+    bool threw = false;
+    try {
+        harness.client.chat<Verdict>({{"user", "Is this spam?"}}, params, nullptr);
+    } catch (const client::json::Error &) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
+void test_typed_reply_with_stop_reason() {
+    Round answer;
+    answer.text   = {R"({"spam":false,"reasons":["known sender"],"confidence":"low","note":"allowlisted"})"};
+    answer.reason = v1::FINISH_REASON_STOP;
+
+    Harness harness({answer});
+
+    const client::Typed<Verdict> reply =
+        harness.client.chat<Verdict>({{"user", "Is this spam?"}}, params, nullptr);
+
+    CHECK(reply.result.reason == client::FinishReason::Stop);
+    CHECK(reply.value.has_value());
+    CHECK(!reply.value->spam);
+    CHECK(reply.value->confidence == Confidence::low);
+    CHECK(reply.value->note.has_value());
+    CHECK_EQ(*reply.value->note, "allowlisted");
+}
+
+// A stop string is removed from the text before it is delivered, so it can cut the JSON in half.
+// The text still reaches the caller; there is just no document to parse.
+void test_typed_reply_stopped_mid_document() {
+    Round answer;
+    answer.text   = {"{\n  \"spam\": true\n"};
+    answer.reason = v1::FINISH_REASON_STOP;
+
+    Harness harness({answer});
+
+    std::string streamed;
+    const client::Typed<Verdict> reply =
+        harness.client.chat<Verdict>({{"user", "Is this spam?"}}, params, [&](const std::string & text) {
+            streamed += text;
+            return true;
+        });
+
+    CHECK(!reply.value.has_value());
+    CHECK(reply.result.reason == client::FinishReason::Stop);
+    CHECK_EQ(streamed, "{\n  \"spam\": true\n");
+}
+
 }  // namespace
 
 int main() {
@@ -356,6 +508,12 @@ int main() {
     test_round_limit_stops_the_loop();
     test_cancellation_stops_the_loop();
     test_max_rounds_must_be_positive();
+    test_typed_reply_parses();
+    test_typed_reply_cut_short();
+    test_typed_reply_cancelled();
+    test_typed_reply_that_does_not_fit_throws();
+    test_typed_reply_with_stop_reason();
+    test_typed_reply_stopped_mid_document();
 
     std::fprintf(stderr, "%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

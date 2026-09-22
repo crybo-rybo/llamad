@@ -32,6 +32,7 @@ context, and each request starts from an empty KV cache.
 ./build-cpu/client/llamad-chat                       # interactive REPL
 ./build-cpu/client/llamad-chat --once "Hello" --temp 0
 ./build-cpu/client/llamad-chat --demo-tools          # with one built-in tool
+./build-cpu/client/llamad-chat --demo-json           # one reply parsed into a struct
 ```
 
 Also accepts `--socket`, `--system TEXT`, `--seed N`, `--max-tokens N`. Ctrl-C
@@ -46,6 +47,9 @@ call the model makes; [client.md](client.md) explains what that involves.
 # The current time in Tokyo is 2026-09-21 08:44:44 JST.
 # [stats] finish=eog prompt_tokens=461 completion_tokens=52 ...
 ```
+
+`--demo-json` runs one turn whose reply is constrained to a struct's JSON Schema, streams the
+JSON and prints the parsed fields. It cannot be combined with `--once` or `--demo-tools`.
 
 ## The engine without the daemon
 

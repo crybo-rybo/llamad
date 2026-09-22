@@ -41,6 +41,7 @@ builds, multi-GPU selection and the smoke test that needs a model.
 ./build-cpu/client/llamad-chat                          # interactive REPL
 ./build-cpu/client/llamad-chat --once "Hello" --temp 0
 ./build-cpu/client/llamad-chat --demo-tools             # tool calling, end to end
+./build-cpu/client/llamad-chat --demo-json              # a reply parsed into a struct
 ```
 
 The project ships no model. Any GGUF works; the daemon takes `--socket`, `--ctx`, `--ngl`,
@@ -69,6 +70,7 @@ auto result = client.chat({{"user", "Name three primes."}}, params,
 
 `llamad/client.h` exposes no gRPC or protobuf types. Tools are plain C++ functions
 registered with `ToolSet::add`; the client runs the execute-and-resend loop.
+`chat<T>` returns the reply as an instance of a reflected struct, constrained by its schema.
 [docs/client.md](docs/client.md) has the full walkthrough.
 
 ## Documentation
@@ -77,7 +79,7 @@ registered with `ToolSet::add`; the client runs the execute-and-resend loop.
 |---|---|
 | [docs/building.md](docs/building.md) | Dependencies, platform notes, GPU builds, tests, smoke test |
 | [docs/daemon.md](docs/daemon.md) | Daemon flags, socket, signals, `llamad-chat` and `engine_smoke` |
-| [docs/client.md](docs/client.md) | Client library, tool calling, JSON conversions |
+| [docs/client.md](docs/client.md) | Client library, tool calling, typed replies, JSON conversions |
 | [docs/design.md](docs/design.md) | Design notes: layering, stream shape, chat templates |
 | `./scripts/docs.sh` | Doxygen API reference in `build-docs/html/` (needs CMake and Doxygen 1.17) |
 | `AGENTS.md` | Layout and rules for changing the code |
