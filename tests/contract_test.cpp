@@ -7,12 +7,12 @@
  */
 
 #include <cstdint>
-#include <cstdio>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "chat_format.h"
+#include "check.h"
 #include "engine.h"
 #include "llamad/client.h"
 #include "llamad/v1/convert.h"
@@ -94,18 +94,6 @@ static_assert(wire::enum_cast<v1::FinishReason>(llamad::FinishReason::Cancelled)
 static_assert(wire::enum_cast<v1::FinishReason>(client::FinishReason::ToolCalls) ==
               v1::FINISH_REASON_TOOL_CALLS);
 
-int failures = 0;
-int checks   = 0;
-
-#define CHECK(cond)                                                                       \
-    do {                                                                                  \
-        ++checks;                                                                         \
-        if (!(cond)) {                                                                    \
-            ++failures;                                                                   \
-            std::fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #cond); \
-        }                                                                                 \
-    } while (0)
-
 void test_chat_message_round_trip() {
     client::ChatMessage message;
     message.role         = "assistant";
@@ -183,6 +171,5 @@ int main() {
     test_sampling_params_round_trip();
     test_finish_reason_names();
 
-    std::fprintf(stderr, "%d checks, %d failures\n", checks, failures);
-    return failures == 0 ? 0 : 1;
+    return tests::report();
 }

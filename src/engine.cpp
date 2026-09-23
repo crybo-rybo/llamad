@@ -128,6 +128,71 @@ std::vector<ggml_backend_dev_t> default_offload_devices(const std::vector<ggml_b
     return gpus.empty() ? igpus : gpus;
 }
 
+/// The devices the model's layers will land on: the ones the caller named, in that order, or
+/// llama.cpp's default when none were named.
+std::vector<ggml_backend_dev_t> select_offload_devices(const EngineConfig & config,
+                                                       const std::vector<ggml_backend_dev_t> & devices) {
+    if (config.devices.empty()) {
+        return default_offload_devices(devices);
+    }
+
+    std::vector<ggml_backend_dev_t> offload;
+    for (const std::string & wanted : config.devices) {
+        const auto it = std::find_if(devices.begin(), devices.end(), [&](ggml_backend_dev_t dev) {
+            return device_name(dev) == wanted;
+        });
+        if (it == devices.end()) {
+            throw EngineError("unknown device '" + wanted + "'; available devices are: " +
+                              join_device_names(devices));
+        }
+        if (std::find(offload.begin(), offload.end(), *it) != offload.end()) {
+            throw EngineError("device '" + wanted + "' is listed more than once");
+        }
+        offload.push_back(*it);
+    }
+    return offload;
+}
+
+/// The tensor split as the fixed-size array llama.cpp reads, llama_max_devices() long, or empty
+/// when none was given. It is validated against the `n_offload` devices it will be applied to
+/// before it is padded out.
+std::vector<float> padded_tensor_split(const EngineConfig & config, size_t n_offload) {
+    if (config.tensor_split.empty()) {
+        return {};
+    }
+
+    float sum = 0.0f;
+    for (size_t i = 0; i < config.tensor_split.size(); ++i) {
+        // Written so that a NaN fails the test too.
+        if (!(config.tensor_split[i] >= 0.0f)) {
+            throw EngineError("tensor split entry " + std::to_string(i + 1) +
+                              " is negative or not a number");
+        }
+        sum += config.tensor_split[i];
+    }
+    if (sum <= 0.0f) {
+        throw EngineError("tensor split is all zeros: it would leave every device without work");
+    }
+    if (n_offload == 0) {
+        throw EngineError("a tensor split was given but there is no GPU to offload to");
+    }
+    if (config.tensor_split.size() > n_offload) {
+        throw EngineError("tensor split has " + std::to_string(config.tensor_split.size()) +
+                          " entries but only " + std::to_string(n_offload) +
+                          (config.devices.empty() ? " device(s) will be used for offloading"
+                                                  : " device(s) were requested"));
+    }
+    if (config.tensor_split.size() > llama_max_devices()) {
+        throw EngineError("tensor split has " + std::to_string(config.tensor_split.size()) +
+                          " entries but llama.cpp supports at most " +
+                          std::to_string(llama_max_devices()) + " devices");
+    }
+
+    std::vector<float> padded(llama_max_devices(), 0.0f);
+    std::copy(config.tensor_split.begin(), config.tensor_split.end(), padded.begin());
+    return padded;
+}
+
 /// Classify discrete and integrated GPUs as offload-capable devices.
 bool is_gpu_device(ggml_backend_dev_t dev) {
     const enum ggml_backend_dev_type type = ggml_backend_dev_type(dev);
@@ -296,13 +361,7 @@ public:
 private:
     /// Deliver nonempty text, treating an empty callback as acceptance.
     bool deliver(const std::string & text) {
-        if (text.empty()) {
-            return true;
-        }
-        if (!on_chunk_) {
-            return true;
-        }
-        return on_chunk_(text);
+        return text.empty() || !on_chunk_ || on_chunk_(text);
     }
 
     const std::vector<std::string> & stops_;     ///< Borrowed stop strings for this generation.
@@ -386,7 +445,7 @@ private:
         // because llama_sampler_sample() accepts the sampled token into the chain, which forwards
         // accept() to every sampler in it: that is what advances the grammar and fires its
         // lazy triggers.
-        if (!params.grammar.empty()) {
+        if (!params.grammar.grammar.empty()) {
             add_grammar(vocab, params, resolved);
         }
 
@@ -421,12 +480,12 @@ private:
         // A non-empty grammar string that does not parse (bad syntax, no root rule, left recursion)
         // makes both of these return null; they never hand back a sampler with no grammar in it.
         llama_sampler * grammar =
-            params.grammar_lazy
-                ? llama_sampler_init_grammar_lazy_patterns(vocab, params.grammar.c_str(), /*grammar_root*/ "root",
+            params.grammar.lazy
+                ? llama_sampler_init_grammar_lazy_patterns(vocab, params.grammar.grammar.c_str(), /*grammar_root*/ "root",
                                                            patterns.data(), patterns.size(),
                                                            resolved.trigger_tokens.data(),
                                                            resolved.trigger_tokens.size())
-                : llama_sampler_init_grammar(vocab, params.grammar.c_str(), /*grammar_root*/ "root");
+                : llama_sampler_init_grammar(vocab, params.grammar.grammar.c_str(), /*grammar_root*/ "root");
         if (grammar == nullptr) {
             throw EngineError("failed to parse the grammar");
         }
@@ -537,23 +596,23 @@ struct Engine::Impl {
             }
         }
 
-        if (!params.grammar.empty() && !params.grammar_lazy && !params.grammar_prefill.empty()) {
-            out.prefill = tokenize(params.grammar_prefill, /*add_special*/ false, /*parse_special*/ true);
+        if (!params.grammar.grammar.empty() && !params.grammar.lazy && !params.grammar.prefill.empty()) {
+            out.prefill = tokenize(params.grammar.prefill, /*add_special*/ false, /*parse_special*/ true);
             // Some tokenizers put a space in front of the first piece. That space is not in the
             // prompt, so feeding it would send the grammar down the wrong branch.
             const std::string first = out.prefill.empty() ? "" : token_to_piece(out.prefill[0], /*special*/ true);
             if (!first.empty() && std::isspace(static_cast<unsigned char>(first[0])) &&
-                !std::isspace(static_cast<unsigned char>(params.grammar_prefill[0]))) {
+                !std::isspace(static_cast<unsigned char>(params.grammar.prefill[0]))) {
                 out.prefill.erase(out.prefill.begin());
             }
         }
 
-        if (params.grammar.empty() || !params.grammar_lazy) {
+        if (params.grammar.grammar.empty() || !params.grammar.lazy) {
             return out;   // triggers only mean something for a lazy grammar
         }
 
-        out.trigger_patterns = params.grammar_trigger_patterns;
-        for (const std::string & word : params.grammar_trigger_words) {
+        out.trigger_patterns = params.grammar.trigger_patterns;
+        for (const std::string & word : params.grammar.trigger_words) {
             const std::vector<int32_t> ids = tokenize(word, /*add_special*/ false, /*parse_special*/ true);
             // A word that is one token and is preserved becomes a token trigger, the cheap exact
             // form; llama-server insists on that pairing and rejects the request otherwise.
@@ -602,68 +661,16 @@ Engine::Engine(const EngineConfig & config) : impl_(new Impl()) {
         throw EngineError("no model path was given");
     }
 
-    const std::vector<ggml_backend_dev_t> devices = all_devices();
+    const std::vector<ggml_backend_dev_t> offload = select_offload_devices(config, all_devices());
 
-    // The devices the model's layers will actually land on, and (only when the
-    // caller named them) the NULL-terminated array llama.cpp wants. Both must
-    // stay alive until llama_model_load_from_file has returned.
-    std::vector<ggml_backend_dev_t> offload;
+    // The NULL-terminated device array llama.cpp wants (only when the caller named devices) and
+    // the padded tensor split must both stay alive until llama_model_load_from_file has returned.
     std::vector<ggml_backend_dev_t> device_arg;
-
     if (!config.devices.empty()) {
-        for (const std::string & wanted : config.devices) {
-            const auto it = std::find_if(devices.begin(), devices.end(), [&](ggml_backend_dev_t dev) {
-                return device_name(dev) == wanted;
-            });
-            if (it == devices.end()) {
-                throw EngineError("unknown device '" + wanted + "'; available devices are: " +
-                                  join_device_names(devices));
-            }
-            if (std::find(offload.begin(), offload.end(), *it) != offload.end()) {
-                throw EngineError("device '" + wanted + "' is listed more than once");
-            }
-            offload.push_back(*it);
-        }
         device_arg = offload;
         device_arg.push_back(nullptr);
-    } else {
-        offload = default_offload_devices(devices);
     }
-
-    // tensor_split is passed as a fixed-size array, so it is validated against
-    // the devices it will be applied to before it is padded out.
-    std::vector<float> tensor_split;
-    if (!config.tensor_split.empty()) {
-        float sum = 0.0f;
-        for (size_t i = 0; i < config.tensor_split.size(); ++i) {
-            // Written so that a NaN fails the test too.
-            if (!(config.tensor_split[i] >= 0.0f)) {
-                throw EngineError("tensor split entry " + std::to_string(i + 1) +
-                                  " is negative or not a number");
-            }
-            sum += config.tensor_split[i];
-        }
-        if (sum <= 0.0f) {
-            throw EngineError("tensor split is all zeros: it would leave every device without work");
-        }
-        if (offload.empty()) {
-            throw EngineError("a tensor split was given but there is no GPU to offload to");
-        }
-        if (config.tensor_split.size() > offload.size()) {
-            throw EngineError("tensor split has " + std::to_string(config.tensor_split.size()) +
-                              " entries but only " + std::to_string(offload.size()) +
-                              (config.devices.empty() ? " device(s) will be used for offloading"
-                                                      : " device(s) were requested"));
-        }
-        if (config.tensor_split.size() > llama_max_devices()) {
-            throw EngineError("tensor split has " + std::to_string(config.tensor_split.size()) +
-                              " entries but llama.cpp supports at most " +
-                              std::to_string(llama_max_devices()) + " devices");
-        }
-
-        tensor_split.assign(llama_max_devices(), 0.0f);
-        std::copy(config.tensor_split.begin(), config.tensor_split.end(), tensor_split.begin());
-    }
+    const std::vector<float> tensor_split = padded_tensor_split(config, offload.size());
 
     llama_model_params mparams = llama_model_default_params();
     mparams.n_gpu_layers       = config.n_gpu_layers;

@@ -5,9 +5,9 @@
  * JSON syntax and escaping belong to nlohmann's tests. No daemon or model is needed here.
  */
 
+#include "check.h"
 #include "llamad/json.h"
 
-#include <cstdio>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -19,31 +19,6 @@ namespace {
 namespace json = llamad::client::json;
 
 using llamad::client::desc;
-
-int failures = 0;
-int checks   = 0;
-
-#define CHECK(cond)                                                                       \
-    do {                                                                                  \
-        ++checks;                                                                         \
-        if (!(cond)) {                                                                    \
-            ++failures;                                                                   \
-            std::fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #cond); \
-        }                                                                                 \
-    } while (0)
-
-#define CHECK_EQ(a, b)                                                                           \
-    do {                                                                                         \
-        ++checks;                                                                                \
-        const std::string lhs_ = (a);                                                            \
-        const std::string rhs_ = (b);                                                            \
-        if (lhs_ != rhs_) {                                                                      \
-            ++failures;                                                                          \
-            std::fprintf(stderr, "%s:%d: CHECK failed: %s == %s\n", __FILE__, __LINE__, #a, #b); \
-            std::fprintf(stderr, "    left:  '%s'\n", lhs_.c_str());                             \
-            std::fprintf(stderr, "    right: '%s'\n", rhs_.c_str());                             \
-        }                                                                                        \
-    } while (0)
 
 enum class Unit { Celsius, Fahrenheit };
 
@@ -274,6 +249,5 @@ int main() {
     test_vectors_and_enums();
     test_schema();
 
-    std::fprintf(stderr, "%d checks, %d failures\n", checks, failures);
-    return failures == 0 ? 0 : 1;
+    return tests::report();
 }

@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include "engine.h"
+
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -35,18 +37,6 @@ struct ChatMessage {
     std::string           content;       ///< Message text; tool results are opaque strings.
     std::vector<ToolCall> tool_calls;    ///< Calls from an assistant turn replayed in history.
     std::string           tool_call_id;  ///< role "tool": which call this is the result of
-};
-
-/// Grammar constraint for the sampler, as plain strings; the engine resolves tokens.
-struct GrammarSpec {
-    std::string              grammar;           ///< GBNF constraint; empty permits unconstrained generation.
-    bool                     lazy = false;      ///< only active once a trigger fires
-    std::vector<std::string> trigger_patterns;  ///< regexes (PATTERN as-is, PATTERN_FULL anchored ^...$)
-    /// Literal words; the engine resolves preserved single tokens or escapes them as regexes.
-    std::vector<std::string> trigger_words;
-    /// The prompt's trailing generation prefix, which a non-lazy grammar's root expects ahead of
-    /// the generated text; the engine advances the grammar past it before the first token.
-    std::string              prefill;
 };
 
 /// Opaque parser state shared by a RenderedChat and every Stream made from it.

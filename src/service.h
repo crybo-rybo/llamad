@@ -8,10 +8,8 @@
 
 #pragma once
 
-#include <functional>
 #include <string>
 #include <utility>
-#include <vector>
 
 #include <grpcpp/grpcpp.h>
 
@@ -56,28 +54,16 @@ public:
                       grpc::ServerWriter<v1::GenerateChunk> * writer) override;
 
 private:
-    /// What Chat adds to the plain Generate stream. Generate passes none of it.
-    ///
-    /// `filter` sees every piece of generated text before it goes on the wire and returns what the
-    /// client should actually see, which is "" while the text is part of a tool call. `finish` runs
-    /// once generation is over (and only while the client is still there): it hands back any visible
-    /// text the filter held on to and the tool calls it parsed.
-    struct StreamHooks {
-        /// Convert raw engine text into user-visible chat content.
-        std::function<std::string(const std::string & text)>                  filter;
-        /// Collect the held-back visible tail and complete tool calls after generation.
-        std::function<void(std::string * tail, std::vector<ToolCall> * calls)> finish;
-    };
-
     /// Shared body of Generate and Chat: run the engine, stream text chunks, then
     /// write the single final chunk carrying finish_reason, stats and any tool calls.
-    /// `hooks` may be null (Generate).
+    /// `stream` is Chat's parser, which decides what text the client sees and parses the tool
+    /// calls once generation is over; Generate passes null. What the engine throws propagates.
     grpc::Status stream_generation(const char * rpc_name,
                                    grpc::ServerContext * context,
                                    const std::string & prompt,
                                    const SamplingParams & params,
                                    grpc::ServerWriter<v1::GenerateChunk> * writer,
-                                   const StreamHooks * hooks);
+                                   ChatFormat::Stream * stream);
 
     Engine &           engine_;                   ///< Borrowed engine; outlives the service.
     const ChatFormat * chat_format_;              ///< Borrowed immutable formatter, or null when Chat is unavailable.

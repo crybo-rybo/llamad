@@ -6,7 +6,6 @@
  * file permissions.
  */
 
-#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -54,37 +53,6 @@ struct Options {
 void print_usage(const char * argv0) {
     std::fprintf(stderr, "usage: %s --model PATH [options]\n\n", argv0);
     llamad::cli::print_flags(stderr, Options{}, llamad::EngineFlags{}, llamad::cli::HelpFlag{});
-}
-
-/// Format a byte count in binary gibibytes.
-std::string format_gib(uint64_t bytes) {
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "%.1f GiB", static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0));
-    return buf;
-}
-
-/// Print backend devices and memory without loading a model.
-void print_device_table() {
-    const std::vector<llamad::DeviceInfo> devices = llamad::Engine::list_devices();
-    if (devices.empty()) {
-        std::printf("no devices (this build has no ggml backend registered)\n");
-        return;
-    }
-
-    size_t w_name = std::strlen("NAME");
-    size_t w_type = std::strlen("TYPE");
-    for (const llamad::DeviceInfo & device : devices) {
-        w_name = std::max(w_name, device.name.size());
-        w_type = std::max(w_type, device.type.size());
-    }
-
-    std::printf("%-*s  %-*s  %9s  %9s  %s\n", static_cast<int>(w_name), "NAME", static_cast<int>(w_type),
-                "TYPE", "FREE", "TOTAL", "DESCRIPTION");
-    for (const llamad::DeviceInfo & device : devices) {
-        std::printf("%-*s  %-*s  %9s  %9s  %s\n", static_cast<int>(w_name), device.name.c_str(),
-                    static_cast<int>(w_type), device.type.c_str(), format_gib(device.memory_free).c_str(),
-                    format_gib(device.memory_total).c_str(), device.description.c_str());
-    }
 }
 
 /// Select the per-user runtime socket path with a UID-based temporary fallback.
@@ -176,7 +144,7 @@ int main(int argc, char ** argv) {
 
         // Listing devices needs no model, and is the way to find the names --devices takes.
         if (engine_flags.list_devices) {
-            print_device_table();
+            llamad::print_device_table(stdout);
             return 0;
         }
         if (options.model.empty()) {

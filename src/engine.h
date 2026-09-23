@@ -61,6 +61,21 @@ struct ChatTemplateInfo {
     std::string eos_token;  ///< End-of-sequence token text, or empty if absent.
 };
 
+/// Grammar constraint for the sampler, as plain strings; the engine resolves tokens. The chat
+/// layer builds one for tool calls and response schemas; the default constrains nothing.
+struct GrammarSpec {
+    std::string              grammar;           ///< GBNF constraint; empty permits unconstrained generation.
+    bool                     lazy = false;      ///< only active once a trigger fires
+    std::vector<std::string> trigger_patterns;  ///< regexes (PATTERN as-is, PATTERN_FULL anchored ^...$)
+    /// Literal words; the engine resolves preserved single tokens or escapes them as regexes.
+    std::vector<std::string> trigger_words;
+    /// The prompt's trailing generation prefix, which a non-lazy grammar's root expects ahead of
+    /// the generated text; the engine advances the grammar past it before the first token, so the
+    /// model continues rather than repeats it. Only for a grammar built from the prompt, never
+    /// for one a caller wrote.
+    std::string              prefill;
+};
+
 /// Defaults here are the daemon defaults documented in llamad.proto.
 struct SamplingParams {
     float                    temperature = 0.8f;   ///< <= 0 means greedy
@@ -70,16 +85,7 @@ struct SamplingParams {
     std::optional<uint32_t>  seed;                 ///< nullopt = random
     int32_t                  max_tokens  = -1;     ///< < 0 = until context is full
     std::vector<std::string> stop;                 ///< Literal stop strings omitted from output; empty entries are ignored.
-
-    /// Grammar constraint (GBNF). Filled in by the chat layer for tool calling; empty = unconstrained.
-    std::string              grammar;
-    bool                     grammar_lazy = false;      ///< only constrain once a trigger fires
-    std::vector<std::string> grammar_trigger_patterns;  ///< regexes
-    std::vector<std::string> grammar_trigger_words;     ///< literal words: token trigger if a single token, else escaped to a regex
-    /// Text at the end of the prompt that a non-lazy grammar's root expects before the generated
-    /// output; its tokens advance the grammar, so the model continues rather than repeats it.
-    /// Only for a grammar built from the prompt, never for one a caller wrote.
-    std::string              grammar_prefill;
+    GrammarSpec              grammar;              ///< Grammar constraint; the default leaves generation unconstrained.
     /// Special tokens whose text must be rendered into the output stream (e.g. "<tool_call>" where it is an added token).
     std::vector<std::string> preserved_tokens;
 };

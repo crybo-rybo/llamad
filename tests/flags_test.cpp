@@ -5,6 +5,7 @@
  * prints for it, and what is rejected. No daemon, no model, no gRPC.
  */
 
+#include "check.h"
 #include "flags.h"
 
 #include <cstdio>
@@ -14,34 +15,6 @@
 #include <vector>
 
 namespace {
-
-int failures = 0;
-int checks   = 0;
-
-#define CHECK(cond)                                                                       \
-    do {                                                                                  \
-        ++checks;                                                                         \
-        if (!(cond)) {                                                                    \
-            ++failures;                                                                   \
-            std::fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #cond); \
-        }                                                                                 \
-    } while (0)
-
-#define CHECK_EQ(a, b)                                                                           \
-    do {                                                                                         \
-        ++checks;                                                                                \
-        const auto & lhs_ = (a);                                                                 \
-        const auto & rhs_ = (b);                                                                 \
-        if (!(lhs_ == rhs_)) {                                                                   \
-            ++failures;                                                                          \
-            std::fprintf(stderr, "%s:%d: CHECK failed: %s == %s\n", __FILE__, __LINE__, #a, #b); \
-            std::fprintf(stderr, "    left:  %s\n", to_display(lhs_).c_str());                   \
-            std::fprintf(stderr, "    right: %s\n", to_display(rhs_).c_str());                   \
-        }                                                                                        \
-    } while (0)
-
-std::string to_display(const std::string & s) { return "'" + s + "'"; }
-std::string to_display(size_t n) { return std::to_string(n); }
 
 using llamad::cli::help;
 
@@ -245,6 +218,5 @@ int main() {
     test_errors();
     test_help_text();
 
-    std::fprintf(stderr, "%d checks, %d failures\n", checks, failures);
-    return failures == 0 ? 0 : 1;
+    return tests::report();
 }

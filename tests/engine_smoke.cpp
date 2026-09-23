@@ -14,10 +14,8 @@
 #include "engine_flags.h"
 #include "flags.h"
 
-#include <algorithm>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 #include <exception>
 #include <fstream>
 #include <iterator>
@@ -101,30 +99,6 @@ llamad::Tool demo_tool() {
     return tool;
 }
 
-/// Print available backend devices and their memory without loading a model.
-void print_device_table() {
-    const std::vector<llamad::DeviceInfo> devices = llamad::Engine::list_devices();
-    size_t w_name = std::strlen("NAME");
-    size_t w_type = std::strlen("TYPE");
-    for (const llamad::DeviceInfo & device : devices) {
-        w_name = std::max(w_name, device.name.size());
-        w_type = std::max(w_type, device.type.size());
-    }
-
-    std::printf("%-*s  %-*s  %9s  %9s  %s\n", (int) w_name, "NAME", (int) w_type, "TYPE", "FREE",
-                "TOTAL", "DESCRIPTION");
-    for (const llamad::DeviceInfo & device : devices) {
-        char free_buf[32];
-        char total_buf[32];
-        std::snprintf(free_buf, sizeof(free_buf), "%.1f GiB",
-                      (double) device.memory_free / (1024.0 * 1024.0 * 1024.0));
-        std::snprintf(total_buf, sizeof(total_buf), "%.1f GiB",
-                      (double) device.memory_total / (1024.0 * 1024.0 * 1024.0));
-        std::printf("%-*s  %-*s  %9s  %9s  %s\n", (int) w_name, device.name.c_str(), (int) w_type,
-                    device.type.c_str(), free_buf, total_buf, device.description.c_str());
-    }
-}
-
 /// A sampling flag that was not given leaves the engine's own default in place.
 template <typename T>
 void apply(const std::optional<T> & flag, T & field) {
@@ -174,7 +148,7 @@ int main(int argc, char ** argv) {
 
     // Listing devices needs no model.
     if (engine_flags.list_devices) {
-        print_device_table();
+        llamad::print_device_table(stdout);
         return 0;
     }
 
@@ -215,7 +189,7 @@ int main(int argc, char ** argv) {
             if (tmpl.source.empty()) {
                 throw std::runtime_error("the model has no built-in chat template");
             }
-            format.reset(new llamad::ChatFormat(tmpl.source, tmpl.bos_token, tmpl.eos_token));
+            format = std::make_unique<llamad::ChatFormat>(tmpl.source, tmpl.bos_token, tmpl.eos_token);
 
             std::vector<llamad::Tool> tools;
             if (options.demo_tool) {
@@ -224,13 +198,9 @@ int main(int argc, char ** argv) {
 
             rendered = format->render({{"user", prompt, {}, {}}}, tools, /*response_json_schema*/ "");
 
-            text                            = rendered.prompt;
-            params.grammar                  = rendered.grammar.grammar;
-            params.grammar_lazy             = rendered.grammar.lazy;
-            params.grammar_trigger_patterns = rendered.grammar.trigger_patterns;
-            params.grammar_trigger_words    = rendered.grammar.trigger_words;
-            params.grammar_prefill          = rendered.grammar.prefill;
-            params.preserved_tokens         = rendered.preserved_tokens;
+            text                    = rendered.prompt;
+            params.grammar          = rendered.grammar;
+            params.preserved_tokens = rendered.preserved_tokens;
             params.stop.insert(params.stop.end(), rendered.additional_stops.begin(),
                                rendered.additional_stops.end());
         }
@@ -238,13 +208,11 @@ int main(int argc, char ** argv) {
         // A hand-written grammar replaces whatever the chat layer came up with, so that a
         // constraint can be tried out on its own.
         if (!options.grammar_file.empty()) {
-            params.grammar      = read_file(options.grammar_file);
-            params.grammar_lazy = false;
-            params.grammar_trigger_patterns.clear();
-            params.grammar_trigger_words.clear();
-            // A hand-written grammar describes the output alone, so it must not be advanced past
-            // the prompt's generation prefix the way the chat layer's grammars are.
-            params.grammar_prefill.clear();
+            // A fresh GrammarSpec is not lazy and has no prefill: a hand-written grammar describes
+            // the output alone, so it must not be advanced past the prompt's generation prefix the
+            // way the chat layer's grammars are.
+            params.grammar         = llamad::GrammarSpec{};
+            params.grammar.grammar = read_file(options.grammar_file);
         }
 
         std::fprintf(stderr, "prompt tokens: %zu\n", engine.tokenize(text, true, true).size());
@@ -255,9 +223,9 @@ int main(int argc, char ** argv) {
             }
 
             // The parser is what withholds tool-call markup, so only what it returns is printed.
-            std::unique_ptr<llamad::ChatFormat::Stream> stream;
+            std::optional<llamad::ChatFormat::Stream> stream;
             if (format) {
-                stream.reset(new llamad::ChatFormat::Stream(format->stream(rendered)));
+                stream.emplace(format->stream(rendered));
             }
 
             long chunks = 0;
