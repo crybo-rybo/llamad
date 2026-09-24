@@ -111,10 +111,13 @@ enum FinishReason {
 
 /// Token counts and wall-clock milliseconds, excluding time queued for the engine.
 message GenerateStats {
-  int32 prompt_tokens = 1;  ///< Decoded prompt tokens including special tokens.
+  int32 prompt_tokens = 1;  ///< Prompt length in tokens, including special tokens and cached ones.
   int32 completion_tokens = 2;  ///< Generated non-EOG tokens, including withheld stop and tool markup.
-  double prompt_ms = 3;  ///< Prompt decoding wall time in milliseconds.
+  double prompt_ms = 3;  ///< Wall time decoding the uncached prompt tokens, in milliseconds.
   double completion_ms = 4;  ///< Generation wall time in milliseconds including streaming callbacks.
+  /// Leading prompt tokens the daemon reused from its KV cache instead of decoding: the part of
+  /// the prompt it shares with what the previous request left there. A cache that saves time only.
+  int32 cached_prompt_tokens = 5;
 }
 
 /// A successful stream is zero or more chunks carrying `text`, then exactly one final chunk

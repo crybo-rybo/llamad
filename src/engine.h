@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -100,10 +101,11 @@ enum class FinishReason {
 
 /// Token counts and wall-clock milliseconds for one generation, excluding queue time.
 struct GenerateStats {
-    int32_t prompt_tokens     = 0;  ///< Number of prompt tokens decoded, including special tokens.
-    int32_t completion_tokens = 0;  ///< Generated non-EOG tokens, including any withheld stop or tool markup.
-    double  prompt_ms         = 0;  ///< Prompt decoding time in milliseconds, including backend synchronization.
-    double  completion_ms     = 0;  ///< Generation time in milliseconds, including streaming callback time.
+    int32_t prompt_tokens        = 0;  ///< Prompt length in tokens, including special tokens and cached ones.
+    int32_t completion_tokens    = 0;  ///< Generated non-EOG tokens, including any withheld stop or tool markup.
+    double  prompt_ms            = 0;  ///< Time decoding the uncached prompt tokens, in ms, including backend synchronization.
+    double  completion_ms        = 0;  ///< Generation time in milliseconds, including streaming callback time.
+    int32_t cached_prompt_tokens = 0;  ///< Leading prompt tokens reused from the KV cache instead of decoded.
 };
 
 /// Generation outcome; streamed text is delivered separately through the callback.
@@ -123,7 +125,12 @@ struct EngineError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
-/// Owns one model and context; generation calls serialize and start with an empty KV cache.
+/// How many leading tokens of `prompt` a generation keeps from a KV cache holding `cached`: the
+/// prefix the two share, stopping one short of the whole prompt, because sampling needs the
+/// logits of the prompt's last token and only decoding it produces them.
+size_t reusable_prefix(const std::vector<int32_t> & cached, const std::vector<int32_t> & prompt);
+
+/// Owns one model and context; generation calls serialize and share one KV cache.
 /// Callbacks run synchronously while the generation lock is held; do not reenter generate().
 class Engine {
 public:
@@ -156,7 +163,10 @@ public:
     ChatTemplateInfo chat_template() const;
 
     /// Generates from a raw prompt. Serialized internally: concurrent callers queue.
-    /// Each call starts from an empty KV cache.
+    /// The KV cache keeps what the previous call decoded, and a call decodes only the part of its
+    /// prompt after the prefix it shares with that (see reusable_prefix). The cache changes how
+    /// long a prompt takes, never which prompt runs; the logits can differ from a cold run's in
+    /// the last bits, because the prompt is decoded in a different batch split.
     /// @param prompt Raw model input; special-token spellings are recognized.
     /// @param params Sampling, grammar, stop strings and completion budget.
     /// @param on_chunk Synchronous receiver; empty discards text, false requests cancellation.

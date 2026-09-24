@@ -36,8 +36,10 @@ void log_request(const char * rpc_name, const GenerateStats & stats, const char 
     if (tool_calls >= 0) {
         std::snprintf(tools, sizeof(tools), " tool_calls=%d", tool_calls);
     }
-    std::fprintf(stderr, "[llamad] %s prompt_tokens=%d completion_tokens=%d finish=%s%s %.0fms\n",
-                 rpc_name, stats.prompt_tokens, stats.completion_tokens, reason, tools, wall_ms);
+    std::fprintf(stderr,
+                 "[llamad] %s prompt_tokens=%d cached_prompt_tokens=%d completion_tokens=%d finish=%s%s %.0fms\n",
+                 rpc_name, stats.prompt_tokens, stats.cached_prompt_tokens, stats.completion_tokens, reason, tools,
+                 wall_ms);
 }
 
 /// Runs one RPC body and turns what it throws into the status the contract promises: caller
