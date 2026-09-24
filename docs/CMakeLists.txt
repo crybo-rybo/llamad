@@ -40,9 +40,11 @@ doxygen_add_docs(llamad_docs
     "${CMAKE_CURRENT_SOURCE_DIR}/daemon.md"
     "${CMAKE_CURRENT_SOURCE_DIR}/client.md"
     "${CMAKE_CURRENT_SOURCE_DIR}/design.md"
+    "${CMAKE_CURRENT_SOURCE_DIR}/performance.md"
     "${LLAMAD_SOURCE_DIR}/src"
     "${LLAMAD_SOURCE_DIR}/client"
     "${LLAMAD_SOURCE_DIR}/proto/llamad/v1/convert.h"
     "${LLAMAD_SOURCE_DIR}/tests/engine_smoke.cpp"
+    "${LLAMAD_SOURCE_DIR}/tests/engine_bench.cpp"
     WORKING_DIRECTORY "${LLAMAD_SOURCE_DIR}"
     COMMENT "Generating llamad API documentation")

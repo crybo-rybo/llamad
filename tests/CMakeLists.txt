@@ -56,3 +56,7 @@ endif()
 # a CLI to run by hand and not a CTest test; it needs no gRPC, so it builds on every path.
 add_executable(engine_smoke engine_smoke.cpp)
 target_link_libraries(engine_smoke PRIVATE llamad_engine llamad_chat llamad_flags)
+
+# Prefill and decode throughput, for scripts/bench.sh. Like engine_smoke it needs a model file.
+add_executable(engine_bench engine_bench.cpp)
+target_link_libraries(engine_bench PRIVATE llamad_engine llamad_chat llamad_flags)
