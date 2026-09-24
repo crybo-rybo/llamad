@@ -25,8 +25,10 @@
  * Successful generation streams end with exactly one final chunk carrying statistics
  * and a finish reason. Transport errors or client cancellation can end a stream before
  * that chunk. Tool calls are atomic and appear only on the final chunk with TOOL_CALLS.
- * Caller errors map to INVALID_ARGUMENT, missing chat capability to FAILED_PRECONDITION,
- * and other failures to INTERNAL.
+ * Embed returns one L2-normalised vector per input and is served only by an embedding
+ * model, which in turn serves no generation. Caller errors map to INVALID_ARGUMENT, a
+ * missing capability (no usable chat template, or the wrong kind of model for the RPC)
+ * to FAILED_PRECONDITION, and other failures to INTERNAL.
  *
  * Doxygen has no Protocol Buffers parser. The authoritative, commented schema is
  * included verbatim so message fields, numbers and defaults stay tied to the source.
@@ -41,10 +43,10 @@
  * contract_test.cpp checks both directions of every wire mirror; json_test.cpp and
  * client_tools_test.cpp check conversion, schema generation and dispatch;
  * client_chat_test.cpp scripts a fake service on a private Unix socket to check the
- * client tool loop.
+ * client tool loop and embed call.
  *
- * client/examples/chat_cli.cpp demonstrates streaming chat and reflected tools.
- * tests/engine_smoke.cpp exercises raw generation, grammar constraints, cancellation
- * and chat rendering in-process. It needs a local GGUF model and is not a CTest test.
+ * client/examples/chat_cli.cpp demonstrates streaming chat, reflected tools and embeddings.
+ * tests/engine_smoke.cpp exercises raw generation, grammar constraints, cancellation,
+ * chat rendering and embeddings in-process. It needs a local GGUF model and is not a CTest test.
  * docs/building.md describes the build, test and smoke-test scripts.
  */

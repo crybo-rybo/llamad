@@ -1,22 +1,26 @@
 /** @file
- * @brief Tool-loop, typed-reply and history contracts against a scripted service on a private socket.
+ * @brief Tool-loop, typed-reply, history and embedding contracts against a scripted service on a private socket.
  *
- * Client::chat, against a scripted fake daemon on a private Unix socket. No model and no
- * inference: the fake replays canned rounds, so what is under test is the history the loop
- * builds, the requests it sends, its summed stats, where it stops, and what chat<T> makes of a
- * reply the daemon says is finished.
+ * Client::chat and Client::embed, against a scripted fake daemon on a private Unix socket. No
+ * model and no inference: the fake replays canned rounds, so what is under test is the history
+ * the loop builds, the requests it sends, its summed stats, where it stops, what chat<T> makes of
+ * a reply the daemon says is finished, how a call is stopped or timed out from outside it, and
+ * that embed() hands back each input's vector in order.
  */
 
 #include "check.h"
 #include "llamad/client.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -74,13 +78,20 @@ struct Round {
     v1::FinishReason              reason = v1::FINISH_REASON_EOG;
     std::vector<client::ToolCall> tool_calls;
     client::GenerateStats         stats;
+
+    // Text on the final chunk itself, which the stream shape allows: a callback that requests a
+    // stop on it does so once the whole round has arrived.
+    std::string final_text;
+    // After the text, wait for the client to cancel instead of finishing: a daemon still
+    // prefilling, queued behind another client, or wedged.
+    bool hang = false;
 };
 
 class FakeDaemon final : public v1::Llama::Service {
 public:
     explicit FakeDaemon(std::vector<Round> script) : script_(std::move(script)) {}
 
-    grpc::Status Chat(grpc::ServerContext *,
+    grpc::Status Chat(grpc::ServerContext * context,
                       const v1::ChatRequest * request,
                       grpc::ServerWriter<v1::GenerateChunk> * writer) override {
         Round round;
@@ -104,7 +115,15 @@ public:
             writer->Write(chunk);
         }
 
+        if (round.hang) {
+            while (!context->IsCancelled()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            return grpc::Status::CANCELLED;
+        }
+
         v1::GenerateChunk final_chunk;
+        final_chunk.set_text(round.final_text);
         final_chunk.set_finish_reason(round.reason);
         llamad::wire::to_proto(round.stats, final_chunk.mutable_stats());
         for (const client::ToolCall & call : round.tool_calls) {
@@ -113,6 +132,27 @@ public:
         writer->Write(final_chunk);
         return grpc::Status::OK;
     }
+
+    // Each input's vector is its length and its position, so the caller can tell which is which.
+    grpc::Status Embed(grpc::ServerContext *,
+                       const v1::EmbedRequest * request,
+                       v1::EmbedResponse * response) override {
+        if (!serves_embeddings) {
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "not an embedding model");
+        }
+        int32_t tokens = 0;
+        for (int i = 0; i < request->inputs_size(); ++i) {
+            v1::Embedding * embedding = response->add_embeddings();
+            embedding->add_values(static_cast<float>(request->inputs(i).size()));
+            embedding->add_values(static_cast<float>(i));
+            tokens += static_cast<int32_t>(request->inputs(i).size());
+        }
+        response->set_input_tokens(tokens);
+        return grpc::Status::OK;
+    }
+
+    /// Set before a call, which then reaches Embed after it.
+    bool serves_embeddings = true;
 
     // Chat runs on a gRPC server thread, so the assertions read a copy taken under the lock.
     std::vector<std::vector<client::ChatMessage>> requests() const {
@@ -271,10 +311,10 @@ void test_two_calls_in_one_round() {
 
 void test_stats_are_summed_over_rounds() {
     Round asking        = tool_round({{"call_0", "shout", R"({"word":"Oslo"})"}});
-    asking.stats        = {10, 5, 1.5, 2.5};
+    asking.stats        = {10, 5, 1.5, 2.5, 0};
     Round answer;
     answer.text  = {"ok"};
-    answer.stats = {20, 7, 3.0, 4.0};
+    answer.stats = {20, 7, 3.0, 4.0, 9};
 
     Harness harness({asking, answer});
 
@@ -285,6 +325,7 @@ void test_stats_are_summed_over_rounds() {
     CHECK(result.stats.completion_tokens == 12);
     CHECK(result.stats.prompt_ms == 4.5);
     CHECK(result.stats.completion_ms == 6.5);
+    CHECK(result.stats.cached_prompt_tokens == 9);
 }
 
 // A model that keeps asking spends the budget and stops, with the last round's results in history.
@@ -474,6 +515,168 @@ void test_typed_reply_stopped_mid_document() {
     CHECK_EQ(streamed, "{\n  \"spam\": true\n");
 }
 
+// Blocks until the fake has taken `count` requests, so that a stop from another thread lands while
+// the call is in flight.
+void wait_for_requests(const FakeDaemon & daemon, size_t count) {
+    while (daemon.requests().size() < count) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+// A call that has delivered nothing, as one still prefilling or queued would have, is cancelled
+// by a stop from another thread. The fake never finishes on its own, so a stop that did not
+// cancel the call would hang the test.
+void test_stop_from_another_thread() {
+    Round silent;
+    silent.hang = true;
+
+    Harness harness({silent});
+
+    std::stop_source stop;
+    std::jthread     stopper([&] {
+        wait_for_requests(harness.daemon, 1);
+        stop.request_stop();
+    });
+
+    int                          chunks = 0;
+    const client::GenerateResult result =
+        harness.client.chat({{"user", "hello"}}, params, [&](const std::string &) {
+            ++chunks;
+            return true;
+        }, {.stop = stop.get_token()});
+
+    CHECK(result.reason == client::FinishReason::Cancelled);
+    CHECK(chunks == 0);
+}
+
+void test_stop_before_the_call() {
+    Round silent;
+    silent.hang = true;
+
+    Harness harness({silent});
+
+    std::stop_source stop;
+    stop.request_stop();
+    const client::GenerateResult result =
+        harness.client.chat({{"user", "hello"}}, params, nullptr, {.stop = stop.get_token()});
+
+    CHECK(result.reason == client::FinishReason::Cancelled);
+}
+
+// Once the final chunk is in, there is nothing left to cancel: its reason and stats stand.
+void test_stop_after_the_final_chunk() {
+    Round answer;
+    answer.final_text = "done";
+    answer.stats      = {5, 3, 1.0, 2.0};
+
+    Harness harness({answer});
+
+    std::stop_source             stop;
+    const client::GenerateResult result =
+        harness.client.chat({{"user", "hello"}}, params, [&](const std::string &) {
+            stop.request_stop();
+            return true;
+        }, {.stop = stop.get_token()});
+
+    CHECK(stop.stop_requested());
+    CHECK(result.reason == client::FinishReason::Eog);
+    CHECK(result.stats.prompt_tokens == 5);
+    CHECK(result.stats.completion_tokens == 3);
+}
+
+// A stop that lands once the model has asked for a tool ends the loop there: the tool never runs,
+// and history holds no call without its answer.
+void test_stop_before_tools_run() {
+    Round asking      = tool_round({{"call_0", "shout", R"({"word":"never"})"}});
+    asking.final_text = "Let me look.";
+    Round answer;
+    answer.text = {"unreachable"};
+
+    Harness harness({asking, answer});
+
+    std::stop_source                 stop;
+    std::vector<client::ChatMessage> history = {{"user", "shout"}};
+    const client::GenerateResult     result  = harness.client.chat(history, make_tools(), params, [&](const std::string &) {
+        stop.request_stop();
+        return true;
+    }, /*max_rounds*/ 8, {.stop = stop.get_token()});
+
+    CHECK(result.reason == client::FinishReason::Cancelled);
+    CHECK(result.tool_calls.empty());
+    CHECK_EQ(tool_log, "");
+    CHECK(harness.daemon.requests().size() == 1);
+
+    CHECK(history.size() == 2);
+    CHECK_EQ(history[1].role, "assistant");
+    CHECK_EQ(history[1].content, "Let me look.");
+    CHECK(history[1].tool_calls.empty());
+}
+
+void test_timeout() {
+    Round silent;
+    silent.hang = true;
+    Round answer;
+    answer.text = {"in time"};
+
+    Harness harness({answer, silent});
+
+    // A deadline the call meets changes nothing.
+    const client::GenerateResult result =
+        harness.client.chat({{"user", "hello"}}, params, nullptr, {.timeout = std::chrono::seconds(10)});
+    CHECK(result.reason == client::FinishReason::Eog);
+
+    int code = 0;
+    try {
+        harness.client.chat({{"user", "hello"}}, params, nullptr, {.timeout = std::chrono::milliseconds(50)});
+    } catch (const client::RpcError & e) {
+        code = e.code;
+    }
+    CHECK(code == 4);   // DEADLINE_EXCEEDED
+}
+
+void test_embed_returns_vectors_in_order() {
+    Harness harness({Round{}});
+
+    const client::EmbedResult result = harness.client.embed({"cat", "kitten", ""});
+
+    CHECK(result.embeddings.size() == 3);
+    CHECK((result.embeddings[0].values == std::vector<float>{3.0f, 0.0f}));
+    CHECK((result.embeddings[1].values == std::vector<float>{6.0f, 1.0f}));
+    CHECK((result.embeddings[2].values == std::vector<float>{0.0f, 2.0f}));
+    CHECK(result.input_tokens == 9);
+}
+
+// A daemon without an embedding model says so with FAILED_PRECONDITION, which the caller sees as
+// the RpcError's code.
+void test_embed_refused() {
+    Harness harness({Round{}});
+    harness.daemon.serves_embeddings = false;
+
+    int code = 0;
+    try {
+        harness.client.embed({"cat"});
+    } catch (const client::RpcError & e) {
+        code = e.code;
+    }
+    CHECK(code == static_cast<int>(grpc::StatusCode::FAILED_PRECONDITION));
+}
+
+// A stop cancels embed() like any other call, and it throws, having no partial result to return.
+void test_embed_stopped() {
+    Harness harness({Round{}});
+
+    std::stop_source stop;
+    stop.request_stop();
+
+    int code = 0;
+    try {
+        harness.client.embed({"cat"}, {.stop = stop.get_token()});
+    } catch (const client::RpcError & e) {
+        code = e.code;
+    }
+    CHECK(code == static_cast<int>(grpc::StatusCode::CANCELLED));
+}
+
 }  // namespace
 
 int main() {
@@ -489,6 +692,14 @@ int main() {
     test_typed_reply_that_does_not_fit_throws();
     test_typed_reply_with_stop_reason();
     test_typed_reply_stopped_mid_document();
+    test_stop_from_another_thread();
+    test_stop_before_the_call();
+    test_stop_after_the_final_chunk();
+    test_stop_before_tools_run();
+    test_timeout();
+    test_embed_returns_vectors_in_order();
+    test_embed_refused();
+    test_embed_stopped();
 
     return tests::report();
 }

@@ -7,6 +7,7 @@
  *   engine_smoke model.gguf --temp 0 --max-tokens 16 "Count to three"
  *   engine_smoke model.gguf --chat --demo-tool "What time is it in Paris?"
  *   engine_smoke model.gguf --grammar-file digits.gbnf "Pick a number"
+ *   engine_smoke embedding-model.gguf --embed "a cat" --embed "a kitten" --embed "tax law"
  */
 
 #include "chat_format.h"
@@ -14,6 +15,8 @@
 #include "engine_flags.h"
 #include "flags.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
@@ -67,15 +70,20 @@ struct Options {
 
     [[=help{"run generate() N times in the same process"}]]
     long repeat = 1;  ///< Run generate() N times in the same process.
+
+    [[=help{"TEXT", "embed TEXT with an embedding model instead of generating (repeatable);\n"
+                    "prints each vector's first values and its cosine with the first TEXT"}]]
+    std::vector<std::string> embed;  ///< Texts to embed in one embed() call instead of generating.
 };
 
 /// Print usage and reflected flag descriptions to stderr.
 void print_usage(const char * argv0) {
     std::fprintf(stderr,
                  "usage: %s <model.gguf> [options] <prompt>\n"
+                 "       %s <model.gguf> [options] --embed TEXT [--embed TEXT ...]\n"
                  "       %s --list-devices\n"
                  "\n",
-                 argv0, argv0);
+                 argv0, argv0, argv0);
     llamad::cli::print_flags(stderr, Options{}, llamad::EngineFlags{}, llamad::cli::HelpFlag{});
 }
 
@@ -118,6 +126,26 @@ const char * reason_name(llamad::FinishReason reason) {
     return "?";
 }
 
+/// One line per vector: its first values, its norm (1 for a unit vector) and its cosine with the
+/// first input's, which for unit vectors is just their dot product.
+void print_embeddings(const llamad::EmbedResult & result) {
+    const std::vector<float> & first = result.embeddings.front().values;
+    for (size_t i = 0; i < result.embeddings.size(); ++i) {
+        const std::vector<float> & values = result.embeddings[i].values;
+        double dot = 0.0;
+        double norm = 0.0;
+        for (size_t k = 0; k < values.size(); ++k) {
+            dot  += static_cast<double>(values[k]) * first[k];
+            norm += static_cast<double>(values[k]) * values[k];
+        }
+        std::printf("embedding %zu: norm %.6f  cosine with 0: %.4f  values:", i, std::sqrt(norm), dot);
+        for (size_t k = 0; k < std::min<size_t>(values.size(), 4); ++k) {
+            std::printf(" %.6f", values[k]);
+        }
+        std::printf(" ...\n");
+    }
+}
+
 }  // namespace
 
 /// Run the executable.
@@ -152,13 +180,14 @@ int main(int argc, char ** argv) {
         return 0;
     }
 
-    if (positional.size() != 2) {
+    const size_t n_positional = options.embed.empty() ? 2 : 1;
+    if (positional.size() != n_positional) {
         print_usage(argv[0]);
         return 2;
     }
 
     config.model_path        = positional[0];
-    const std::string prompt = positional[1];
+    const std::string prompt = options.embed.empty() ? positional[1] : std::string();
 
     apply(options.temp, params.temperature);
     apply(options.top_k, params.top_k);
@@ -177,6 +206,14 @@ int main(int argc, char ** argv) {
                      info.description.c_str(), (unsigned long long) info.n_params,
                      (double) info.size_bytes / (1024.0 * 1024.0), info.n_ctx, info.n_ctx_train,
                      info.has_chat_template ? "yes" : "no");
+
+        if (!options.embed.empty()) {
+            const llamad::EmbedResult result = engine.embed(options.embed, /*keep_going*/ {});
+            std::fprintf(stderr, "n_embd: %u  inputs: %zu  input_tokens: %d\n", info.n_embd,
+                         result.embeddings.size(), result.input_tokens);
+            print_embeddings(result);
+            return 0;
+        }
 
         // In chat mode the whole request comes out of the chat layer: the prompt, the tool-call
         // grammar and the tokens whose text the parser needs to see.
@@ -243,10 +280,10 @@ int main(int argc, char ** argv) {
 
             std::fflush(stdout);
             std::fprintf(stderr,
-                         "\nfinish: %s  prompt_tokens: %d  completion_tokens: %d  "
+                         "\nfinish: %s  prompt_tokens: %d  cached_prompt_tokens: %d  completion_tokens: %d  "
                          "prompt_ms: %.1f  completion_ms: %.1f  chunks: %ld\n",
                          reason_name(result.reason), result.stats.prompt_tokens,
-                         result.stats.completion_tokens, result.stats.prompt_ms,
+                         result.stats.cached_prompt_tokens, result.stats.completion_tokens, result.stats.prompt_ms,
                          result.stats.completion_ms, chunks);
 
             if (stream) {

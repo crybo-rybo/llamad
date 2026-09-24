@@ -3,17 +3,39 @@
 ## Linking
 
 ```cmake
-add_subdirectory(llamad EXCLUDE_FROM_ALL)   # the repo root, not client/
-target_link_libraries(myapp PRIVATE llamad_client)
+include(FetchContent)
+FetchContent_Declare(llamad
+    GIT_REPOSITORY https://github.com/crybo-rybo/llamad.git
+    GIT_TAG        main                    # better, a commit
+    GIT_SUBMODULES "")                     # the client needs nothing from llama.cpp
+FetchContent_MakeAvailable(llamad)
+
+target_link_libraries(myapp PRIVATE llamad::client)
 ```
 
-`EXCLUDE_FROM_ALL` means only what `myapp` links gets built: the client and the
-generated protobuf code, not llama.cpp or the daemon.
+Included by another project, with `FetchContent` or `add_subdirectory`, llamad builds in
+client-only mode (`LLAMAD_CLIENT_ONLY`, on unless llamad is the top-level project): the
+client, `llamad::client`, and the generated protocol code, `llamad::proto`, and nothing else.
+No llama.cpp, so no submodules to clone; no daemon, no C compiler, and no tests registered with
+your CTest. Your build type and compile-commands settings are left alone.
 
-`llamad/client.h` exposes no gRPC or protobuf types, so your build needs neither
-on its include path. It does reflect over your own tool functions, so linking
-`llamad_client` puts C++26, `-freflection` and nlohmann's include directory on
-whatever includes it.
+It still needs, found through their CMake configs:
+
+- gRPC and Protobuf. On macOS, the ones `scripts/build-deps-macos.sh` builds, with its
+  `build-deps/prefix` on your `CMAKE_PREFIX_PATH` (see [building.md](building.md)).
+- nlohmann/json: your project's `nlohmann_json::nlohmann_json` target if it defines one before
+  including llamad, or else an installed package (`pacman -S nlohmann-json`,
+  `brew install nlohmann-json`). There is only ever one copy of the header in your build.
+
+`llamad/client.h` exposes no gRPC or protobuf types, so your build needs neither on its
+include path. It does reflect over your own tool functions, so linking `llamad::client` puts
+C++26, `-freflection` and nlohmann's include directory on whatever includes it, and your code
+is compiled with GCC 16 or later too.
+
+`llamad::proto` is the service itself, generated from `llamad.proto`, for a test that needs a
+daemon but no model: implement `llamad::v1::Llama::Service` with scripted replies, serve it on
+a private socket and point a `Client` at it. `tests/consumer/` is such a project, built by CI
+against every commit.
 
 ## Streaming chat
 
@@ -40,6 +62,32 @@ int main() {
 The callback receives user-visible text only: never tool-call markup, never partial UTF-8,
 never part of a matched stop string. The result carries the finish reason and the stats from
 the stream's final chunk.
+
+## Stopping a call
+
+A call blocks its thread until the stream ends, and returning `false` from the callback can
+cancel it only when text arrives. To call it off from somewhere else, such as a cancel button or
+a shutdown signal, or to bound it in time, pass `CallOptions` as the last argument:
+
+```cpp
+std::stop_source stop;                      // stop.request_stop() from any thread
+
+auto result = client.chat(history, params, on_chunk,
+                          {.stop = stop.get_token(), .timeout = std::chrono::seconds(30)});
+```
+
+- A stop cancels the call even when no text is arriving: while the daemon reads a long prompt,
+  while it serves another client first, during a tool-call round. A streaming call returns
+  `FinishReason::Cancelled`, unless its final chunk had already arrived, whose reason stands.
+  `get_model_info`, `tokenize` and `embed` throw `RpcError` with code `CANCELLED` (1).
+- The timeout applies to each RPC, from its start. When it runs out the call throws `RpcError`
+  with code `DEADLINE_EXCEEDED` (4), so a `get_model_info` with a short timeout is a health
+  check that cannot hang.
+- The tool loop takes `CallOptions` after `max_rounds`. The stop covers the whole loop, and no
+  tool runs once it has been requested; the timeout applies to each round.
+
+`std::jthread` passes its function a `std::stop_token`, so a call made on one with that token
+stops when the thread is asked to. `llamad-chat` stops a reply on Ctrl-C this way.
 
 ## Tool calling
 
@@ -95,12 +143,30 @@ auto result = client.chat(history, tools, params, [](const std::string & text) {
 });                                         // history holds every turn the answer took
 ```
 
+A tool that needs state, such as an open document or a game world, is a member function,
+registered with the object it is called on. The tool's name is the member's name:
+
+```cpp
+class Inventory {
+public:
+    [[=desc{"Take items out of stock and say how many are left."}]]
+    int take([[=desc{"Item name"}]] std::string item, int count);
+};
+
+Inventory inventory;
+tools.add<^^Inventory::take>(inventory);
+```
+
+The tool set holds a reference to `inventory`, so the object must outlive the tool set and
+every copy of it.
+
 A tool returning `std::string` is handed to the model as it is; any other return type
-is written as JSON, as are the arguments read out of a call. A tool that does not
-exist, arguments that do not parse and an exception thrown by the tool all become an
-`{"error":"..."}` result the model can recover from. The loop stops after eight rounds
-of tool calls, which the caller sees as a `ToolCalls` result; that limit is `chat`'s last
-argument and must be positive.
+is written as JSON, as are the arguments read out of a call. A function with no parameters
+is a tool that takes no arguments: its schema is an object with no properties, and the
+model calls it with `{}`. A tool that does not exist, arguments that do not parse and an
+exception thrown by the tool all become an `{"error":"..."}` result the model can recover
+from. The loop stops after eight rounds of tool calls, which the caller sees as a
+`ToolCalls` result; that limit is `chat`'s last argument and must be positive.
 
 `llamad-chat --demo-tools` is that worked through end to end
 (`client/examples/chat_cli.cpp`): it offers one `get_current_time` tool and answers
@@ -159,6 +225,30 @@ annotations on `T` reach the model as property descriptions and can steer the an
 `llamad-chat --demo-json` is that worked through end to end
 (`client/examples/chat_cli.cpp`): it asks for a verdict like this one on a single message,
 streams the JSON and prints the fields.
+
+## Embeddings
+
+A daemon serving an embedding model answers `embed`, which takes a batch of texts and returns
+one vector per text, in order:
+
+```cpp
+llamad::client::Client client("/tmp/embed.sock");
+
+auto result = client.embed({"How do I bake sourdough?", "Sourdough needs a starter.", "Tax law"});
+const std::vector<float> & query = result.embeddings[0].values;   // ModelInfo::n_embd values
+```
+
+Every vector is L2-normalised, so the dot product of two is their cosine similarity; there is no
+option to get them unnormalised. `result.input_tokens` counts the tokens across every input.
+`get_model_info()` says whether the daemon serves embeddings and how long the vectors are.
+
+- A daemon serving a generative model refuses `embed`, and an embedding daemon refuses
+  `generate` and `chat`, both with `RpcError` code `FAILED_PRECONDITION` (9).
+- An empty batch, or an input longer than the daemon's per-input limit (at most 512 tokens),
+  is `INVALID_ARGUMENT` (3), and no vectors come back.
+- An instruction prefix a model expects on queries is part of the text you send.
+
+`llamad-chat --embed` is that worked through (`client/examples/chat_cli.cpp`).
 
 ### Not supported
 

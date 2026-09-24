@@ -24,7 +24,8 @@ class LlamaService final : public v1::Llama::Service {
 public:
     /// `chat_format` may be null: a model whose template is missing or unparsable still serves
     /// Generate, Tokenize and GetModelInfo, and Chat fails with FAILED_PRECONDITION and
-    /// `chat_unavailable_reason`. Both `engine` and `chat_format` must outlive the service.
+    /// `chat_unavailable_reason`. An embedding model serves Embed instead of Generate and Chat.
+    /// Both `engine` and `chat_format` must outlive the service.
     LlamaService(Engine & engine, const ChatFormat * chat_format,
                  std::string chat_unavailable_reason = "the model has no built-in chat template")
         : engine_(engine),
@@ -52,6 +53,14 @@ public:
     grpc::Status Chat(grpc::ServerContext * context,
                       const v1::ChatRequest * request,
                       grpc::ServerWriter<v1::GenerateChunk> * writer) override;
+
+    /// Embed each input and return one L2-normalised vector per input, in order.
+    /// @returns FAILED_PRECONDITION unless the model is an embedding model, INVALID_ARGUMENT for
+    /// no inputs or an input that does not fit, CANCELLED if the client goes before the last
+    /// input, INTERNAL for other failures, or OK.
+    grpc::Status Embed(grpc::ServerContext * context,
+                       const v1::EmbedRequest * request,
+                       v1::EmbedResponse * response) override;
 
 private:
     /// Shared body of Generate and Chat: run the engine, stream text chunks, then

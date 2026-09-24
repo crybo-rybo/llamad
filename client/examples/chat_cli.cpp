@@ -1,11 +1,11 @@
 /** @file
  * @brief Interactive chat client with annotated time-tool and typed-reply examples.
  *
- * llamad-chat: a multi-turn chat REPL against a running llamad daemon.
+ * llamad-chat: a multi-turn chat REPL against a running llamad daemon, or with --embed a
+ * one-shot embedding against a daemon serving an embedding model.
  * It uses only <llamad/client.h>: no gRPC or protobuf headers anywhere.
  */
 
-#include <atomic>
 #include <cctype>
 #include <csignal>
 #include <cstdint>
@@ -14,10 +14,14 @@
 #include <cstring>
 #include <ctime>
 #include <iostream>
+#include <mutex>
 #include <optional>
+#include <stop_token>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include <pthread.h>
 #include <unistd.h>
 
 #include "flags.h"
@@ -25,25 +29,48 @@
 
 namespace {
 
-// Set by the SIGINT handler while a generation is running; the chunk callback
-// turns it into a cancel. At the prompt there is nothing to cancel, so the
-// handler exits the process instead (via _exit, which is async-signal-safe).
-/// Whether SIGINT should cancel a generation instead of exiting the prompt.
-std::atomic<bool> g_generating{false};
-/// Cancellation flag read by the synchronous chunk callback.
-std::atomic<bool> g_interrupted{false};
+// SIGINT is blocked in every thread and taken with sigwait by a thread of its own, where stopping
+// a call is an ordinary function call rather than something a signal handler may not do. The
+// stop cancels the turn even while no text is arriving: a long prompt, a tool round. At the
+// prompt there is nothing to stop, so it exits the process instead.
+/// Guards g_turn_stop, which the SIGINT thread reads while turns begin and end.
+std::mutex         g_turn_mutex;
+/// The running turn's stop source, or null at the prompt.
+std::stop_source * g_turn_stop = nullptr;
 
-/// Request cancellation during generation; otherwise exit using signal-safe operations.
-void on_sigint(int) {
-    if (g_generating.load()) {
-        g_interrupted.store(true);
-        return;
+/// Stop the running turn on each SIGINT; with none running, exit.
+void watch_sigint(sigset_t signals) {
+    while (true) {
+        int received = 0;
+        if (::sigwait(&signals, &received) != 0) {
+            continue;
+        }
+        std::lock_guard<std::mutex> lock(g_turn_mutex);
+        if (g_turn_stop != nullptr) {
+            g_turn_stop->request_stop();
+            continue;
+        }
+        std::fputc('\n', stdout);
+        std::fflush(stdout);
+        std::_Exit(130);  // not exit(): the main thread is still running
     }
-    const char msg[] = "\n";
-    ssize_t ignored = ::write(STDOUT_FILENO, msg, sizeof(msg) - 1);
-    (void) ignored;
-    ::_exit(130);
 }
+
+/// A turn SIGINT can stop, for as long as the object lives.
+struct StoppableTurn {
+    std::stop_source stop;  ///< Requested by the SIGINT thread.
+
+    /// Make this turn the one SIGINT stops.
+    StoppableTurn() {
+        std::lock_guard<std::mutex> lock(g_turn_mutex);
+        g_turn_stop = &stop;
+    }
+    /// Return SIGINT to exiting the process.
+    ~StoppableTurn() {
+        std::lock_guard<std::mutex> lock(g_turn_mutex);
+        g_turn_stop = nullptr;
+    }
+};
 
 /// Spell the client finish reason for terminal statistics.
 const char * reason_name(llamad::client::FinishReason reason) {
@@ -86,6 +113,11 @@ struct Options {
     [[=help{"ask the model to fill a fixed struct (a spam verdict) and print\n"
             "its fields; one turn, then exit"}]]
     bool demo_json = false;  ///< Ask the model for a fixed struct and print the fields; one turn, then exit.
+
+    [[=help{"TEXT", "embed TEXT with the daemon's embedding model (repeatable),\n"
+                    "print each vector's first values and its cosine with the\n"
+                    "first TEXT, and exit"}]]
+    std::vector<std::string> embed;  ///< Texts to embed in one request instead of chatting.
 
     // Hidden, for testing cancellation: cancel the turn after N chunks.
     std::optional<long> cancel_after;  ///< Hidden test flag: cancel after this many delivered chunks.
@@ -174,12 +206,35 @@ const int kMaxToolRounds = 8;
 /// Print the one-line generation summary every turn ends with.
 void print_stats(const llamad::client::GenerateResult & result) {
     std::fprintf(stderr,
-                 "[stats] finish=%s prompt_tokens=%d completion_tokens=%d prompt_ms=%.1f completion_ms=%.1f\n",
+                 "[stats] finish=%s prompt_tokens=%d cached_prompt_tokens=%d completion_tokens=%d "
+                 "prompt_ms=%.1f completion_ms=%.1f\n",
                  reason_name(result.reason),
                  result.stats.prompt_tokens,
+                 result.stats.cached_prompt_tokens,
                  result.stats.completion_tokens,
                  result.stats.prompt_ms,
                  result.stats.completion_ms);
+}
+
+/// One line per vector: its first values and its cosine with the first input's, which for the
+/// unit vectors the daemon returns is just their dot product.
+void print_embeddings(const llamad::client::EmbedResult & result) {
+    const std::vector<float> & first = result.embeddings.front().values;
+    for (size_t i = 0; i < result.embeddings.size(); ++i) {
+        const std::vector<float> & values = result.embeddings[i].values;
+        double cosine = 0.0;
+        for (size_t k = 0; k < values.size() && k < first.size(); ++k) {
+            cosine += static_cast<double>(values[k]) * first[k];
+        }
+        std::printf("embedding %zu: cosine with 0: %.4f  values:", i, cosine);
+        for (size_t k = 0; k < values.size() && k < 4; ++k) {
+            std::printf(" %.6f", values[k]);
+        }
+        std::printf(" ...\n");
+    }
+    std::fflush(stdout);
+    std::fprintf(stderr, "[stats] inputs=%zu n_embd=%zu input_tokens=%d\n", result.embeddings.size(),
+                 first.size(), result.input_tokens);
 }
 
 /// Runs one turn: streams the reply to stdout while the client appends every assistant and
@@ -196,26 +251,17 @@ bool run_turn(llamad::client::Client & client,
     bool produced_text = false;
     long chunks        = 0;
 
-    g_interrupted.store(false);
-    g_generating.store(true);
-
     llamad::client::GenerateResult result{};
-    try {
+    {
+        StoppableTurn turn;
         result = client.chat(history, tools, sampling, [&](const std::string & text) {
             produced_text = true;
             std::fwrite(text.data(), 1, text.size(), stdout);
             std::fflush(stdout);
             ++chunks;
-            if (cancel_after > 0 && chunks >= cancel_after) {
-                return false;
-            }
-            return !g_interrupted.load();
-        }, kMaxToolRounds);
-    } catch (...) {
-        g_generating.store(false);
-        throw;
+            return cancel_after <= 0 || chunks < cancel_after;
+        }, kMaxToolRounds, {.stop = turn.stop.get_token()});
     }
-    g_generating.store(false);
 
     std::fputc('\n', stdout);
     std::fflush(stdout);
@@ -325,6 +371,9 @@ int main(int argc, char ** argv) {
         if (options.demo_json && (options.once || options.demo_tools)) {
             throw llamad::cli::FlagError("--demo-json cannot be combined with --once or --demo-tools");
         }
+        if (!options.embed.empty() && (options.once || options.demo_tools || options.demo_json)) {
+            throw llamad::cli::FlagError("--embed cannot be combined with --once, --demo-tools or --demo-json");
+        }
     } catch (const llamad::cli::FlagError & e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         print_usage(argv[0]);
@@ -338,11 +387,16 @@ int main(int argc, char ** argv) {
 
     const std::string socket_path = options.socket.value_or(llamad::client::Client::default_socket_path());
 
-    struct sigaction sa {};
-    sa.sa_handler = on_sigint;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;  // no SA_RESTART: interrupt the blocking read at the prompt
-    sigaction(SIGINT, &sa, nullptr);
+    // Blocked before any other thread exists, gRPC's included, so every thread inherits the mask
+    // and only watch_sigint ever sees the signal. A shell starts a background job with SIGINT
+    // ignored, and an ignored signal never reaches sigwait, so the default action is restored;
+    // blocked, it stays pending for sigwait rather than ending the process.
+    std::signal(SIGINT, SIG_DFL);
+    sigset_t sigint;
+    sigemptyset(&sigint);
+    sigaddset(&sigint, SIGINT);
+    pthread_sigmask(SIG_BLOCK, &sigint, nullptr);
+    std::thread(watch_sigint, sigint).detach();
 
     std::vector<llamad::client::ChatMessage> history;
     if (!options.system.empty()) {
@@ -356,6 +410,11 @@ int main(int argc, char ** argv) {
 
     try {
         llamad::client::Client client(socket_path);
+
+        if (!options.embed.empty()) {
+            print_embeddings(client.embed(options.embed));
+            return 0;
+        }
 
         if (options.demo_json) {
             run_json_demo(client, history, sampling);

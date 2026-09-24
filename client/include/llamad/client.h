@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -14,6 +15,7 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -33,6 +35,8 @@ struct ModelInfo {
     uint32_t    n_ctx             = 0;      ///< Actual context capacity configured by the daemon, in tokens.
     uint32_t    n_ctx_train       = 0;      ///< Training context length recorded by the model, in tokens.
     bool        has_chat_template = false;  ///< Whether the model stores a template; does not guarantee it parses successfully.
+    uint32_t    n_embd            = 0;      ///< Length of every vector embed() returns; zero unless serves_embeddings.
+    bool        serves_embeddings = false;  ///< An embedding model: embed() is served, generate() and chat() are not.
 };
 
 /// Unset fields use the daemon defaults (see llamad.proto).
@@ -104,28 +108,43 @@ consteval std::span<const char * const> argument_descriptions() {
     return std::define_static_array(texts);
 }
 
-/// Invoke the reflected function with its argument members in parameter order.
-template <std::meta::info Function, typename Args, std::size_t... I>
-decltype(auto) apply(const Args & arguments, std::index_sequence<I...>) {
-    return [:Function:](arguments.[: json::detail::fields_of(^^Args)[I] :]...);
+/// Whether a function is called on an object, and so needs one to be registered with.
+consteval bool is_member_function(std::meta::info function) {
+    return std::meta::is_class_member(function) && !std::meta::is_static_member(function);
 }
 
-/// Parses one call's arguments and runs the function. A std::string result is what the model
-/// reads; anything else is written as JSON.
-template <std::meta::info Function>
-std::string run(const std::string & arguments_json) {
+/// Invoke the reflected function with its argument members in parameter order, on the object
+/// when it is a member function.
+template <std::meta::info Function, typename Args, std::size_t... I, typename... Object>
+decltype(auto) apply(const Args & arguments, std::index_sequence<I...>, Object &... object) {
+    return std::invoke(&[:Function:], object..., arguments.[: json::detail::fields_of(^^Args)[I] :]...);
+}
+
+/// Parses one call's arguments and runs the function, on the object when it is a member
+/// function. A std::string result is what the model reads; anything else is written as JSON.
+template <std::meta::info Function, typename... Object>
+std::string run(const std::string & arguments_json, Object &... object) {
     using Args = Arguments<Function>;
 
     Args arguments;
     json::read(arguments_json, arguments);
 
-    decltype(auto) result =
-        apply<Function>(arguments, std::make_index_sequence<json::detail::fields_of(^^Args).size()>{});
+    decltype(auto) result = apply<Function>(
+        arguments, std::make_index_sequence<json::detail::fields_of(^^Args).size()>{}, object...);
     if constexpr (std::is_same_v<std::remove_cvref_t<decltype(result)>, std::string>) {
         return result;
     } else {
         return json::write(result);
     }
+}
+
+/// The definition that travels with a request: the function's name, its description and the
+/// schema of its parameter list.
+template <std::meta::info Function>
+Tool definition() {
+    return {std::define_static_string(std::meta::identifier_of(Function)),
+            json::detail::description<Function>(),
+            json::schema<Arguments<Function>>(argument_descriptions<Function>())};
 }
 
 }  // namespace detail
@@ -140,8 +159,12 @@ std::string run(const std::string & arguments_json) {
 ///     ToolSet tools;
 ///     tools.add<^^get_current_time>();
 ///
-/// Free and static functions only. A tool returning std::string is handed to the model as it is;
-/// any other return type is written as JSON.
+/// A tool that needs state is a member function, registered with the object it is called on:
+///
+///     tools.add<^^Inventory::take>(inventory);
+///
+/// A tool returning std::string is handed to the model as it is; any other return type is
+/// written as JSON.
 class ToolSet {
 public:
     /// Register a free or static function, deriving its name, schema and descriptions.
@@ -150,6 +173,13 @@ public:
     /// Register before concurrent use; definitions and dispatch share registration order.
     template <std::meta::info Function>
     void add();
+
+    /// Register a member function, called on object each time the model asks for it; the name,
+    /// schema and descriptions come from the function as for add().
+    /// The ToolSet holds a reference: object must outlive it and every copy of it.
+    /// @tparam Function Reflection of a non-static member function of Object or of its base.
+    template <std::meta::info Function, typename Object>
+    void add(Object & object);
 
     /// What travels with a request; this is all the daemon ever sees of a tool.
     const std::vector<Tool> & definitions() const { return definitions_; }
@@ -169,12 +199,22 @@ private:
 
 template <std::meta::info Function>
 void ToolSet::add() {
-    using Args = detail::Arguments<Function>;
+    static_assert(!detail::is_member_function(Function),
+                  "add<F>(): a member function is registered with its object, add<F>(object)");
 
-    definitions_.push_back({std::define_static_string(std::meta::identifier_of(Function)),
-                            json::detail::description<Function>(),
-                            json::schema<Args>(detail::argument_descriptions<Function>())});
+    definitions_.push_back(detail::definition<Function>());
     invoke_.push_back(&detail::run<Function>);
+}
+
+template <std::meta::info Function, typename Object>
+void ToolSet::add(Object & object) {
+    static_assert(detail::is_member_function(Function),
+                  "add<F>(object): F must be a non-static member function");
+
+    definitions_.push_back(detail::definition<Function>());
+    invoke_.push_back([&object](const std::string & arguments_json) {
+        return detail::run<Function>(arguments_json, object);
+    });
 }
 
 /// One history turn; the full ordered history travels with every chat request.
@@ -190,16 +230,17 @@ enum class FinishReason {
     Eog,  ///< The model emitted an end-of-generation token.
     Length,  ///< The token budget or context capacity was reached.
     Stop,  ///< A configured stop string matched; its bytes are withheld.
-    Cancelled,  ///< The callback requested cancellation.
+    Cancelled,  ///< The callback or CallOptions::stop requested cancellation.
     ToolCalls  ///< Complete tool calls require client execution.
 };
 
 /// Token counts and wall-clock milliseconds for one generation, excluding queue time.
 struct GenerateStats {
-    int32_t prompt_tokens     = 0;  ///< Number of prompt tokens decoded, including special tokens.
-    int32_t completion_tokens = 0;  ///< Generated non-EOG tokens, including any withheld stop or tool markup.
-    double  prompt_ms         = 0;  ///< Prompt decoding time in milliseconds, including backend synchronization.
-    double  completion_ms     = 0;  ///< Generation time in milliseconds, including streaming callback time.
+    int32_t prompt_tokens        = 0;  ///< Prompt length in tokens, including special tokens and cached ones.
+    int32_t completion_tokens    = 0;  ///< Generated non-EOG tokens, including any withheld stop or tool markup.
+    double  prompt_ms            = 0;  ///< Time decoding the uncached prompt tokens, in ms, including backend synchronization.
+    double  completion_ms        = 0;  ///< Generation time in milliseconds, including streaming callback time.
+    int32_t cached_prompt_tokens = 0;  ///< Leading prompt tokens the daemon reused from its KV cache instead of decoded.
 };
 
 /// Generation outcome; streamed text is delivered separately through the callback.
@@ -219,6 +260,17 @@ struct Typed {
     GenerateResult   result;  ///< Reason generation ended, plus the stats for it.
 };
 
+/// One input's embedding: ModelInfo::n_embd values, L2-normalised to unit length.
+struct Embedding {
+    std::vector<float> values;  ///< Unit-length vector, so a dot product of two is their cosine.
+};
+
+/// The vectors for a batch of inputs and the tokens it took.
+struct EmbedResult {
+    std::vector<Embedding> embeddings;        ///< One per input, in input order.
+    int32_t                input_tokens = 0;  ///< Tokens decoded across every input, including special tokens.
+};
+
 /// Called with each piece of generated text, in order. Return false to cancel the request.
 using ChunkCallback = std::function<bool(const std::string & text)>;
 
@@ -229,10 +281,25 @@ struct RpcError : std::runtime_error {
     int code;  ///< grpc::StatusCode value
 };
 
+/// How a call can be called off from outside it, for a caller that runs it on a worker thread or
+/// must not wait on it forever. The default has no deadline and is never stopped.
+struct CallOptions {
+    /// request_stop() on its source, from any thread, cancels the call even while no text is
+    /// arriving: a long prompt, a queue behind another client, a tool-call round, a wedged daemon.
+    /// A streaming call then returns FinishReason::Cancelled, unless its final chunk had already
+    /// arrived, whose reason stands. get_model_info(), tokenize() and embed() throw RpcError with
+    /// CANCELLED (1).
+    std::stop_token stop;
+    /// Time allowed for each RPC, from its start. When it runs out the call throws RpcError with
+    /// DEADLINE_EXCEEDED (4).
+    std::optional<std::chrono::milliseconds> timeout;
+};
+
 /// Synchronous client for one Unix socket; calls carry all request state.
 /// RPC failures throw RpcError. Streaming callbacks run on the calling thread and their
-/// exceptions propagate. An empty callback discards text; false requests cancellation.
-/// A cancelled stream can end before final statistics arrive.
+/// exceptions propagate. An empty callback discards text; false requests cancellation, and so
+/// does CallOptions::stop from any thread. A cancelled stream can end before final statistics
+/// arrive.
 class Client {
 public:
     /// Return `$XDG_RUNTIME_DIR/llamad.sock`, falling back to `/tmp/llamad-<uid>.sock`.
@@ -249,29 +316,43 @@ public:
     Client & operator=(const Client &) = delete;
 
     /// Fetch metadata for the daemon's loaded model.
+    /// @param options Stop token and deadline for the call.
     /// @throws RpcError If the daemon is unreachable or the request fails.
-    ModelInfo get_model_info();
+    ModelInfo get_model_info(const CallOptions & options = {});
 
     /// Tokenize using the daemon's vocabulary.
     /// @param text Input bytes.
     /// @param add_special Add BOS/EOS as expected by the model.
     /// @param parse_special Recognize literal special-token spellings.
+    /// @param options Stop token and deadline for the call.
     /// @throws RpcError If the daemon rejects or cannot complete the request.
-    std::vector<int32_t> tokenize(const std::string & text, bool add_special = true, bool parse_special = false);
+    std::vector<int32_t> tokenize(const std::string & text,
+                                  bool add_special = true,
+                                  bool parse_special = false,
+                                  const CallOptions & options = {});
 
     /// Complete a raw prompt without applying the chat template.
     /// Blocks until the stream ends, invoking on_chunk from the calling thread.
-    /// If on_chunk returns false the request is cancelled and reason is Cancelled. Cancelling ends
-    /// the stream before the daemon's final chunk; stats are available only if that chunk arrives.
+    /// If on_chunk returns false or options.stop is requested, the request is cancelled and reason
+    /// is Cancelled. Cancelling ends the stream before the daemon's final chunk; stats are
+    /// available only if that chunk arrives.
     /// @param prompt Raw model input.
     /// @param params Optional overrides of the daemon sampling defaults.
     /// @param on_chunk Text receiver, or empty to discard text.
-    /// @throws RpcError If the RPC fails for a reason other than requested cancellation.
-    GenerateResult generate(const std::string & prompt, const SamplingParams & params, const ChunkCallback & on_chunk);
+    /// @param options Stop token and deadline for the call.
+    /// @throws RpcError If the RPC fails for a reason other than requested cancellation,
+    ///         DEADLINE_EXCEEDED (4) among them.
+    GenerateResult generate(const std::string & prompt,
+                            const SamplingParams & params,
+                            const ChunkCallback & on_chunk,
+                            const CallOptions & options = {});
     /// Generate a single chat turn without tools; messages must contain the full history.
     /// Uses the blocking callback and cancellation behavior of generate().
     /// @throws RpcError For transport failure, invalid history or unavailable chat support.
-    GenerateResult chat(const std::vector<ChatMessage> & messages, const SamplingParams & params, const ChunkCallback & on_chunk);
+    GenerateResult chat(const std::vector<ChatMessage> & messages,
+                        const SamplingParams & params,
+                        const ChunkCallback & on_chunk,
+                        const CallOptions & options = {});
 
     /// Generate one chat turn offering opaque tool definitions; the caller owns execution.
     /// Uses the blocking callback and cancellation behavior of generate(). On
@@ -281,24 +362,29 @@ public:
     GenerateResult chat(const std::vector<ChatMessage> & messages,
                         const std::vector<Tool> & tools,
                         const SamplingParams & params,
-                        const ChunkCallback & on_chunk);
+                        const ChunkCallback & on_chunk,
+                        const CallOptions & options = {});
 
     /// The same loop, run here. The caller appends the user message to `history` and gets back a
     /// history holding every assistant and "tool" turn the answer took, with `stats` summed over
     /// the rounds. A result of ToolCalls means max_rounds was spent with the model still asking.
     /// The last round's tools are executed even when no generation budget remains.
+    /// Once options.stop is requested no further tools run: a round whose calls have not started
+    /// ends the loop with Cancelled, its calls unanswered and left out of history.
     /// @param history Full conversation, already including the latest user message; updated in place.
     /// @param tools Registered functions to execute locally.
     /// @param params Sampling overrides applied to each round.
     /// @param on_chunk Text receiver shared across rounds; false cancels the current request.
     /// @param max_rounds Maximum generation requests, including the initial request; must be positive.
+    /// @param options Stop token for the whole loop; the timeout applies to each round.
     /// @throws std::invalid_argument If max_rounds is not positive.
     /// @throws RpcError If any request fails; completed turns remain in history.
     GenerateResult chat(std::vector<ChatMessage> & history,
                         const ToolSet & tools,
                         const SamplingParams & params,
                         const ChunkCallback & on_chunk,
-                        int max_rounds = 8);
+                        int max_rounds = 8,
+                        const CallOptions & options = {});
 
     /// One chat turn whose reply is an instance of T: json::schema<T>() travels with the request,
     /// the daemon holds the model to it, and the finished reply is read back with json::read. T is
@@ -312,7 +398,19 @@ public:
     template <typename T>
     Typed<T> chat(const std::vector<ChatMessage> & messages,
                   const SamplingParams & params,
-                  const ChunkCallback & on_chunk);
+                  const ChunkCallback & on_chunk,
+                  const CallOptions & options = {});
+
+    /// Embed each input on its own with the daemon's embedding model.
+    /// @param inputs Texts to embed; must not be empty, and each must fit the daemon's per-input
+    ///        token limit.
+    /// @param options Stop token and deadline for the call.
+    /// @return One L2-normalised vector per input, in input order, so the dot product of two is
+    ///         their cosine similarity.
+    /// @throws RpcError FAILED_PRECONDITION if the daemon's model is not an embedding model,
+    ///         INVALID_ARGUMENT for no inputs or an input that is too long, CANCELLED (1) or
+    ///         DEADLINE_EXCEEDED (4) from options, or a transport failure.
+    EmbedResult embed(const std::vector<std::string> & inputs, const CallOptions & options = {});
 
 private:
     /// One Chat request: the tools overload of chat() and the typed chat() are both written over it.
@@ -322,11 +420,13 @@ private:
     ///        leaves the reply unconstrained.
     /// @param params Sampling controls and stop strings for this turn.
     /// @param on_chunk Receives generated text; return false to cancel.
+    /// @param options Stop token and deadline for the call.
     GenerateResult chat_request(const std::vector<ChatMessage> & messages,
                                 const std::vector<Tool> & tools,
                                 const std::string & response_json_schema,
                                 const SamplingParams & params,
-                                const ChunkCallback & on_chunk);
+                                const ChunkCallback & on_chunk,
+                                const CallOptions & options);
 
     /// Dependency-specific state hidden behind the public contract.
     struct Impl;
@@ -336,7 +436,8 @@ private:
 template <typename T>
 Typed<T> Client::chat(const std::vector<ChatMessage> & messages,
                       const SamplingParams & params,
-                      const ChunkCallback & on_chunk) {
+                      const ChunkCallback & on_chunk,
+                      const CallOptions & options) {
     static_assert(std::is_aggregate_v<T>, "chat<T>: T must be an aggregate; json::schema describes an object");
 
     std::string reply;
@@ -345,7 +446,7 @@ Typed<T> Client::chat(const std::vector<ChatMessage> & messages,
     typed.result = chat_request(messages, /*tools*/ {}, json::schema<T>(), params, [&](const std::string & text) {
         reply += text;
         return on_chunk ? on_chunk(text) : true;
-    });
+    }, options);
 
     // The grammar makes a reply the model finished whole JSON. A stop string is matched on the
     // generated text and removed from it, so it can just as well land inside the document: parse

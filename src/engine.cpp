@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -507,6 +508,22 @@ private:
     llama_sampler * chain_ = nullptr;  ///< Owned sampler chain, including its grammar sampler.
 };
 
+/// The vector scaled to unit length, as llama.cpp's own tools normalise a pooled embedding; a
+/// zero vector stays zero.
+std::vector<float> l2_normalized(const float * values, int32_t n) {
+    double sum = 0.0;
+    for (int32_t i = 0; i < n; ++i) {
+        sum += static_cast<double>(values[i]) * values[i];
+    }
+    const double scale = sum > 0.0 ? 1.0 / std::sqrt(sum) : 0.0;
+
+    std::vector<float> out(static_cast<size_t>(n));
+    for (int32_t i = 0; i < n; ++i) {
+        out[static_cast<size_t>(i)] = static_cast<float>(values[i] * scale);
+    }
+    return out;
+}
+
 /// Measure elapsed steady-clock time in milliseconds.
 double ms_since(const std::chrono::steady_clock::time_point & t0) {
     const auto dt = std::chrono::steady_clock::now() - t0;
@@ -529,7 +546,15 @@ struct Engine::Impl {
     uint32_t n_ctx_seq = 0;  ///< per-sequence capacity (what a single generation may use)
     uint32_t n_batch   = 0;  ///< largest batch llama_decode accepts
 
-    std::mutex generate_mutex;  ///< Serializes requests sharing the context and KV cache.
+    bool     embeddings       = false;  ///< an embedding model: the context pools and outputs embeddings
+    uint32_t max_embed_tokens = 0;      ///< most tokens one embed() input may have
+
+    std::mutex context_mutex;  ///< Serializes requests sharing the context and KV cache.
+
+    /// The tokens sequence 0 of the KV cache holds, in position order. In a generative model only
+    /// decode() and clear_cache() change the cache after construction, and both keep this in step
+    /// with it. An embedding model never generates, so embed() leaves it unused.
+    std::vector<llama_token> cached;
 
     /// Release the context before the model it borrows.
     ~Impl() {
@@ -539,6 +564,47 @@ struct Engine::Impl {
         if (model != nullptr) {
             llama_model_free(model);
         }
+    }
+
+    /// Empty the KV cache and its record.
+    void clear_cache() {
+        llama_memory_clear(llama_get_memory(ctx), /*data*/ true);
+        cached.clear();
+    }
+
+    /// Trims the KV cache to the part of it `prompt` starts with and returns that part's length.
+    /// Falls back to an empty cache when the memory refuses to drop part of a sequence (recurrent
+    /// and hybrid models can) or no longer holds position 0 (a recurrent state, or a
+    /// sliding-window cache that has let old tokens go), since it cannot vouch for the prefix then.
+    size_t keep_prefix(const std::vector<llama_token> & prompt) {
+        const size_t   keep = reusable_prefix(cached, prompt);
+        llama_memory_t mem  = llama_get_memory(ctx);
+        if (keep == 0 || !llama_memory_seq_rm(mem, 0, static_cast<llama_pos>(keep), -1) ||
+            llama_memory_seq_pos_min(mem, 0) != 0) {
+            clear_cache();
+            return 0;
+        }
+        cached.resize(keep);
+        return keep;
+    }
+
+    /// Decodes `n` tokens after the cached ones and records them. A failed decode can leave part
+    /// of the batch in the cache, so it empties the cache instead: a miss on the next request is
+    /// cheap, a record that disagrees with the cache would silently corrupt it.
+    int32_t decode(llama_token * tokens, size_t n) {
+        int32_t ret = 0;
+        try {
+            ret = llama_decode(ctx, llama_batch_get_one(tokens, static_cast<int32_t>(n)));
+        } catch (...) {
+            clear_cache();
+            throw;
+        }
+        if (ret != 0) {
+            clear_cache();
+            return ret;
+        }
+        cached.insert(cached.end(), tokens, tokens + n);
+        return 0;
     }
 
     /// Query the vocabulary for required capacity, then tokenize into an owned buffer.
@@ -633,6 +699,18 @@ struct Engine::Impl {
 // Engine
 // ---------------------------------------------------------------------------
 
+size_t reusable_prefix(const std::vector<int32_t> & cached, const std::vector<int32_t> & prompt) {
+    if (prompt.empty()) {
+        return 0;
+    }
+    const size_t limit = std::min(cached.size(), prompt.size() - 1);
+    size_t       n     = 0;
+    while (n < limit && cached[n] == prompt[n]) {
+        ++n;
+    }
+    return n;
+}
+
 std::vector<DeviceInfo> Engine::list_devices() {
     init_llama_once();
 
@@ -718,6 +796,28 @@ Engine::Engine(const EngineConfig & config) : impl_(new Impl()) {
         throw EngineError("llama context reports a zero context or batch size");
     }
 
+    // The context takes the pooling the GGUF declares, and pooling is what makes an embedding
+    // model. A reranker pools as well, but into class scores rather than a vector, which nothing
+    // here serves, so it is refused rather than loaded half-usable.
+    const enum llama_pooling_type pooling = llama_pooling_type(impl_->ctx);
+    if (pooling == LLAMA_POOLING_TYPE_RANK) {
+        throw EngineError("'" + config.model_path + "' is a reranking model, which llamad does not serve");
+    }
+    impl_->embeddings = pooling != LLAMA_POOLING_TYPE_NONE;
+    if (impl_->embeddings) {
+        llama_set_embeddings(impl_->ctx, true);
+
+        // Pooling sees only the micro-batch it runs in, and a non-causal encoder cannot split a
+        // sequence across micro-batches at all, so an input has to fit in one. Nor may it be
+        // longer than the model was trained on: a BERT-style encoder has no position embedding
+        // past that.
+        impl_->max_embed_tokens = std::min(llama_n_ubatch(impl_->ctx), impl_->n_ctx_seq);
+        const int32_t n_ctx_train = llama_model_n_ctx_train(impl_->model);
+        if (n_ctx_train > 0) {
+            impl_->max_embed_tokens = std::min(impl_->max_embed_tokens, static_cast<uint32_t>(n_ctx_train));
+        }
+    }
+
     // GPU backends build their compute pipelines on first use, which costs the first
     // request a second or more. Pay that here instead: a small batch and a single
     // token exercise the prompt and the generation paths. Failure is not an error.
@@ -759,6 +859,9 @@ ModelInfo Engine::info() const {
     out.n_ctx             = impl_->n_ctx;
     out.n_ctx_train       = static_cast<uint32_t>(std::max(0, llama_model_n_ctx_train(impl_->model)));
     out.has_chat_template = llama_model_chat_template(impl_->model, nullptr) != nullptr;
+    out.serves_embeddings = impl_->embeddings;
+    out.n_embd            = impl_->embeddings ? static_cast<uint32_t>(std::max(0, llama_model_n_embd_out(impl_->model)))
+                                              : 0;
 
     return out;
 }
@@ -790,10 +893,11 @@ ChatTemplateInfo Engine::chat_template() const {
 
 GenerateResult Engine::generate(const std::string & prompt, const SamplingParams & params,
                                 const ChunkCallback & on_chunk) {
-    std::lock_guard<std::mutex> lock(impl_->generate_mutex);
+    if (impl_->embeddings) {
+        throw EngineError("the model is an embedding model: it cannot generate text");
+    }
 
-    llama_memory_t mem = llama_get_memory(impl_->ctx);
-    llama_memory_clear(mem, /*data*/ true);
+    std::lock_guard<std::mutex> lock(impl_->context_mutex);
 
     std::vector<int32_t> tokens = impl_->tokenize(prompt, /*add_special*/ true, /*parse_special*/ true);
     if (tokens.empty()) {
@@ -817,12 +921,15 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
     SamplerChain sampler(impl_->vocab, params, resolved);
 
     // --- prompt ---------------------------------------------------------
-    const auto t_prompt = std::chrono::steady_clock::now();
-    for (size_t off = 0; off < tokens.size();) {
-        const size_t n_chunk = std::min<size_t>(impl_->n_batch, tokens.size() - off);
+    // Everything above leaves the cache alone, so a request refused there costs the next one
+    // nothing.
+    const size_t kept                 = impl_->keep_prefix(tokens);
+    result.stats.cached_prompt_tokens = static_cast<int32_t>(kept);
 
-        llama_batch   batch = llama_batch_get_one(tokens.data() + off, static_cast<int32_t>(n_chunk));
-        const int32_t ret   = llama_decode(impl_->ctx, batch);
+    const auto t_prompt = std::chrono::steady_clock::now();
+    for (size_t off = kept; off < tokens.size();) {
+        const size_t  n_chunk = std::min<size_t>(impl_->n_batch, tokens.size() - off);
+        const int32_t ret     = impl_->decode(tokens.data() + off, n_chunk);
         if (ret != 0) {
             throw EngineError("llama_decode failed on the prompt (code " + std::to_string(ret) + ")");
         }
@@ -874,15 +981,15 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
         }
 
         // Room for one more token in the context?
-        const int32_t n_used = llama_memory_seq_pos_max(mem, 0) + 1;
-        if (n_used + 1 > static_cast<int32_t>(impl_->n_ctx_seq)) {
+        if (impl_->cached.size() + 1 > impl_->n_ctx_seq) {
             result.reason = FinishReason::Length;
             break;
         }
 
-        llama_token   next  = token;
-        llama_batch   batch = llama_batch_get_one(&next, 1);
-        const int32_t ret   = llama_decode(impl_->ctx, batch);
+        // Only a token the loop goes on from is decoded: the one that ends it (EOG, a stop, a
+        // cancel, the budget) never reaches the cache.
+        llama_token   next = token;
+        const int32_t ret  = impl_->decode(&next, 1);
         if (ret != 0) {
             if (ret > 0) {
                 // No KV slot: the context is full for practical purposes.
@@ -900,6 +1007,64 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
     }
 
     result.stats.completion_ms = ms_since(t_completion);
+    return result;
+}
+
+bool Engine::serves_embeddings() const {
+    return impl_->embeddings;
+}
+
+EmbedResult Engine::embed(const std::vector<std::string> & inputs, const std::function<bool()> & keep_going) {
+    if (!impl_->embeddings) {
+        throw EngineError("the model is not an embedding model: its GGUF declares no pooling type");
+    }
+
+    // Every input is measured before any is decoded, so an over-long one fails the whole request
+    // up front rather than after the others have been paid for.
+    std::vector<std::vector<int32_t>> tokenized;
+    tokenized.reserve(inputs.size());
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        std::vector<int32_t> tokens = impl_->tokenize(inputs[i], /*add_special*/ true, /*parse_special*/ true);
+        if (tokens.empty()) {
+            throw EngineError("input " + std::to_string(i) + " tokenized to zero tokens");
+        }
+        if (tokens.size() > impl_->max_embed_tokens) {
+            throw EngineError("input " + std::to_string(i) + " is too long: " + std::to_string(tokens.size()) +
+                              " tokens, and one input may have at most " +
+                              std::to_string(impl_->max_embed_tokens));
+        }
+        tokenized.push_back(std::move(tokens));
+    }
+
+    std::lock_guard<std::mutex> lock(impl_->context_mutex);
+
+    const int32_t n_embd = llama_model_n_embd_out(impl_->model);
+
+    EmbedResult result;
+    result.embeddings.reserve(tokenized.size());
+    for (std::vector<int32_t> & tokens : tokenized) {
+        if (keep_going && !keep_going()) {
+            break;
+        }
+
+        // One input per decode, as sequence 0 from position 0. An encoder-only model has no
+        // memory, and clearing none is a no-op.
+        llama_memory_clear(llama_get_memory(impl_->ctx), /*data*/ true);
+
+        const int32_t ret =
+            llama_decode(impl_->ctx, llama_batch_get_one(tokens.data(), static_cast<int32_t>(tokens.size())));
+        if (ret != 0) {
+            throw std::runtime_error("llama_decode failed on an embedding input (code " + std::to_string(ret) + ")");
+        }
+
+        const float * pooled = llama_get_embeddings_seq(impl_->ctx, /*seq_id*/ 0);
+        if (pooled == nullptr) {
+            throw std::runtime_error("the model produced no pooled embedding");
+        }
+
+        result.embeddings.push_back({l2_normalized(pooled, n_embd)});
+        result.input_tokens += static_cast<int32_t>(tokens.size());
+    }
     return result;
 }
 

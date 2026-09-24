@@ -78,6 +78,15 @@ llamad::Tool weather_tool() {
     return tool;
 }
 
+// What the client sends for a function with an empty parameter list.
+llamad::Tool clock_tool() {
+    llamad::Tool tool;
+    tool.name                   = "get_time";
+    tool.description            = "Say what time it is";
+    tool.parameters_json_schema = R"({"type":"object","properties":{},"required":[]})";
+    return tool;
+}
+
 std::string spam_schema() {
     return R"({"type":"object","properties":{"spam":{"type":"boolean"},)"
            R"("reasons":{"type":"array","items":{"type":"string"}}},"required":["spam","reasons"]})";
@@ -525,6 +534,30 @@ void test_render_empty_schema_object_rejected() {
     CHECK(threw);
 }
 
+// A tool without arguments is offered like any other and its call parses to an empty object.
+void test_tool_without_arguments() {
+    const llamad::ChatFormat   format   = make_format();
+    const llamad::RenderedChat rendered = format.render({user("What time is it?")}, {clock_tool()}, "");
+
+    CHECK(contains(rendered.prompt, "get_time"));
+    CHECK(contains(rendered.prompt, "Say what time it is"));
+    CHECK(!rendered.grammar.grammar.empty());
+    CHECK(rendered.grammar.lazy);
+    // The arguments rule admits exactly the empty object; the model has nothing else to write.
+    CHECK(contains(rendered.grammar.grammar, R"(tool-get-time-schema ::= "{" space "}")"));
+
+    const std::string generated = "<tool_call>\n" R"({"name": "get_time", "arguments": {}})" "\n</tool_call>";
+    for (size_t chunk_size : {size_t(0), size_t(1)}) {
+        const Run run = run_stream(format, rendered, generated, chunk_size);
+        CHECK_EQ(run.content(), std::string());
+        CHECK_EQ(run.calls.size(), size_t(1));
+        if (run.calls.size() == 1) {
+            CHECK_EQ(run.calls[0].name, std::string("get_time"));
+            CHECK_EQ(run.calls[0].arguments_json, std::string("{}"));
+        }
+    }
+}
+
 void test_invalid_tool_schema() {
     const llamad::ChatFormat format = make_format();
 
@@ -551,6 +584,7 @@ int main() {
     test_stream_plain_text();
     test_stream_malformed_tool_call();
     test_chunking_invariant();
+    test_tool_without_arguments();
     test_invalid_tool_schema();
     test_render_with_response_schema();
     test_stream_response_schema_fenced();

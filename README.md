@@ -2,11 +2,13 @@
 
 A small daemon that loads one llama.cpp model once and serves it to local C++
 applications over gRPC on a Unix domain socket. Applications link a tiny client
-library and get streaming completions, chat and tool calling without embedding
-llama.cpp, and without paying the model load time in every process.
+library and get streaming completions, chat and tool calling, or embedding vectors
+from an embedding model, without embedding llama.cpp, and without paying the model
+load time in every process.
 
 - Local only: a Unix socket created 0600, no TCP listener.
 - Stateless: clients resend history; tools travel with each request and are never executed by the daemon.
+  The KV cache keeps the prefix a resent history shares with the previous request, so a turn decodes only its new tokens.
 - llama.cpp is an unmodified, pinned submodule. CPU, Vulkan (Linux) and Metal (macOS) backends.
 
 ## Requirements
@@ -44,15 +46,33 @@ builds, multi-GPU selection and the smoke test that needs a model.
 ./build-cpu/client/llamad-chat --demo-json              # a reply parsed into a struct
 ```
 
+An embedding model (one whose GGUF declares a pooling type, such as bge-small-en-v1.5 or
+Qwen3-Embedding) is served the same way and answers `Embed` instead of `Generate` and `Chat`:
+
+```sh
+./build-cpu/llamad --model /absolute/path/to/bge-small-en-v1.5-q8_0.gguf --socket /tmp/embed.sock
+./build-cpu/client/llamad-chat --socket /tmp/embed.sock --embed "a cat" --embed "a kitten"
+```
+
 The project ships no model. Any GGUF works; the daemon takes `--socket`, `--ctx`, `--ngl`,
 `--threads`, `--devices` and `--tensor-split`, described in [docs/daemon.md](docs/daemon.md).
 
 ## Use it from your own project
 
 ```cmake
-add_subdirectory(llamad EXCLUDE_FROM_ALL)   # the repo root, not client/
-target_link_libraries(myapp PRIVATE llamad_client)
+include(FetchContent)
+FetchContent_Declare(llamad
+    GIT_REPOSITORY https://github.com/crybo-rybo/llamad.git
+    GIT_TAG        main                    # better, a commit
+    GIT_SUBMODULES "")                     # the client needs nothing from llama.cpp
+FetchContent_MakeAvailable(llamad)
+
+target_link_libraries(myapp PRIVATE llamad::client)
 ```
+
+Included by another project, llamad builds only the client and its protocol code
+(`llamad::proto`): no llama.cpp, no daemon, no tests. It needs gRPC, Protobuf and nlohmann/json
+from your build or your system; [docs/client.md](docs/client.md#linking) has the details.
 
 ```cpp
 #include <llamad/client.h>
@@ -69,8 +89,12 @@ auto result = client.chat({{"user", "Name three primes."}}, params,
 ```
 
 `llamad/client.h` exposes no gRPC or protobuf types. Tools are plain C++ functions
-registered with `ToolSet::add`; the client runs the execute-and-resend loop.
+registered with `ToolSet::add`, free or bound to an object, with or without parameters; the
+client runs the execute-and-resend loop.
 `chat<T>` returns the reply as an instance of a reflected struct, constrained by its schema.
+`embed` returns one unit-length vector per input from a daemon serving an embedding model.
+Every call takes a trailing `CallOptions`: a `std::stop_token` that cancels it from another
+thread, and a timeout.
 [docs/client.md](docs/client.md) has the full walkthrough.
 
 ## Documentation
@@ -79,7 +103,7 @@ registered with `ToolSet::add`; the client runs the execute-and-resend loop.
 |---|---|
 | [docs/building.md](docs/building.md) | Dependencies, platform notes, GPU builds, tests, smoke test |
 | [docs/daemon.md](docs/daemon.md) | Daemon flags, socket, signals, `llamad-chat` and `engine_smoke` |
-| [docs/client.md](docs/client.md) | Client library, tool calling, typed replies, JSON conversions |
+| [docs/client.md](docs/client.md) | Client library, tool calling, typed replies, embeddings, JSON conversions |
 | [docs/design.md](docs/design.md) | Design notes: layering, stream shape, chat templates |
 | `./scripts/docs.sh` | Doxygen API reference in `build-docs/html/` (needs CMake and Doxygen 1.17) |
 | `AGENTS.md` | Layout and rules for changing the code |

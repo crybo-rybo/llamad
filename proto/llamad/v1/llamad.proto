@@ -20,6 +20,11 @@ service Llama {
 
   /// Formats messages with the model's built-in chat template, then generates.
   rpc Chat(ChatRequest) returns (stream GenerateChunk);
+
+  /// Embeds each input on its own. Served only by an embedding model, one whose GGUF declares
+  /// a pooling type; such a model refuses Generate and Chat, and any other refuses Embed, with
+  /// FAILED_PRECONDITION.
+  rpc Embed(EmbedRequest) returns (EmbedResponse);
 }
 
 /// Empty request for metadata about the one loaded model.
@@ -33,6 +38,8 @@ message ModelInfo {
   uint32 n_ctx = 4;            ///< context size the daemon was started with
   uint32 n_ctx_train = 5;      ///< context size the model was trained with
   bool has_chat_template = 6;  ///< Whether a template is stored; successful parsing is a separate capability check.
+  uint32 n_embd = 7;           ///< length of every vector Embed returns; 0 unless serves_embeddings
+  bool serves_embeddings = 8;  ///< an embedding model: Embed is served, Generate and Chat are not
 }
 
 /// Text and explicit special-token handling controls.
@@ -111,10 +118,13 @@ enum FinishReason {
 
 /// Token counts and wall-clock milliseconds, excluding time queued for the engine.
 message GenerateStats {
-  int32 prompt_tokens = 1;  ///< Decoded prompt tokens including special tokens.
+  int32 prompt_tokens = 1;  ///< Prompt length in tokens, including special tokens and cached ones.
   int32 completion_tokens = 2;  ///< Generated non-EOG tokens, including withheld stop and tool markup.
-  double prompt_ms = 3;  ///< Prompt decoding wall time in milliseconds.
+  double prompt_ms = 3;  ///< Wall time decoding the uncached prompt tokens, in milliseconds.
   double completion_ms = 4;  ///< Generation wall time in milliseconds including streaming callbacks.
+  /// Leading prompt tokens the daemon reused from its KV cache instead of decoding: the part of
+  /// the prompt it shares with what the previous request left there. A cache that saves time only.
+  int32 cached_prompt_tokens = 5;
 }
 
 /// A successful stream is zero or more chunks carrying `text`, then exactly one final chunk
@@ -128,4 +138,22 @@ message GenerateChunk {
   FinishReason finish_reason = 2;  ///< UNSPECIFIED on text chunks; a concrete reason on the single final chunk.
   GenerateStats stats = 3;  ///< Present on the final chunk; counts and timings for this generation.
   repeated ToolCall tool_calls = 4;  ///< only ever set on the final chunk
+}
+
+/// Texts to embed, each independently of the others.
+message EmbedRequest {
+  /// Must not be empty. Each input is tokenized as Generate's prompt is, special-token spellings
+  /// included, and must fit in the daemon's per-input token limit.
+  repeated string inputs = 1;
+}
+
+/// One vector per input. Always L2-normalised, so the dot product of two is their cosine.
+message Embedding {
+  repeated float values = 1;  ///< ModelInfo.n_embd values of unit length.
+}
+
+/// The vectors, in input order, and what embedding them cost.
+message EmbedResponse {
+  repeated Embedding embeddings = 1;  ///< One per input, in input order.
+  int32 input_tokens = 2;             ///< Tokens decoded across every input, including special tokens.
 }

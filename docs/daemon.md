@@ -24,7 +24,31 @@ script inherits SIGINT ignored, and macOS discards a signal that is both ignored
 stop one started that way with SIGTERM.
 
 The engine serves one generation at a time: concurrent clients queue rather than sharing the
-context, and each request starts from an empty KV cache.
+context. The KV cache keeps what the previous request decoded, and a request decodes only the
+part of its prompt after the prefix the two share, so a chat turn or a tool round pays for its
+new messages rather than the whole history. `cached_prompt_tokens`, in the stats and in the
+daemon's log line, is the number of prompt tokens reused. A reused prefix was decoded in a
+different batch split than a cold run would use, and the logits are not bit-for-bit identical
+across batch splits, so a `--temp 0` reply from a warm cache can differ from a freshly started
+daemon's.
+
+## Embedding models
+
+What the daemon serves follows from the model. A GGUF that declares a pooling type (mean, CLS or
+last token), as embedding models such as bge-small-en-v1.5 and Qwen3-Embedding do, makes it an
+embedding daemon: it answers `Embed`, and `Generate` and `Chat` fail with `FAILED_PRECONDITION`.
+Any other model is the reverse. `GetModelInfo` reports which, as `serves_embeddings`, and the
+vector length as `n_embd`. Reranking models, which pool into scores rather than vectors, are
+refused at startup.
+
+`Embed` takes a batch of inputs and returns one L2-normalised vector per input, so the dot product
+of two vectors is their cosine similarity. Each input is embedded on its own, in a single decode,
+so an input may have at most 512 tokens (llama.cpp's physical batch), fewer if `--ctx` or the
+model's training context is shorter; a longer one fails the request with `INVALID_ARGUMENT`.
+Inputs are tokenized as `Generate` prompts are, with the model's special tokens added, and any
+instruction prefix a model expects (Qwen3-Embedding's `Instruct: ...\nQuery:` for queries, say)
+is the caller's to write. A client that cancels, or whose deadline passes, stops the batch before
+its next input.
 
 ## Chat from the terminal
 
@@ -45,11 +69,23 @@ call the model makes; [client.md](client.md) explains what that involves.
 ./build-cpu/client/llamad-chat --demo-tools --once "What time is it in Tokyo right now?" --temp 0
 # [tool] get_current_time(Asia/Tokyo) -> 2026-09-21 08:44:44 JST
 # The current time in Tokyo is 2026-09-21 08:44:44 JST.
-# [stats] finish=eog prompt_tokens=461 completion_tokens=52 ...
+# [stats] finish=eog prompt_tokens=465 cached_prompt_tokens=219 completion_tokens=52 ...
 ```
 
 `--demo-json` runs one turn whose reply is constrained to a struct's JSON Schema, streams the
 JSON and prints the parsed fields. It cannot be combined with `--once` or `--demo-tools`.
+
+`--embed TEXT`, repeatable, asks a daemon serving an embedding model for the vectors of every
+TEXT in one request, prints the first few values of each and its cosine with the first, and exits.
+
+```sh
+./build-cpu/client/llamad-chat --embed "A cat sits on the mat." --embed "A kitten is resting on a rug." \
+    --embed "The central bank raised interest rates."
+# embedding 0: cosine with 0: 1.0000  values: 0.035994 -0.024416 0.018401 0.058833 ...
+# embedding 1: cosine with 0: 0.7900  values: -0.010850 0.003091 0.075260 0.107859 ...
+# embedding 2: cosine with 0: 0.3779  values: -0.031368 0.013564 -0.028393 0.028225 ...
+# [stats] inputs=3 n_embd=384 input_tokens=28
+```
 
 ## The engine without the daemon
 
@@ -57,4 +93,5 @@ JSON and prints the parsed fields. It cannot be combined with `--once` or `--dem
 It takes the same context and offload flags as the daemon, plus `--chat` to render the prompt
 through the model's chat template, `--demo-tool` to add the same `get_current_time` tool to
 that rendering, `--grammar-file PATH` to constrain generation with a GBNF file of your own,
-`--stop` and `--cancel-after`. `--help` lists them all.
+`--stop` and `--cancel-after`. With an embedding model, `--embed TEXT` (repeatable, in place of
+the prompt) embeds instead and prints what `llamad-chat --embed` does. `--help` lists them all.

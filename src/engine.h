@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -52,6 +53,8 @@ struct ModelInfo {
     uint32_t    n_ctx             = 0;      ///< Actual context capacity configured by the daemon, in tokens.
     uint32_t    n_ctx_train       = 0;      ///< Training context length recorded by the model, in tokens.
     bool        has_chat_template = false;  ///< Whether the model stores a template; does not guarantee it parses successfully.
+    uint32_t    n_embd            = 0;      ///< Length of every vector embed() returns; zero unless serves_embeddings.
+    bool        serves_embeddings = false;  ///< An embedding model: embed() works, generate() does not.
 };
 
 /// The model's built-in chat template and the token text a template may reference.
@@ -100,16 +103,28 @@ enum class FinishReason {
 
 /// Token counts and wall-clock milliseconds for one generation, excluding queue time.
 struct GenerateStats {
-    int32_t prompt_tokens     = 0;  ///< Number of prompt tokens decoded, including special tokens.
-    int32_t completion_tokens = 0;  ///< Generated non-EOG tokens, including any withheld stop or tool markup.
-    double  prompt_ms         = 0;  ///< Prompt decoding time in milliseconds, including backend synchronization.
-    double  completion_ms     = 0;  ///< Generation time in milliseconds, including streaming callback time.
+    int32_t prompt_tokens        = 0;  ///< Prompt length in tokens, including special tokens and cached ones.
+    int32_t completion_tokens    = 0;  ///< Generated non-EOG tokens, including any withheld stop or tool markup.
+    double  prompt_ms            = 0;  ///< Time decoding the uncached prompt tokens, in ms, including backend synchronization.
+    double  completion_ms        = 0;  ///< Generation time in milliseconds, including streaming callback time.
+    int32_t cached_prompt_tokens = 0;  ///< Leading prompt tokens reused from the KV cache instead of decoded.
 };
 
 /// Generation outcome; streamed text is delivered separately through the callback.
 struct GenerateResult {
     FinishReason  reason;  ///< Reason generation ended.
     GenerateStats stats;   ///< Counts and timings reported for the generation.
+};
+
+/// One input's embedding: ModelInfo::n_embd values, L2-normalised to unit length.
+struct Embedding {
+    std::vector<float> values;  ///< Unit-length vector, so a dot product of two is their cosine.
+};
+
+/// The vectors for a batch of inputs and the tokens it took.
+struct EmbedResult {
+    std::vector<Embedding> embeddings;        ///< One per input, in input order.
+    int32_t                input_tokens = 0;  ///< Tokens decoded across every input, including special tokens.
 };
 
 /// Called with each piece of generated text, in order. Return false to cancel.
@@ -123,13 +138,21 @@ struct EngineError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
-/// Owns one model and context; generation calls serialize and start with an empty KV cache.
-/// Callbacks run synchronously while the generation lock is held; do not reenter generate().
+/// How many leading tokens of `prompt` a generation keeps from a KV cache holding `cached`: the
+/// prefix the two share, stopping one short of the whole prompt, because sampling needs the
+/// logits of the prompt's last token and only decoding it produces them.
+size_t reusable_prefix(const std::vector<int32_t> & cached, const std::vector<int32_t> & prompt);
+
+/// Owns one model and context; generate() and embed() calls serialize, and generations share one
+/// KV cache. Callbacks run synchronously while that lock is held; do not reenter the engine.
+/// A model whose GGUF declares a pooling type (mean, CLS or last token) is an embedding model:
+/// it serves embed() and not generate(). Any other model is the reverse.
 class Engine {
 public:
     /// Load the model, allocate its context and warm up the backend.
     /// @param config Model path, device selection and context limits.
-    /// @throws EngineError If configuration, loading or context creation fails.
+    /// @throws EngineError If configuration, loading or context creation fails, or the model is a
+    /// reranker, which pools into scores rather than an embedding.
     explicit Engine(const EngineConfig & config);
     /// Release the context before the model; no requests may still be using this object.
     ~Engine();
@@ -145,6 +168,10 @@ public:
     /// Return model metadata and the actual configured context size.
     ModelInfo info() const;
 
+    /// Whether this is an embedding model, as ModelInfo::serves_embeddings, without building the
+    /// rest of info().
+    bool serves_embeddings() const;
+
     /// Convert text to model token IDs without modifying the generation context.
     /// @param text Input bytes to tokenize.
     /// @param add_special Add the model-specific BOS/EOS tokens.
@@ -156,7 +183,10 @@ public:
     ChatTemplateInfo chat_template() const;
 
     /// Generates from a raw prompt. Serialized internally: concurrent callers queue.
-    /// Each call starts from an empty KV cache.
+    /// The KV cache keeps what the previous call decoded, and a call decodes only the part of its
+    /// prompt after the prefix it shares with that (see reusable_prefix). The cache changes how
+    /// long a prompt takes, never which prompt runs; the logits can differ from a cold run's in
+    /// the last bits, because the prompt is decoded in a different batch split.
     /// @param prompt Raw model input; special-token spellings are recognized.
     /// @param params Sampling, grammar, stop strings and completion budget.
     /// @param on_chunk Synchronous receiver; empty discards text, false requests cancellation.
@@ -164,6 +194,18 @@ public:
     /// @throws EngineError If the prompt does not fit, the grammar is invalid or decoding fails.
     /// Exceptions from on_chunk propagate to the caller.
     GenerateResult generate(const std::string & prompt, const SamplingParams & params, const ChunkCallback & on_chunk);
+
+    /// Embeds each input on its own, as a single sequence decoded in one piece, so the model's
+    /// pooling sees all of it and nothing else. Serialized with generate().
+    /// @param inputs Texts to embed; special-token spellings are recognized, as in generate().
+    /// @param keep_going Asked before each input is decoded; false cancels the rest of the batch.
+    /// Empty never cancels.
+    /// @return One L2-normalised vector per input, in input order; after a cancel, only those for
+    /// the inputs before it.
+    /// @throws EngineError If the model is not an embedding model, or an input tokenizes to nothing
+    /// or to more tokens than one decode can take.
+    /// @throws std::runtime_error If decoding fails or yields no pooled embedding.
+    EmbedResult embed(const std::vector<std::string> & inputs, const std::function<bool()> & keep_going);
 
 private:
     /// Dependency-specific state hidden behind the public contract.
