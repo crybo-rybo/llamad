@@ -37,6 +37,9 @@ project uses, and installs it under `build-deps/`. It takes about fifteen minute
 `./scripts/build.sh` then compiles llama.cpp's C and Objective-C Metal sources with Apple clang,
 which GCC cannot parse, and every C++ source with `g++-16`. Accelerate and BLAS are off, because
 their headers do not compile with GCC; that costs only prompt-processing speed on the CPU path.
+It also names the CPU's features for ggml (`-march=armv8.2-a+fp16+dotprod+...`, from `sysctl
+hw.optional.arm`) instead of relying on `-mcpu=native`: GCC's native CPU for Apple silicon lacks
+FP16 vector arithmetic, which ggml's attention over the F16 KV cache runs on.
 
 ## What the build contains
 

@@ -31,6 +31,16 @@ if [[ $(uname -s) == Darwin ]]; then
     platform=(-DCMAKE_C_COMPILER=/usr/bin/clang -DCMAKE_CXX_COMPILER=g++-16
         -DGGML_METAL="$offload" -DGGML_ACCELERATE=OFF -DGGML_BLAS=OFF
         -DCMAKE_PREFIX_PATH="$root/build-deps/prefix;$(brew --prefix openssl@3)")
+    # GCC's -mcpu=native on Apple silicon leaves out FP16 vector arithmetic, which ggml's F16
+    # kernels need (the KV cache is F16, so attention runs through them), and ggml's feature
+    # probes hand GCC a -mcpu=native+feature it rejects. Name the features the CPU reports.
+    arch=armv8.2-a
+    for feature in fp16:FP16 dotprod:DotProd i8mm:I8MM bf16:BF16; do
+        if [[ $(sysctl -n "hw.optional.arm.FEAT_${feature#*:}" 2>/dev/null) == 1 ]]; then
+            arch+="+${feature%%:*}"
+        fi
+    done
+    platform+=(-DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH="$arch")
 else
     platform=(-DGGML_VULKAN="$offload")
 fi
