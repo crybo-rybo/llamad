@@ -41,6 +41,32 @@ The callback receives user-visible text only: never tool-call markup, never part
 never part of a matched stop string. The result carries the finish reason and the stats from
 the stream's final chunk.
 
+## Stopping a call
+
+A call blocks its thread until the stream ends, and returning `false` from the callback can
+cancel it only when text arrives. To call it off from somewhere else, such as a cancel button or
+a shutdown signal, or to bound it in time, pass `CallOptions` as the last argument:
+
+```cpp
+std::stop_source stop;                      // stop.request_stop() from any thread
+
+auto result = client.chat(history, params, on_chunk,
+                          {.stop = stop.get_token(), .timeout = std::chrono::seconds(30)});
+```
+
+- A stop cancels the call even when no text is arriving: while the daemon reads a long prompt,
+  while it serves another client first, during a tool-call round. A streaming call returns
+  `FinishReason::Cancelled`, unless its final chunk had already arrived, whose reason stands.
+  `get_model_info` and `tokenize` throw `RpcError` with code `CANCELLED` (1).
+- The timeout applies to each RPC, from its start. When it runs out the call throws `RpcError`
+  with code `DEADLINE_EXCEEDED` (4), so a `get_model_info` with a short timeout is a health
+  check that cannot hang.
+- The tool loop takes `CallOptions` after `max_rounds`. The stop covers the whole loop, and no
+  tool runs once it has been requested; the timeout applies to each round.
+
+`std::jthread` passes its function a `std::stop_token`, so a call made on one with that token
+stops when the thread is asked to. `llamad-chat` stops a reply on Ctrl-C this way.
+
 ## Tool calling
 
 The daemon is a formatter and a parser, not a tool registry. Tools are opaque

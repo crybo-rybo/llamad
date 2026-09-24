@@ -5,7 +5,6 @@
  * It uses only <llamad/client.h>: no gRPC or protobuf headers anywhere.
  */
 
-#include <atomic>
 #include <cctype>
 #include <csignal>
 #include <cstdint>
@@ -14,10 +13,14 @@
 #include <cstring>
 #include <ctime>
 #include <iostream>
+#include <mutex>
 #include <optional>
+#include <stop_token>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include <pthread.h>
 #include <unistd.h>
 
 #include "flags.h"
@@ -25,25 +28,48 @@
 
 namespace {
 
-// Set by the SIGINT handler while a generation is running; the chunk callback
-// turns it into a cancel. At the prompt there is nothing to cancel, so the
-// handler exits the process instead (via _exit, which is async-signal-safe).
-/// Whether SIGINT should cancel a generation instead of exiting the prompt.
-std::atomic<bool> g_generating{false};
-/// Cancellation flag read by the synchronous chunk callback.
-std::atomic<bool> g_interrupted{false};
+// SIGINT is blocked in every thread and taken with sigwait by a thread of its own, where stopping
+// a call is an ordinary function call rather than something a signal handler may not do. The
+// stop cancels the turn even while no text is arriving: a long prompt, a tool round. At the
+// prompt there is nothing to stop, so it exits the process instead.
+/// Guards g_turn_stop, which the SIGINT thread reads while turns begin and end.
+std::mutex         g_turn_mutex;
+/// The running turn's stop source, or null at the prompt.
+std::stop_source * g_turn_stop = nullptr;
 
-/// Request cancellation during generation; otherwise exit using signal-safe operations.
-void on_sigint(int) {
-    if (g_generating.load()) {
-        g_interrupted.store(true);
-        return;
+/// Stop the running turn on each SIGINT; with none running, exit.
+void watch_sigint(sigset_t signals) {
+    while (true) {
+        int received = 0;
+        if (::sigwait(&signals, &received) != 0) {
+            continue;
+        }
+        std::lock_guard<std::mutex> lock(g_turn_mutex);
+        if (g_turn_stop != nullptr) {
+            g_turn_stop->request_stop();
+            continue;
+        }
+        std::fputc('\n', stdout);
+        std::fflush(stdout);
+        std::_Exit(130);  // not exit(): the main thread is still running
     }
-    const char msg[] = "\n";
-    ssize_t ignored = ::write(STDOUT_FILENO, msg, sizeof(msg) - 1);
-    (void) ignored;
-    ::_exit(130);
 }
+
+/// A turn SIGINT can stop, for as long as the object lives.
+struct StoppableTurn {
+    std::stop_source stop;  ///< Requested by the SIGINT thread.
+
+    /// Make this turn the one SIGINT stops.
+    StoppableTurn() {
+        std::lock_guard<std::mutex> lock(g_turn_mutex);
+        g_turn_stop = &stop;
+    }
+    /// Return SIGINT to exiting the process.
+    ~StoppableTurn() {
+        std::lock_guard<std::mutex> lock(g_turn_mutex);
+        g_turn_stop = nullptr;
+    }
+};
 
 /// Spell the client finish reason for terminal statistics.
 const char * reason_name(llamad::client::FinishReason reason) {
@@ -196,26 +222,17 @@ bool run_turn(llamad::client::Client & client,
     bool produced_text = false;
     long chunks        = 0;
 
-    g_interrupted.store(false);
-    g_generating.store(true);
-
     llamad::client::GenerateResult result{};
-    try {
+    {
+        StoppableTurn turn;
         result = client.chat(history, tools, sampling, [&](const std::string & text) {
             produced_text = true;
             std::fwrite(text.data(), 1, text.size(), stdout);
             std::fflush(stdout);
             ++chunks;
-            if (cancel_after > 0 && chunks >= cancel_after) {
-                return false;
-            }
-            return !g_interrupted.load();
-        }, kMaxToolRounds);
-    } catch (...) {
-        g_generating.store(false);
-        throw;
+            return cancel_after <= 0 || chunks < cancel_after;
+        }, kMaxToolRounds, {.stop = turn.stop.get_token()});
     }
-    g_generating.store(false);
 
     std::fputc('\n', stdout);
     std::fflush(stdout);
@@ -338,11 +355,16 @@ int main(int argc, char ** argv) {
 
     const std::string socket_path = options.socket.value_or(llamad::client::Client::default_socket_path());
 
-    struct sigaction sa {};
-    sa.sa_handler = on_sigint;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;  // no SA_RESTART: interrupt the blocking read at the prompt
-    sigaction(SIGINT, &sa, nullptr);
+    // Blocked before any other thread exists, gRPC's included, so every thread inherits the mask
+    // and only watch_sigint ever sees the signal. A shell starts a background job with SIGINT
+    // ignored, and an ignored signal never reaches sigwait, so the default action is restored;
+    // blocked, it stays pending for sigwait rather than ending the process.
+    std::signal(SIGINT, SIG_DFL);
+    sigset_t sigint;
+    sigemptyset(&sigint);
+    sigaddset(&sigint, SIGINT);
+    pthread_sigmask(SIG_BLOCK, &sigint, nullptr);
+    std::thread(watch_sigint, sigint).detach();
 
     std::vector<llamad::client::ChatMessage> history;
     if (!options.system.empty()) {
