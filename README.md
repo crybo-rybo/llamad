@@ -72,6 +72,8 @@ auto result = client.chat({{"user", "Name three primes."}}, params,
 registered with `ToolSet::add`, free or bound to an object, with or without parameters; the
 client runs the execute-and-resend loop.
 `chat<T>` returns the reply as an instance of a reflected struct, constrained by its schema.
+Every call takes a trailing `CallOptions`: a `std::stop_token` that cancels it from another
+thread, and a timeout.
 [docs/client.md](docs/client.md) has the full walkthrough.
 
 ## Documentation

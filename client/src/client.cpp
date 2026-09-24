@@ -4,9 +4,11 @@
 
 #include "llamad/client.h"
 
+#include <chrono>
 #include <cstdlib>
 #include <memory>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <vector>
 
@@ -39,8 +41,16 @@ std::string tool_error(const std::string & message) {
 /// The daemon must be there already: a missing socket is an error to report, not
 /// something to wait on, so wait_for_ready stays off (the gRPC default, set
 /// explicitly here because it is the whole point of the fail-fast behaviour).
-void init_context(grpc::ClientContext & context) {
+///
+/// Each call also declares, right after its context, a std::stop_callback that cancels it from
+/// whichever thread requests the stop (TryCancel is thread-safe, and cancels a call that has not
+/// started yet as soon as it does). Declared after the context, it is destroyed first, and its
+/// destructor waits for a cancel already running, so the context outlives every use of it.
+void init_context(grpc::ClientContext & context, const CallOptions & options) {
     context.set_wait_for_ready(false);
+    if (options.timeout) {
+        context.set_deadline(std::chrono::system_clock::now() + *options.timeout);
+    }
 }
 
 }  // namespace
@@ -68,13 +78,16 @@ struct Client::Impl {
     std::shared_ptr<grpc::Channel>    channel;  ///< Shared Unix-domain gRPC channel.
     std::unique_ptr<v1::Llama::Stub>  stub;     ///< Generated service stub owned by the client.
 
-    /// Runs a server-streaming call to completion, honouring cancellation.
+    /// Runs a server-streaming call to completion, honouring cancellation from on_chunk and
+    /// from stop, whose callback has already wired it to the context.
     template <typename Reader>
     GenerateResult consume(grpc::ClientContext & context,
                            Reader & reader,
-                           const ChunkCallback & on_chunk) {
+                           const ChunkCallback & on_chunk,
+                           const std::stop_token & stop) {
         GenerateResult result{FinishReason::Eog, {}};
-        bool cancelled = false;
+        bool cancelled = false;  // by on_chunk
+        bool finished  = false;  // the final chunk arrived
 
         v1::GenerateChunk chunk;
         while (reader->Read(&chunk)) {
@@ -85,6 +98,7 @@ struct Client::Impl {
                 }
             }
             if (chunk.finish_reason() != v1::FINISH_REASON_UNSPECIFIED) {
+                finished = true;
                 // A reason a later daemon knows and this client does not reads as Eog.
                 result.reason = wire::enum_cast(chunk.finish_reason(), FinishReason::Eog);
                 result.stats  = wire::from_proto<GenerateStats>(chunk.stats());
@@ -96,16 +110,15 @@ struct Client::Impl {
         }
 
         const grpc::Status status = reader->Finish();
-        if (cancelled) {
-            // We asked for the cancel, so CANCELLED here is the expected outcome.
-            if (!status.ok() && status.error_code() != grpc::StatusCode::CANCELLED) {
-                throw_rpc_error(status);
-            }
-            result.reason = FinishReason::Cancelled;
-            return result;
-        }
-        if (!status.ok()) {
+        // This side asked for the cancel, so CANCELLED here is the expected outcome.
+        const bool asked_to_cancel = cancelled || stop.stop_requested();
+        if (!status.ok() && !(asked_to_cancel && status.error_code() == grpc::StatusCode::CANCELLED)) {
             throw_rpc_error(status);
+        }
+        // A stop that arrives after the final chunk is too late to cancel anything, and the
+        // reason that chunk carried stands.
+        if (cancelled || (!status.ok() && !finished)) {
+            result.reason = FinishReason::Cancelled;
         }
         return result;
     }
@@ -133,9 +146,10 @@ Client::Client(const std::string & socket_path) : impl_(new Impl) {
 
 Client::~Client() = default;
 
-ModelInfo Client::get_model_info() {
+ModelInfo Client::get_model_info(const CallOptions & options) {
     grpc::ClientContext context;
-    init_context(context);
+    init_context(context, options);
+    const std::stop_callback cancel_on_stop(options.stop, [&context] { context.TryCancel(); });
 
     v1::GetModelInfoRequest request;
     v1::ModelInfo          response;
@@ -147,9 +161,13 @@ ModelInfo Client::get_model_info() {
     return wire::from_proto<ModelInfo>(response);
 }
 
-std::vector<int32_t> Client::tokenize(const std::string & text, bool add_special, bool parse_special) {
+std::vector<int32_t> Client::tokenize(const std::string & text,
+                                      bool add_special,
+                                      bool parse_special,
+                                      const CallOptions & options) {
     grpc::ClientContext context;
-    init_context(context);
+    init_context(context, options);
+    const std::stop_callback cancel_on_stop(options.stop, [&context] { context.TryCancel(); });
 
     v1::TokenizeRequest request;
     request.set_text(text);
@@ -166,38 +184,44 @@ std::vector<int32_t> Client::tokenize(const std::string & text, bool add_special
 
 GenerateResult Client::generate(const std::string & prompt,
                                 const SamplingParams & params,
-                                const ChunkCallback & on_chunk) {
+                                const ChunkCallback & on_chunk,
+                                const CallOptions & options) {
     grpc::ClientContext context;
-    init_context(context);
+    init_context(context, options);
+    const std::stop_callback cancel_on_stop(options.stop, [&context] { context.TryCancel(); });
 
     v1::GenerateRequest request;
     request.set_prompt(prompt);
     wire::to_proto(params, request.mutable_sampling());
 
     auto reader = impl_->stub->Generate(&context, request);
-    return impl_->consume(context, reader, on_chunk);
+    return impl_->consume(context, reader, on_chunk, options.stop);
 }
 
 GenerateResult Client::chat(const std::vector<ChatMessage> & messages,
                             const SamplingParams & params,
-                            const ChunkCallback & on_chunk) {
-    return chat(messages, {}, params, on_chunk);
+                            const ChunkCallback & on_chunk,
+                            const CallOptions & options) {
+    return chat(messages, {}, params, on_chunk, options);
 }
 
 GenerateResult Client::chat(const std::vector<ChatMessage> & messages,
                             const std::vector<Tool> & tools,
                             const SamplingParams & params,
-                            const ChunkCallback & on_chunk) {
-    return chat_request(messages, tools, /*response_json_schema*/ "", params, on_chunk);
+                            const ChunkCallback & on_chunk,
+                            const CallOptions & options) {
+    return chat_request(messages, tools, /*response_json_schema*/ "", params, on_chunk, options);
 }
 
 GenerateResult Client::chat_request(const std::vector<ChatMessage> & messages,
                                     const std::vector<Tool> & tools,
                                     const std::string & response_json_schema,
                                     const SamplingParams & params,
-                                    const ChunkCallback & on_chunk) {
+                                    const ChunkCallback & on_chunk,
+                                    const CallOptions & options) {
     grpc::ClientContext context;
-    init_context(context);
+    init_context(context, options);
+    const std::stop_callback cancel_on_stop(options.stop, [&context] { context.TryCancel(); });
 
     v1::ChatRequest request;
     for (const ChatMessage & m : messages) {
@@ -210,14 +234,15 @@ GenerateResult Client::chat_request(const std::vector<ChatMessage> & messages,
     wire::to_proto(params, request.mutable_sampling());
 
     auto reader = impl_->stub->Chat(&context, request);
-    return impl_->consume(context, reader, on_chunk);
+    return impl_->consume(context, reader, on_chunk, options.stop);
 }
 
 GenerateResult Client::chat(std::vector<ChatMessage> & history,
                             const ToolSet & tools,
                             const SamplingParams & params,
                             const ChunkCallback & on_chunk,
-                            int max_rounds) {
+                            int max_rounds,
+                            const CallOptions & options) {
     // A round budget of nothing would answer without asking the model anything, which no caller
     // can mean; reporting it as a successful empty answer would hide the mistake.
     if (max_rounds <= 0) {
@@ -232,13 +257,21 @@ GenerateResult Client::chat(std::vector<ChatMessage> & history,
         result = chat(history, tools.definitions(), params, [&](const std::string & text) {
             reply += text;
             return on_chunk ? on_chunk(text) : true;
-        });
+        }, options);
 
         total.prompt_tokens     += result.stats.prompt_tokens;
         total.completion_tokens += result.stats.completion_tokens;
         total.prompt_ms         += result.stats.prompt_ms;
         total.completion_ms     += result.stats.completion_ms;
         result.stats             = total;
+
+        // A stop that lands after the model asked for tools still calls the turn off: none of
+        // them run, and their calls are dropped along with the reason, so history is left without
+        // calls it has no answers for.
+        if (result.reason == FinishReason::ToolCalls && options.stop.stop_requested()) {
+            result.reason = FinishReason::Cancelled;
+            result.tool_calls.clear();
+        }
 
         // tool_calls is non-empty iff the reason is ToolCalls, so this is the only branch that
         // has a tool to run; a cancelled or truncated round falls through and returns.

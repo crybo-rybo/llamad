@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -14,6 +15,7 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -226,7 +228,7 @@ enum class FinishReason {
     Eog,  ///< The model emitted an end-of-generation token.
     Length,  ///< The token budget or context capacity was reached.
     Stop,  ///< A configured stop string matched; its bytes are withheld.
-    Cancelled,  ///< The callback requested cancellation.
+    Cancelled,  ///< The callback or CallOptions::stop requested cancellation.
     ToolCalls  ///< Complete tool calls require client execution.
 };
 
@@ -265,10 +267,24 @@ struct RpcError : std::runtime_error {
     int code;  ///< grpc::StatusCode value
 };
 
+/// How a call can be called off from outside it, for a caller that runs it on a worker thread or
+/// must not wait on it forever. The default has no deadline and is never stopped.
+struct CallOptions {
+    /// request_stop() on its source, from any thread, cancels the call even while no text is
+    /// arriving: a long prompt, a queue behind another client, a tool-call round, a wedged daemon.
+    /// A streaming call then returns FinishReason::Cancelled, unless its final chunk had already
+    /// arrived, whose reason stands. get_model_info() and tokenize() throw RpcError with CANCELLED (1).
+    std::stop_token stop;
+    /// Time allowed for each RPC, from its start. When it runs out the call throws RpcError with
+    /// DEADLINE_EXCEEDED (4).
+    std::optional<std::chrono::milliseconds> timeout;
+};
+
 /// Synchronous client for one Unix socket; calls carry all request state.
 /// RPC failures throw RpcError. Streaming callbacks run on the calling thread and their
-/// exceptions propagate. An empty callback discards text; false requests cancellation.
-/// A cancelled stream can end before final statistics arrive.
+/// exceptions propagate. An empty callback discards text; false requests cancellation, and so
+/// does CallOptions::stop from any thread. A cancelled stream can end before final statistics
+/// arrive.
 class Client {
 public:
     /// Return `$XDG_RUNTIME_DIR/llamad.sock`, falling back to `/tmp/llamad-<uid>.sock`.
@@ -285,29 +301,43 @@ public:
     Client & operator=(const Client &) = delete;
 
     /// Fetch metadata for the daemon's loaded model.
+    /// @param options Stop token and deadline for the call.
     /// @throws RpcError If the daemon is unreachable or the request fails.
-    ModelInfo get_model_info();
+    ModelInfo get_model_info(const CallOptions & options = {});
 
     /// Tokenize using the daemon's vocabulary.
     /// @param text Input bytes.
     /// @param add_special Add BOS/EOS as expected by the model.
     /// @param parse_special Recognize literal special-token spellings.
+    /// @param options Stop token and deadline for the call.
     /// @throws RpcError If the daemon rejects or cannot complete the request.
-    std::vector<int32_t> tokenize(const std::string & text, bool add_special = true, bool parse_special = false);
+    std::vector<int32_t> tokenize(const std::string & text,
+                                  bool add_special = true,
+                                  bool parse_special = false,
+                                  const CallOptions & options = {});
 
     /// Complete a raw prompt without applying the chat template.
     /// Blocks until the stream ends, invoking on_chunk from the calling thread.
-    /// If on_chunk returns false the request is cancelled and reason is Cancelled. Cancelling ends
-    /// the stream before the daemon's final chunk; stats are available only if that chunk arrives.
+    /// If on_chunk returns false or options.stop is requested, the request is cancelled and reason
+    /// is Cancelled. Cancelling ends the stream before the daemon's final chunk; stats are
+    /// available only if that chunk arrives.
     /// @param prompt Raw model input.
     /// @param params Optional overrides of the daemon sampling defaults.
     /// @param on_chunk Text receiver, or empty to discard text.
-    /// @throws RpcError If the RPC fails for a reason other than requested cancellation.
-    GenerateResult generate(const std::string & prompt, const SamplingParams & params, const ChunkCallback & on_chunk);
+    /// @param options Stop token and deadline for the call.
+    /// @throws RpcError If the RPC fails for a reason other than requested cancellation,
+    ///         DEADLINE_EXCEEDED (4) among them.
+    GenerateResult generate(const std::string & prompt,
+                            const SamplingParams & params,
+                            const ChunkCallback & on_chunk,
+                            const CallOptions & options = {});
     /// Generate a single chat turn without tools; messages must contain the full history.
     /// Uses the blocking callback and cancellation behavior of generate().
     /// @throws RpcError For transport failure, invalid history or unavailable chat support.
-    GenerateResult chat(const std::vector<ChatMessage> & messages, const SamplingParams & params, const ChunkCallback & on_chunk);
+    GenerateResult chat(const std::vector<ChatMessage> & messages,
+                        const SamplingParams & params,
+                        const ChunkCallback & on_chunk,
+                        const CallOptions & options = {});
 
     /// Generate one chat turn offering opaque tool definitions; the caller owns execution.
     /// Uses the blocking callback and cancellation behavior of generate(). On
@@ -317,24 +347,29 @@ public:
     GenerateResult chat(const std::vector<ChatMessage> & messages,
                         const std::vector<Tool> & tools,
                         const SamplingParams & params,
-                        const ChunkCallback & on_chunk);
+                        const ChunkCallback & on_chunk,
+                        const CallOptions & options = {});
 
     /// The same loop, run here. The caller appends the user message to `history` and gets back a
     /// history holding every assistant and "tool" turn the answer took, with `stats` summed over
     /// the rounds. A result of ToolCalls means max_rounds was spent with the model still asking.
     /// The last round's tools are executed even when no generation budget remains.
+    /// Once options.stop is requested no further tools run: a round whose calls have not started
+    /// ends the loop with Cancelled, its calls unanswered and left out of history.
     /// @param history Full conversation, already including the latest user message; updated in place.
     /// @param tools Registered functions to execute locally.
     /// @param params Sampling overrides applied to each round.
     /// @param on_chunk Text receiver shared across rounds; false cancels the current request.
     /// @param max_rounds Maximum generation requests, including the initial request; must be positive.
+    /// @param options Stop token for the whole loop; the timeout applies to each round.
     /// @throws std::invalid_argument If max_rounds is not positive.
     /// @throws RpcError If any request fails; completed turns remain in history.
     GenerateResult chat(std::vector<ChatMessage> & history,
                         const ToolSet & tools,
                         const SamplingParams & params,
                         const ChunkCallback & on_chunk,
-                        int max_rounds = 8);
+                        int max_rounds = 8,
+                        const CallOptions & options = {});
 
     /// One chat turn whose reply is an instance of T: json::schema<T>() travels with the request,
     /// the daemon holds the model to it, and the finished reply is read back with json::read. T is
@@ -348,7 +383,8 @@ public:
     template <typename T>
     Typed<T> chat(const std::vector<ChatMessage> & messages,
                   const SamplingParams & params,
-                  const ChunkCallback & on_chunk);
+                  const ChunkCallback & on_chunk,
+                  const CallOptions & options = {});
 
 private:
     /// One Chat request: the tools overload of chat() and the typed chat() are both written over it.
@@ -358,11 +394,13 @@ private:
     ///        leaves the reply unconstrained.
     /// @param params Sampling controls and stop strings for this turn.
     /// @param on_chunk Receives generated text; return false to cancel.
+    /// @param options Stop token and deadline for the call.
     GenerateResult chat_request(const std::vector<ChatMessage> & messages,
                                 const std::vector<Tool> & tools,
                                 const std::string & response_json_schema,
                                 const SamplingParams & params,
-                                const ChunkCallback & on_chunk);
+                                const ChunkCallback & on_chunk,
+                                const CallOptions & options);
 
     /// Dependency-specific state hidden behind the public contract.
     struct Impl;
@@ -372,7 +410,8 @@ private:
 template <typename T>
 Typed<T> Client::chat(const std::vector<ChatMessage> & messages,
                       const SamplingParams & params,
-                      const ChunkCallback & on_chunk) {
+                      const ChunkCallback & on_chunk,
+                      const CallOptions & options) {
     static_assert(std::is_aggregate_v<T>, "chat<T>: T must be an aggregate; json::schema describes an object");
 
     std::string reply;
@@ -381,7 +420,7 @@ Typed<T> Client::chat(const std::vector<ChatMessage> & messages,
     typed.result = chat_request(messages, /*tools*/ {}, json::schema<T>(), params, [&](const std::string & text) {
         reply += text;
         return on_chunk ? on_chunk(text) : true;
-    });
+    }, options);
 
     // The grammar makes a reply the model finished whole JSON. A stop string is matched on the
     // generated text and removed from it, so it can just as well land inside the document: parse

@@ -3,20 +3,23 @@
  *
  * Client::chat, against a scripted fake daemon on a private Unix socket. No model and no
  * inference: the fake replays canned rounds, so what is under test is the history the loop
- * builds, the requests it sends, its summed stats, where it stops, and what chat<T> makes of a
- * reply the daemon says is finished.
+ * builds, the requests it sends, its summed stats, where it stops, what chat<T> makes of a
+ * reply the daemon says is finished, and how a call is stopped or timed out from outside it.
  */
 
 #include "check.h"
 #include "llamad/client.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -74,13 +77,20 @@ struct Round {
     v1::FinishReason              reason = v1::FINISH_REASON_EOG;
     std::vector<client::ToolCall> tool_calls;
     client::GenerateStats         stats;
+
+    // Text on the final chunk itself, which the stream shape allows: a callback that requests a
+    // stop on it does so once the whole round has arrived.
+    std::string final_text;
+    // After the text, wait for the client to cancel instead of finishing: a daemon still
+    // prefilling, queued behind another client, or wedged.
+    bool hang = false;
 };
 
 class FakeDaemon final : public v1::Llama::Service {
 public:
     explicit FakeDaemon(std::vector<Round> script) : script_(std::move(script)) {}
 
-    grpc::Status Chat(grpc::ServerContext *,
+    grpc::Status Chat(grpc::ServerContext * context,
                       const v1::ChatRequest * request,
                       grpc::ServerWriter<v1::GenerateChunk> * writer) override {
         Round round;
@@ -104,7 +114,15 @@ public:
             writer->Write(chunk);
         }
 
+        if (round.hang) {
+            while (!context->IsCancelled()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            return grpc::Status::CANCELLED;
+        }
+
         v1::GenerateChunk final_chunk;
+        final_chunk.set_text(round.final_text);
         final_chunk.set_finish_reason(round.reason);
         llamad::wire::to_proto(round.stats, final_chunk.mutable_stats());
         for (const client::ToolCall & call : round.tool_calls) {
@@ -474,6 +492,125 @@ void test_typed_reply_stopped_mid_document() {
     CHECK_EQ(streamed, "{\n  \"spam\": true\n");
 }
 
+// Blocks until the fake has taken `count` requests, so that a stop from another thread lands while
+// the call is in flight.
+void wait_for_requests(const FakeDaemon & daemon, size_t count) {
+    while (daemon.requests().size() < count) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+// A call that has delivered nothing, as one still prefilling or queued would have, is cancelled
+// by a stop from another thread. The fake never finishes on its own, so a stop that did not
+// cancel the call would hang the test.
+void test_stop_from_another_thread() {
+    Round silent;
+    silent.hang = true;
+
+    Harness harness({silent});
+
+    std::stop_source stop;
+    std::jthread     stopper([&] {
+        wait_for_requests(harness.daemon, 1);
+        stop.request_stop();
+    });
+
+    int                          chunks = 0;
+    const client::GenerateResult result =
+        harness.client.chat({{"user", "hello"}}, params, [&](const std::string &) {
+            ++chunks;
+            return true;
+        }, {.stop = stop.get_token()});
+
+    CHECK(result.reason == client::FinishReason::Cancelled);
+    CHECK(chunks == 0);
+}
+
+void test_stop_before_the_call() {
+    Round silent;
+    silent.hang = true;
+
+    Harness harness({silent});
+
+    std::stop_source stop;
+    stop.request_stop();
+    const client::GenerateResult result =
+        harness.client.chat({{"user", "hello"}}, params, nullptr, {.stop = stop.get_token()});
+
+    CHECK(result.reason == client::FinishReason::Cancelled);
+}
+
+// Once the final chunk is in, there is nothing left to cancel: its reason and stats stand.
+void test_stop_after_the_final_chunk() {
+    Round answer;
+    answer.final_text = "done";
+    answer.stats      = {5, 3, 1.0, 2.0};
+
+    Harness harness({answer});
+
+    std::stop_source             stop;
+    const client::GenerateResult result =
+        harness.client.chat({{"user", "hello"}}, params, [&](const std::string &) {
+            stop.request_stop();
+            return true;
+        }, {.stop = stop.get_token()});
+
+    CHECK(stop.stop_requested());
+    CHECK(result.reason == client::FinishReason::Eog);
+    CHECK(result.stats.prompt_tokens == 5);
+    CHECK(result.stats.completion_tokens == 3);
+}
+
+// A stop that lands once the model has asked for a tool ends the loop there: the tool never runs,
+// and history holds no call without its answer.
+void test_stop_before_tools_run() {
+    Round asking      = tool_round({{"call_0", "shout", R"({"word":"never"})"}});
+    asking.final_text = "Let me look.";
+    Round answer;
+    answer.text = {"unreachable"};
+
+    Harness harness({asking, answer});
+
+    std::stop_source                 stop;
+    std::vector<client::ChatMessage> history = {{"user", "shout"}};
+    const client::GenerateResult     result  = harness.client.chat(history, make_tools(), params, [&](const std::string &) {
+        stop.request_stop();
+        return true;
+    }, /*max_rounds*/ 8, {.stop = stop.get_token()});
+
+    CHECK(result.reason == client::FinishReason::Cancelled);
+    CHECK(result.tool_calls.empty());
+    CHECK_EQ(tool_log, "");
+    CHECK(harness.daemon.requests().size() == 1);
+
+    CHECK(history.size() == 2);
+    CHECK_EQ(history[1].role, "assistant");
+    CHECK_EQ(history[1].content, "Let me look.");
+    CHECK(history[1].tool_calls.empty());
+}
+
+void test_timeout() {
+    Round silent;
+    silent.hang = true;
+    Round answer;
+    answer.text = {"in time"};
+
+    Harness harness({answer, silent});
+
+    // A deadline the call meets changes nothing.
+    const client::GenerateResult result =
+        harness.client.chat({{"user", "hello"}}, params, nullptr, {.timeout = std::chrono::seconds(10)});
+    CHECK(result.reason == client::FinishReason::Eog);
+
+    int code = 0;
+    try {
+        harness.client.chat({{"user", "hello"}}, params, nullptr, {.timeout = std::chrono::milliseconds(50)});
+    } catch (const client::RpcError & e) {
+        code = e.code;
+    }
+    CHECK(code == 4);   // DEADLINE_EXCEEDED
+}
+
 }  // namespace
 
 int main() {
@@ -489,6 +626,11 @@ int main() {
     test_typed_reply_that_does_not_fit_throws();
     test_typed_reply_with_stop_reason();
     test_typed_reply_stopped_mid_document();
+    test_stop_from_another_thread();
+    test_stop_before_the_call();
+    test_stop_after_the_final_chunk();
+    test_stop_before_tools_run();
+    test_timeout();
 
     return tests::report();
 }
