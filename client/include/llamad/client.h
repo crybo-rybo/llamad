@@ -104,28 +104,43 @@ consteval std::span<const char * const> argument_descriptions() {
     return std::define_static_array(texts);
 }
 
-/// Invoke the reflected function with its argument members in parameter order.
-template <std::meta::info Function, typename Args, std::size_t... I>
-decltype(auto) apply(const Args & arguments, std::index_sequence<I...>) {
-    return [:Function:](arguments.[: json::detail::fields_of(^^Args)[I] :]...);
+/// Whether a function is called on an object, and so needs one to be registered with.
+consteval bool is_member_function(std::meta::info function) {
+    return std::meta::is_class_member(function) && !std::meta::is_static_member(function);
 }
 
-/// Parses one call's arguments and runs the function. A std::string result is what the model
-/// reads; anything else is written as JSON.
-template <std::meta::info Function>
-std::string run(const std::string & arguments_json) {
+/// Invoke the reflected function with its argument members in parameter order, on the object
+/// when it is a member function.
+template <std::meta::info Function, typename Args, std::size_t... I, typename... Object>
+decltype(auto) apply(const Args & arguments, std::index_sequence<I...>, Object &... object) {
+    return std::invoke(&[:Function:], object..., arguments.[: json::detail::fields_of(^^Args)[I] :]...);
+}
+
+/// Parses one call's arguments and runs the function, on the object when it is a member
+/// function. A std::string result is what the model reads; anything else is written as JSON.
+template <std::meta::info Function, typename... Object>
+std::string run(const std::string & arguments_json, Object &... object) {
     using Args = Arguments<Function>;
 
     Args arguments;
     json::read(arguments_json, arguments);
 
-    decltype(auto) result =
-        apply<Function>(arguments, std::make_index_sequence<json::detail::fields_of(^^Args).size()>{});
+    decltype(auto) result = apply<Function>(
+        arguments, std::make_index_sequence<json::detail::fields_of(^^Args).size()>{}, object...);
     if constexpr (std::is_same_v<std::remove_cvref_t<decltype(result)>, std::string>) {
         return result;
     } else {
         return json::write(result);
     }
+}
+
+/// The definition that travels with a request: the function's name, its description and the
+/// schema of its parameter list.
+template <std::meta::info Function>
+Tool definition() {
+    return {std::define_static_string(std::meta::identifier_of(Function)),
+            json::detail::description<Function>(),
+            json::schema<Arguments<Function>>(argument_descriptions<Function>())};
 }
 
 }  // namespace detail
@@ -140,8 +155,12 @@ std::string run(const std::string & arguments_json) {
 ///     ToolSet tools;
 ///     tools.add<^^get_current_time>();
 ///
-/// Free and static functions only. A tool returning std::string is handed to the model as it is;
-/// any other return type is written as JSON.
+/// A tool that needs state is a member function, registered with the object it is called on:
+///
+///     tools.add<^^Inventory::take>(inventory);
+///
+/// A tool returning std::string is handed to the model as it is; any other return type is
+/// written as JSON.
 class ToolSet {
 public:
     /// Register a free or static function, deriving its name, schema and descriptions.
@@ -150,6 +169,13 @@ public:
     /// Register before concurrent use; definitions and dispatch share registration order.
     template <std::meta::info Function>
     void add();
+
+    /// Register a member function, called on object each time the model asks for it; the name,
+    /// schema and descriptions come from the function as for add().
+    /// The ToolSet holds a reference: object must outlive it and every copy of it.
+    /// @tparam Function Reflection of a non-static member function of Object or of its base.
+    template <std::meta::info Function, typename Object>
+    void add(Object & object);
 
     /// What travels with a request; this is all the daemon ever sees of a tool.
     const std::vector<Tool> & definitions() const { return definitions_; }
@@ -169,12 +195,22 @@ private:
 
 template <std::meta::info Function>
 void ToolSet::add() {
-    using Args = detail::Arguments<Function>;
+    static_assert(!detail::is_member_function(Function),
+                  "add<F>(): a member function is registered with its object, add<F>(object)");
 
-    definitions_.push_back({std::define_static_string(std::meta::identifier_of(Function)),
-                            json::detail::description<Function>(),
-                            json::schema<Args>(detail::argument_descriptions<Function>())});
+    definitions_.push_back(detail::definition<Function>());
     invoke_.push_back(&detail::run<Function>);
+}
+
+template <std::meta::info Function, typename Object>
+void ToolSet::add(Object & object) {
+    static_assert(detail::is_member_function(Function),
+                  "add<F>(object): F must be a non-static member function");
+
+    definitions_.push_back(detail::definition<Function>());
+    invoke_.push_back([&object](const std::string & arguments_json) {
+        return detail::run<Function>(arguments_json, object);
+    });
 }
 
 /// One history turn; the full ordered history travels with every chat request.

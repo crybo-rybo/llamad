@@ -65,6 +65,22 @@ std::string get_time() {
     return "12:00";
 }
 
+// Tools that share state: member functions, each call made on the one object they were added with.
+class Pantry {
+public:
+    [[=desc{"Eat some apples and say how many are left."}]]
+    int eat([[=desc{"How many to eat."}]] int apples) {
+        apples_ -= apples;
+        return apples_;
+    }
+
+    [[=desc{"Count the apples left."}]]
+    int count() const { return apples_; }
+
+private:
+    int apples_ = 10;
+};
+
 int invocation_count = 0;
 
 uint32_t count_items(uint32_t count) {
@@ -173,6 +189,27 @@ void test_tool_without_arguments() {
     CHECK_EQ(tools.call({"call_1", "get_time", R"({"zone":"UTC"})"}), "12:00");
 }
 
+void test_member_functions() {
+    Pantry          pantry;
+    const Pantry &  shelf = pantry;
+    client::ToolSet tools;
+    tools.add<^^Pantry::eat>(pantry);
+    tools.add<^^Pantry::count>(shelf);   // a const member function binds to a const object
+
+    CHECK(tools.definitions().size() == 2);
+    CHECK_EQ(tools.definitions()[0].name, "eat");
+    CHECK_EQ(tools.definitions()[0].description, "Eat some apples and say how many are left.");
+    CHECK_EQ(tools.definitions()[0].parameters_json_schema,
+             R"({"type":"object","properties":{"apples":{"type":"integer","description":"How many to eat."}},)"
+             R"("required":["apples"]})");
+    CHECK_EQ(tools.definitions()[1].name, "count");
+    CHECK_EQ(tools.definitions()[1].parameters_json_schema, R"({"type":"object","properties":{},"required":[]})");
+
+    CHECK_EQ(tools.call({"call_0", "eat", R"({"apples":3})"}), "7");
+    CHECK_EQ(tools.call({"call_1", "count", "{}"}), "7");
+    CHECK(pantry.count() == 7);   // the calls ran on the object itself, not a copy
+}
+
 }  // namespace
 
 int main() {
@@ -182,6 +219,7 @@ int main() {
     test_call_never_throws();
     test_checked_arguments_and_results();
     test_tool_without_arguments();
+    test_member_functions();
 
     return tests::report();
 }

@@ -95,6 +95,23 @@ auto result = client.chat(history, tools, params, [](const std::string & text) {
 });                                         // history holds every turn the answer took
 ```
 
+A tool that needs state, such as an open document or a game world, is a member function,
+registered with the object it is called on. The tool's name is the member's name:
+
+```cpp
+class Inventory {
+public:
+    [[=desc{"Take items out of stock and say how many are left."}]]
+    int take([[=desc{"Item name"}]] std::string item, int count);
+};
+
+Inventory inventory;
+tools.add<^^Inventory::take>(inventory);
+```
+
+The tool set holds a reference to `inventory`, so the object must outlive the tool set and
+every copy of it.
+
 A tool returning `std::string` is handed to the model as it is; any other return type
 is written as JSON, as are the arguments read out of a call. A function with no parameters
 is a tool that takes no arguments: its schema is an object with no properties, and the
