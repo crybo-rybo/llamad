@@ -234,10 +234,11 @@ enum class FinishReason {
 
 /// Token counts and wall-clock milliseconds for one generation, excluding queue time.
 struct GenerateStats {
-    int32_t prompt_tokens     = 0;  ///< Number of prompt tokens decoded, including special tokens.
-    int32_t completion_tokens = 0;  ///< Generated non-EOG tokens, including any withheld stop or tool markup.
-    double  prompt_ms         = 0;  ///< Prompt decoding time in milliseconds, including backend synchronization.
-    double  completion_ms     = 0;  ///< Generation time in milliseconds, including streaming callback time.
+    int32_t prompt_tokens        = 0;  ///< Prompt length in tokens, including special tokens and cached ones.
+    int32_t completion_tokens    = 0;  ///< Generated non-EOG tokens, including any withheld stop or tool markup.
+    double  prompt_ms            = 0;  ///< Time decoding the uncached prompt tokens, in ms, including backend synchronization.
+    double  completion_ms        = 0;  ///< Generation time in milliseconds, including streaming callback time.
+    int32_t cached_prompt_tokens = 0;  ///< Leading prompt tokens the daemon reused from its KV cache instead of decoded.
 };
 
 /// Generation outcome; streamed text is delivered separately through the callback.

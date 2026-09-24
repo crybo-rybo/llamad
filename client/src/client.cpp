@@ -267,11 +267,12 @@ GenerateResult Client::chat(std::vector<ChatMessage> & history,
             return on_chunk ? on_chunk(text) : true;
         }, options);
 
-        total.prompt_tokens     += result.stats.prompt_tokens;
-        total.completion_tokens += result.stats.completion_tokens;
-        total.prompt_ms         += result.stats.prompt_ms;
-        total.completion_ms     += result.stats.completion_ms;
-        result.stats             = total;
+        total.prompt_tokens        += result.stats.prompt_tokens;
+        total.completion_tokens    += result.stats.completion_tokens;
+        total.prompt_ms            += result.stats.prompt_ms;
+        total.completion_ms        += result.stats.completion_ms;
+        total.cached_prompt_tokens += result.stats.cached_prompt_tokens;
+        result.stats                = total;
 
         // A stop that lands after the model asked for tools still calls the turn off: none of
         // them run, and their calls are dropped along with the reason, so history is left without

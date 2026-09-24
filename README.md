@@ -7,6 +7,7 @@ llama.cpp, and without paying the model load time in every process.
 
 - Local only: a Unix socket created 0600, no TCP listener.
 - Stateless: clients resend history; tools travel with each request and are never executed by the daemon.
+  The KV cache keeps the prefix a resent history shares with the previous request, so a turn decodes only its new tokens.
 - llama.cpp is an unmodified, pinned submodule. CPU, Vulkan (Linux) and Metal (macOS) backends.
 
 ## Requirements

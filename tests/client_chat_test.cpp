@@ -289,10 +289,10 @@ void test_two_calls_in_one_round() {
 
 void test_stats_are_summed_over_rounds() {
     Round asking        = tool_round({{"call_0", "shout", R"({"word":"Oslo"})"}});
-    asking.stats        = {10, 5, 1.5, 2.5};
+    asking.stats        = {10, 5, 1.5, 2.5, 0};
     Round answer;
     answer.text  = {"ok"};
-    answer.stats = {20, 7, 3.0, 4.0};
+    answer.stats = {20, 7, 3.0, 4.0, 9};
 
     Harness harness({asking, answer});
 
@@ -303,6 +303,7 @@ void test_stats_are_summed_over_rounds() {
     CHECK(result.stats.completion_tokens == 12);
     CHECK(result.stats.prompt_ms == 4.5);
     CHECK(result.stats.completion_ms == 6.5);
+    CHECK(result.stats.cached_prompt_tokens == 9);
 }
 
 // A model that keeps asking spends the budget and stops, with the last round's results in history.

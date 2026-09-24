@@ -8,11 +8,21 @@
   tool-call parsers and its JSON-Schema-to-grammar converter, which is unstable
   and not a public API, so a submodule bump can break at most that single file.
 - **The daemon is stateless per request.** No sessions, no registries, no state carried
-  between calls. Clients resend history; tools travel with each request as opaque data and
-  are never executed or validated by the daemon.
+  between calls that a request's meaning depends on. Clients resend history; tools travel
+  with each request as opaque data and are never executed or validated by the daemon.
+- **The KV cache outlives a request, as a cache.** The engine records the tokens the KV
+  cache holds after each request: the prompt and every generated token it decoded. The next
+  request keeps the longest prefix its prompt shares with them and decodes only the rest, so
+  a chat turn or a tool round pays for its new messages rather than the whole history; at
+  least the prompt's last token is always decoded, because sampling needs its logits. Any
+  failed decode empties the cache and the record together, and a model whose memory cannot
+  drop part of a sequence (recurrent and hybrid models) or no longer holds its start (a
+  sliding-window cache) falls back to an empty cache. The cache changes how long a prompt
+  takes, never which prompt runs; but llama.cpp does not promise bit-for-bit identical logits
+  for different batch splits, so a greedy reply from a warm cache can differ from the one a
+  freshly started daemon gives. `cached_prompt_tokens` in the stats says how much was reused.
 - **v1 serves one generation at a time.** The engine serializes `generate`, so
-  concurrent clients queue rather than sharing the context. Each request starts
-  from an empty KV cache.
+  concurrent clients queue rather than sharing the context.
 - **Stream shape.** Zero or more text chunks, then exactly one final chunk carrying
   `finish_reason` and `stats`. Tool calls arrive whole on that final chunk, and `tool_calls`
   is non-empty if and only if the finish reason is `TOOL_CALLS`. Text chunks carry

@@ -200,9 +200,11 @@ const int kMaxToolRounds = 8;
 /// Print the one-line generation summary every turn ends with.
 void print_stats(const llamad::client::GenerateResult & result) {
     std::fprintf(stderr,
-                 "[stats] finish=%s prompt_tokens=%d completion_tokens=%d prompt_ms=%.1f completion_ms=%.1f\n",
+                 "[stats] finish=%s prompt_tokens=%d cached_prompt_tokens=%d completion_tokens=%d "
+                 "prompt_ms=%.1f completion_ms=%.1f\n",
                  reason_name(result.reason),
                  result.stats.prompt_tokens,
+                 result.stats.cached_prompt_tokens,
                  result.stats.completion_tokens,
                  result.stats.prompt_ms,
                  result.stats.completion_ms);

@@ -243,10 +243,10 @@ int main(int argc, char ** argv) {
 
             std::fflush(stdout);
             std::fprintf(stderr,
-                         "\nfinish: %s  prompt_tokens: %d  completion_tokens: %d  "
+                         "\nfinish: %s  prompt_tokens: %d  cached_prompt_tokens: %d  completion_tokens: %d  "
                          "prompt_ms: %.1f  completion_ms: %.1f  chunks: %ld\n",
                          reason_name(result.reason), result.stats.prompt_tokens,
-                         result.stats.completion_tokens, result.stats.prompt_ms,
+                         result.stats.cached_prompt_tokens, result.stats.completion_tokens, result.stats.prompt_ms,
                          result.stats.completion_ms, chunks);
 
             if (stream) {

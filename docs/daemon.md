@@ -24,7 +24,13 @@ script inherits SIGINT ignored, and macOS discards a signal that is both ignored
 stop one started that way with SIGTERM.
 
 The engine serves one generation at a time: concurrent clients queue rather than sharing the
-context, and each request starts from an empty KV cache.
+context. The KV cache keeps what the previous request decoded, and a request decodes only the
+part of its prompt after the prefix the two share, so a chat turn or a tool round pays for its
+new messages rather than the whole history. `cached_prompt_tokens`, in the stats and in the
+daemon's log line, is the number of prompt tokens reused. A reused prefix was decoded in a
+different batch split than a cold run would use, and the logits are not bit-for-bit identical
+across batch splits, so a `--temp 0` reply from a warm cache can differ from a freshly started
+daemon's.
 
 ## Chat from the terminal
 
@@ -45,7 +51,7 @@ call the model makes; [client.md](client.md) explains what that involves.
 ./build-cpu/client/llamad-chat --demo-tools --once "What time is it in Tokyo right now?" --temp 0
 # [tool] get_current_time(Asia/Tokyo) -> 2026-09-21 08:44:44 JST
 # The current time in Tokyo is 2026-09-21 08:44:44 JST.
-# [stats] finish=eog prompt_tokens=461 completion_tokens=52 ...
+# [stats] finish=eog prompt_tokens=465 cached_prompt_tokens=219 completion_tokens=52 ...
 ```
 
 `--demo-json` runs one turn whose reply is constrained to a struct's JSON Schema, streams the

@@ -68,8 +68,14 @@ agreement first, not a clever workaround.
    (proto ↔ `service.cpp` ↔ `client.h` / `client.cpp`). `tests/contract_test.cpp` fails the build
    when a mirror struct and the message it mirrors disagree, in either direction.
 4. **The daemon is stateless per request.** No sessions, no registries, no state carried between
-   calls. Clients resend history; tools travel with each request as opaque data and are never
-   executed or validated by the daemon.
+   calls that a request's meaning depends on. Clients resend history; tools travel with each
+   request as opaque data and are never executed or validated by the daemon. The one thing that
+   outlives a request is the engine's KV cache, and it is a performance cache only: the engine
+   records the tokens the cache holds, a request decodes just the part of its prompt after the
+   prefix it shares with them, and every path out of `generate` leaves the record matching the
+   cache or empties both. It changes how long a prompt takes, never which prompt runs. Decoding
+   the same tokens in a different batch split is not bit-for-bit identical, though, so a greedy
+   reply from a warm cache can differ from a freshly started daemon's.
 5. **Stream shape.** Zero or more text chunks, then exactly one final chunk carrying
    `finish_reason` and `stats`. Tool calls arrive whole on that final chunk, and `tool_calls` is
    non-empty if and only if the finish reason is `TOOL_CALLS`. Text chunks carry user-visible
@@ -157,10 +163,13 @@ Match the effort to the risk, and report what you actually ran.
 - Engine, service or client changes: exercise the real path. `engine_smoke` covers the engine
   alone (`--stop`, `--cancel-after`, `--grammar-file`, `--chat --demo-tool`); `llamad-chat --once`
   against a running daemon covers the full stack (`--demo-tools` for the tool loop, `--demo-json`
-  for a typed reply). Use `--temp 0` for repeatable output. The preferred local smoke-test model
-  is `models/qwen2.5-0.5b-instruct-q4_k_m.gguf`, unless the behaviour needs a stronger one.
-  Pass its path explicitly to `./scripts/smoke-test.sh cpu` or `./scripts/smoke-test.sh gpu`;
-  the script requires a model argument, and model files are local and gitignored.
+  for a typed reply). Use `--temp 0` for repeatable output; only a cold KV cache repeats exactly
+  (boundary 4), so compare first requests to freshly started processes. The prompt-cache
+  bookkeeping that needs no model is checked in `tests/engine_test.cpp`. The preferred local
+  smoke-test model is `models/qwen2.5-0.5b-instruct-q4_k_m.gguf`, unless the behaviour needs a
+  stronger one. Pass its path explicitly to `./scripts/smoke-test.sh cpu` or
+  `./scripts/smoke-test.sh gpu`; the script requires a model argument, and model files are local
+  and gitignored.
 - CI builds Linux CPU-only with GCC and runs the tests. It does not exercise GPU execution or
   load a model, so inference paths are only verified locally. Say so when that is the case
   rather than implying coverage.

@@ -531,6 +531,10 @@ struct Engine::Impl {
 
     std::mutex generate_mutex;  ///< Serializes requests sharing the context and KV cache.
 
+    /// The tokens sequence 0 of the KV cache holds, in position order. Only decode() and
+    /// clear_cache() change the cache after construction, and both keep this in step with it.
+    std::vector<llama_token> cached;
+
     /// Release the context before the model it borrows.
     ~Impl() {
         if (ctx != nullptr) {
@@ -539,6 +543,47 @@ struct Engine::Impl {
         if (model != nullptr) {
             llama_model_free(model);
         }
+    }
+
+    /// Empty the KV cache and its record.
+    void clear_cache() {
+        llama_memory_clear(llama_get_memory(ctx), /*data*/ true);
+        cached.clear();
+    }
+
+    /// Trims the KV cache to the part of it `prompt` starts with and returns that part's length.
+    /// Falls back to an empty cache when the memory refuses to drop part of a sequence (recurrent
+    /// and hybrid models can) or no longer holds position 0 (a recurrent state, or a
+    /// sliding-window cache that has let old tokens go), since it cannot vouch for the prefix then.
+    size_t keep_prefix(const std::vector<llama_token> & prompt) {
+        const size_t   keep = reusable_prefix(cached, prompt);
+        llama_memory_t mem  = llama_get_memory(ctx);
+        if (keep == 0 || !llama_memory_seq_rm(mem, 0, static_cast<llama_pos>(keep), -1) ||
+            llama_memory_seq_pos_min(mem, 0) != 0) {
+            clear_cache();
+            return 0;
+        }
+        cached.resize(keep);
+        return keep;
+    }
+
+    /// Decodes `n` tokens after the cached ones and records them. A failed decode can leave part
+    /// of the batch in the cache, so it empties the cache instead: a miss on the next request is
+    /// cheap, a record that disagrees with the cache would silently corrupt it.
+    int32_t decode(llama_token * tokens, size_t n) {
+        int32_t ret = 0;
+        try {
+            ret = llama_decode(ctx, llama_batch_get_one(tokens, static_cast<int32_t>(n)));
+        } catch (...) {
+            clear_cache();
+            throw;
+        }
+        if (ret != 0) {
+            clear_cache();
+            return ret;
+        }
+        cached.insert(cached.end(), tokens, tokens + n);
+        return 0;
     }
 
     /// Query the vocabulary for required capacity, then tokenize into an owned buffer.
@@ -632,6 +677,18 @@ struct Engine::Impl {
 // ---------------------------------------------------------------------------
 // Engine
 // ---------------------------------------------------------------------------
+
+size_t reusable_prefix(const std::vector<int32_t> & cached, const std::vector<int32_t> & prompt) {
+    if (prompt.empty()) {
+        return 0;
+    }
+    const size_t limit = std::min(cached.size(), prompt.size() - 1);
+    size_t       n     = 0;
+    while (n < limit && cached[n] == prompt[n]) {
+        ++n;
+    }
+    return n;
+}
 
 std::vector<DeviceInfo> Engine::list_devices() {
     init_llama_once();
@@ -792,9 +849,6 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
                                 const ChunkCallback & on_chunk) {
     std::lock_guard<std::mutex> lock(impl_->generate_mutex);
 
-    llama_memory_t mem = llama_get_memory(impl_->ctx);
-    llama_memory_clear(mem, /*data*/ true);
-
     std::vector<int32_t> tokens = impl_->tokenize(prompt, /*add_special*/ true, /*parse_special*/ true);
     if (tokens.empty()) {
         throw EngineError("the prompt tokenized to zero tokens");
@@ -817,12 +871,15 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
     SamplerChain sampler(impl_->vocab, params, resolved);
 
     // --- prompt ---------------------------------------------------------
-    const auto t_prompt = std::chrono::steady_clock::now();
-    for (size_t off = 0; off < tokens.size();) {
-        const size_t n_chunk = std::min<size_t>(impl_->n_batch, tokens.size() - off);
+    // Everything above leaves the cache alone, so a request refused there costs the next one
+    // nothing.
+    const size_t kept                 = impl_->keep_prefix(tokens);
+    result.stats.cached_prompt_tokens = static_cast<int32_t>(kept);
 
-        llama_batch   batch = llama_batch_get_one(tokens.data() + off, static_cast<int32_t>(n_chunk));
-        const int32_t ret   = llama_decode(impl_->ctx, batch);
+    const auto t_prompt = std::chrono::steady_clock::now();
+    for (size_t off = kept; off < tokens.size();) {
+        const size_t  n_chunk = std::min<size_t>(impl_->n_batch, tokens.size() - off);
+        const int32_t ret     = impl_->decode(tokens.data() + off, n_chunk);
         if (ret != 0) {
             throw EngineError("llama_decode failed on the prompt (code " + std::to_string(ret) + ")");
         }
@@ -874,15 +931,15 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
         }
 
         // Room for one more token in the context?
-        const int32_t n_used = llama_memory_seq_pos_max(mem, 0) + 1;
-        if (n_used + 1 > static_cast<int32_t>(impl_->n_ctx_seq)) {
+        if (impl_->cached.size() + 1 > impl_->n_ctx_seq) {
             result.reason = FinishReason::Length;
             break;
         }
 
-        llama_token   next  = token;
-        llama_batch   batch = llama_batch_get_one(&next, 1);
-        const int32_t ret   = llama_decode(impl_->ctx, batch);
+        // Only a token the loop goes on from is decoded: the one that ends it (EOG, a stop, a
+        // cancel, the budget) never reaches the cache.
+        llama_token   next = token;
+        const int32_t ret  = impl_->decode(&next, 1);
         if (ret != 0) {
             if (ret > 0) {
                 // No KV slot: the context is full for practical purposes.
