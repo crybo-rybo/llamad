@@ -83,3 +83,15 @@ registered with `ToolSet::add`; the client runs the execute-and-resend loop.
 | [docs/design.md](docs/design.md) | Design notes: layering, stream shape, chat templates |
 | `./scripts/docs.sh` | Doxygen API reference in `build-docs/html/` (needs CMake and Doxygen 1.17) |
 | `AGENTS.md` | Layout and rules for changing the code |
+
+## License
+
+llamad is released under the MIT License ([LICENSE](LICENSE)).
+
+It builds against:
+
+- llama.cpp (MIT)
+- gRPC (Apache-2.0)
+- Protobuf (BSD-3-Clause)
+- Abseil (Apache-2.0)
+- nlohmann/json (MIT, vendored with llama.cpp)
