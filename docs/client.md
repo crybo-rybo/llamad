@@ -3,17 +3,39 @@
 ## Linking
 
 ```cmake
-add_subdirectory(llamad EXCLUDE_FROM_ALL)   # the repo root, not client/
-target_link_libraries(myapp PRIVATE llamad_client)
+include(FetchContent)
+FetchContent_Declare(llamad
+    GIT_REPOSITORY https://github.com/crybo-rybo/llamad.git
+    GIT_TAG        main                    # better, a commit
+    GIT_SUBMODULES "")                     # the client needs nothing from llama.cpp
+FetchContent_MakeAvailable(llamad)
+
+target_link_libraries(myapp PRIVATE llamad::client)
 ```
 
-`EXCLUDE_FROM_ALL` means only what `myapp` links gets built: the client and the
-generated protobuf code, not llama.cpp or the daemon.
+Included by another project, with `FetchContent` or `add_subdirectory`, llamad builds in
+client-only mode (`LLAMAD_CLIENT_ONLY`, on unless llamad is the top-level project): the
+client, `llamad::client`, and the generated protocol code, `llamad::proto`, and nothing else.
+No llama.cpp, so no submodules to clone; no daemon, no C compiler, and no tests registered with
+your CTest. Your build type and compile-commands settings are left alone.
 
-`llamad/client.h` exposes no gRPC or protobuf types, so your build needs neither
-on its include path. It does reflect over your own tool functions, so linking
-`llamad_client` puts C++26, `-freflection` and nlohmann's include directory on
-whatever includes it.
+It still needs, found through their CMake configs:
+
+- gRPC and Protobuf. On macOS, the ones `scripts/build-deps-macos.sh` builds, with its
+  `build-deps/prefix` on your `CMAKE_PREFIX_PATH` (see [building.md](building.md)).
+- nlohmann/json: your project's `nlohmann_json::nlohmann_json` target if it defines one before
+  including llamad, or else an installed package (`pacman -S nlohmann-json`,
+  `brew install nlohmann-json`). There is only ever one copy of the header in your build.
+
+`llamad/client.h` exposes no gRPC or protobuf types, so your build needs neither on its
+include path. It does reflect over your own tool functions, so linking `llamad::client` puts
+C++26, `-freflection` and nlohmann's include directory on whatever includes it, and your code
+is compiled with GCC 16 or later too.
+
+`llamad::proto` is the service itself, generated from `llamad.proto`, for a test that needs a
+daemon but no model: implement `llamad::v1::Llama::Service` with scripted replies, serve it on
+a private socket and point a `Client` at it. `tests/consumer/` is such a project, built by CI
+against every commit.
 
 ## Streaming chat
 

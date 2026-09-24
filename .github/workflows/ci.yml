@@ -51,3 +51,42 @@ jobs:
 
       - name: Run tests
         run: ctest --test-dir build --output-on-failure --no-tests=error
+
+  client-consumer:
+    name: Client from another CMake project
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # nlohmann-json stands in for the copy an application brings: without llama.cpp there is no
+      # vendored one.
+      - name: Install dependencies
+        run: pacman -Syu --noconfirm --needed git cmake ninja grpc protobuf nlohmann-json
+
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # tests/consumer fetches llamad the way an application does, with no submodules; here it
+      # fetches this checkout's commit. The container runs as root over a workspace it does not
+      # own, which git refuses to clone from unless told the directory is safe.
+      - name: Configure consumer
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cmake -S tests/consumer -B build-consumer -G Ninja \
+            -DLLAMAD_GIT_REPOSITORY="$GITHUB_WORKSPACE" \
+            -DLLAMAD_GIT_TAG="$(git rev-parse HEAD)"
+
+      - name: Build consumer
+        run: cmake --build build-consumer --parallel 2
+
+      # Only the consumer's own test: llamad registers none in a project that includes it.
+      - name: Run consumer test
+        run: |
+          ctest --test-dir build-consumer -N | tee ctest-list.txt
+          grep -q "Total Tests: 1$" ctest-list.txt
+          ctest --test-dir build-consumer --output-on-failure --no-tests=error

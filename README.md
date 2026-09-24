@@ -50,9 +50,19 @@ The project ships no model. Any GGUF works; the daemon takes `--socket`, `--ctx`
 ## Use it from your own project
 
 ```cmake
-add_subdirectory(llamad EXCLUDE_FROM_ALL)   # the repo root, not client/
-target_link_libraries(myapp PRIVATE llamad_client)
+include(FetchContent)
+FetchContent_Declare(llamad
+    GIT_REPOSITORY https://github.com/crybo-rybo/llamad.git
+    GIT_TAG        main                    # better, a commit
+    GIT_SUBMODULES "")                     # the client needs nothing from llama.cpp
+FetchContent_MakeAvailable(llamad)
+
+target_link_libraries(myapp PRIVATE llamad::client)
 ```
+
+Included by another project, llamad builds only the client and its protocol code
+(`llamad::proto`): no llama.cpp, no daemon, no tests. It needs gRPC, Protobuf and nlohmann/json
+from your build or your system; [docs/client.md](docs/client.md#linking) has the details.
 
 ```cpp
 #include <llamad/client.h>
