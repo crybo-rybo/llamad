@@ -24,7 +24,7 @@ struct EngineConfig {
     std::string model_path;           ///< Path to a readable GGUF model file.
     uint32_t    n_ctx        = 4096;  ///< Requested context capacity in tokens; must be positive.
     int32_t     n_gpu_layers = 99;    ///< Number of layers to offload; zero selects CPU-only execution.
-    int32_t     n_threads    = 0;     ///< Inference threads; zero chooses half the hardware threads, with a minimum of one.
+    int32_t     n_threads    = 0;     ///< Inference threads; zero chooses half the hardware threads for generation and all of them for prompts.
 
     /// Names of the devices to offload to, as reported by Engine::list_devices() (e.g. "Vulkan0").
     /// Empty = llama.cpp's default: every discrete GPU, or the integrated GPU if there is none.

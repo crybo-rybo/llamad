@@ -31,7 +31,8 @@ struct EngineFlags {
     [[=cli::help{"N", "layers to offload to the GPU (default 99)"}]]
     int32_t ngl = 99;  ///< Number of model layers to offload; zero disables offload.
 
-    [[=cli::help{"N", "threads for inference, 0 = auto, half the hardware threads (default 0)"}]]
+    [[=cli::help{"N", "threads for inference, 0 = auto: half the hardware threads\n"
+                        "to generate, all of them for prompts (default 0)"}]]
     int32_t threads = 0;  ///< Non-negative thread count; zero selects the engine default.
 
     [[=cli::help{"NAMES", "comma-separated devices to offload to (default: every discrete GPU)"}]]
