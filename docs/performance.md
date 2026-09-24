@@ -37,10 +37,13 @@ CPU-only build (`cpu`). Tokens per second, median of 5 runs (3 for `cpu`).
 
 | Build | Model | pp128 | pp512 | pp2048 | tg greedy | tg sampled | tg after 2048 | tg json |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| gpu | Qwen2.5 0.5B Instruct Q4_K_M | 4454 | 5437 | 5028 | 193.4 | 195.2 | 187.0 | 53.9 |
-| gpu | Qwen3 0.6B Q8_0 | 3995 | 4443 | 3694 | 146.6 | 145.5 | 115.5 | 58.8 |
-| cpu | Qwen2.5 0.5B Instruct Q4_K_M | 511 | 489 | 405 | 195.9 | 196.8 | 133.0 | 56.8 |
-| cpu | Qwen3 0.6B Q8_0 | 1116 | 872 | 456 | 143.4 | 143.2 | 56.7 | 57.9 |
+| gpu | Qwen2.5 0.5B Instruct Q4_K_M | 4583 | 5509 | 5224 | 204.9 | 204.0 | 196.0 | 201.4 |
+| gpu | Qwen3 0.6B Q8_0 | 4046 | 4519 | 3791 | 153.5 | 153.1 | 121.6 | 151.5 |
+| cpu | Qwen2.5 0.5B Instruct Q4_K_M | 860 | 1072 | 933 | 216.5 | 216.2 | 159.4 | 210.2 |
+| cpu | Qwen3 0.6B Q8_0 | 1158 | 978 | 596 | 158.7 | 158.5 | 71.4 | 149.7 |
+
+Short prompts on the CPU vary by up to 20% between runs, because prompt decoding uses the
+efficiency cores as well as the performance cores.
 
 For scale, llama.cpp's own `llama-bench` at the pinned commit measures the Qwen2.5 model on the
 Metal build at 5562 (pp512) and 208.7 (tg128). It decodes without reading logits, so it can
