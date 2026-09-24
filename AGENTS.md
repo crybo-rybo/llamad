@@ -28,6 +28,7 @@ single source of truth for how things work.
 | `src/engine_flags.h` | The context and offload flags `llamad` and `engine_smoke` share, the `EngineConfig` they describe, and `print_device_table` for `--list-devices`. |
 | `client/` | Client library (`include/llamad/client.h`, `src/client.cpp`) and `llamad-chat` (`examples/chat_cli.cpp`). `include/llamad/json.h` maps reflected tool arguments, results and schemas to nlohmann/json and reports what does not fit as `json::Error`; `client.h` includes it, so an application still includes one header. |
 | `tests/` | Plain-executable tests registered with CTest, needing no model file and sharing the `CHECK` macros in `check.h`, and `engine_smoke.cpp`: a CLI that drives the engine and chat layer in-process, with no daemon and no gRPC. |
+| `tests/consumer/` | A separate CMake project that pulls llamad in with `FetchContent` and no submodules, the way an application does, and links `llamad::client` and `llamad::proto`. Included by another project, llamad builds client-only (`LLAMAD_CLIENT_ONLY`); CI builds and runs this against each commit. |
 | `third_party/llama.cpp` | Pinned, unmodified submodule. |
 | `models/` | Local GGUF files. Gitignored; not available in CI. |
 
