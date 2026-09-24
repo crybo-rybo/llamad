@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <ranges>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -404,7 +405,10 @@ class SamplerChain {
 public:
     /// Allocate and populate a sampler chain; release it on construction failure.
     SamplerChain(const llama_vocab * vocab, const SamplingParams & params, const ResolvedTokens & resolved) :
-        n_vocab_(llama_vocab_n_tokens(vocab)) {
+        n_vocab_(llama_vocab_n_tokens(vocab)),
+        n_selectable_(params.temperature <= 0.0f ? 1
+                      : params.top_k > 0         ? std::min(params.top_k, n_vocab_)
+                                                 : n_vocab_) {
         llama_sampler_chain_params cparams = llama_sampler_chain_default_params();
         cparams.no_perf                    = true;
 
@@ -433,21 +437,21 @@ public:
     /// Choose the next token from the logits of the last decoded position and accept it into
     /// every sampler, which advances the grammar and fires its lazy triggers.
     llama_token sample(llama_context * ctx) {
-        if (grammar_ == nullptr) {
-            return llama_sampler_sample(chain_, ctx, /*idx*/ -1);
+        llama_token token = choose(ctx, n_selectable_, /*apply_grammar*/ false);
+
+        if (grammar_ != nullptr) {
+            // A lazy grammar that has not triggered leaves the logit alone, so this check passes.
+            llama_token_data       single       = { token, /*logit*/ 1.0f, /*p*/ 0.0f };
+            llama_token_data_array single_array = { &single, /*size*/ 1, /*selected*/ -1, /*sorted*/ false };
+            llama_sampler_apply(grammar_, &single_array);
+            if (single.logit == -INFINITY) {
+                // The grammar may refuse every token the chain alone could select, so the retry
+                // starts from the whole vocabulary.
+                token = choose(ctx, n_vocab_, /*apply_grammar*/ true);
+            }
+            llama_sampler_accept(grammar_, token);
         }
 
-        llama_token token = choose(ctx, /*apply_grammar*/ false);
-
-        // A lazy grammar that has not triggered leaves the logit alone, so this check passes.
-        llama_token_data       single       = { token, /*logit*/ 1.0f, /*p*/ 0.0f };
-        llama_token_data_array single_array = { &single, /*size*/ 1, /*selected*/ -1, /*sorted*/ false };
-        llama_sampler_apply(grammar_, &single_array);
-        if (single.logit == -INFINITY) {
-            token = choose(ctx, /*apply_grammar*/ true);
-        }
-
-        llama_sampler_accept(grammar_, token);
         llama_sampler_accept(chain_, token);
         return token;
     }
@@ -461,6 +465,12 @@ private:
         // alone and reruns the chain behind the grammar only when it is refused, as
         // common/sampling.cpp does. Greedy decoding picks the same token either way: the most
         // likely one the grammar allows.
+        //
+        // The chain below can only ever select among the highest logits: greedy the single highest,
+        // top-k the k highest. sample() therefore hands it only those, n_selectable_ of them, since
+        // filling and scanning a candidate for every token of a ~150k vocabulary is a measurable
+        // share of decode time. The chain's own top-k still sorts them, so top-p, min-p, temp and
+        // dist see the candidates they would over the whole vocabulary.
         if (!params.grammar.grammar.empty()) {
             add_grammar(vocab, params, resolved);
         }
@@ -518,12 +528,23 @@ private:
         }
     }
 
-    /// Run the chain, behind the grammar when asked, over the full vocabulary and return its choice.
-    llama_token choose(llama_context * ctx, bool apply_grammar) {
+    /// Run the chain, behind the grammar when asked, over the `count` highest logits and return its
+    /// choice. A count below the vocabulary size is only correct without the grammar.
+    llama_token choose(llama_context * ctx, int32_t count, bool apply_grammar) {
         const float * logits = llama_get_logits_ith(ctx, /*i*/ -1);
-        candidates_.resize(n_vocab_);
-        for (llama_token id = 0; id < n_vocab_; ++id) {
-            candidates_[id] = { id, logits[id], /*p*/ 0.0f };
+        const auto    vocab  = std::views::iota(0, n_vocab_) | std::views::transform([logits](llama_token id) {
+            return llama_token_data{ id, logits[id], /*p*/ 0.0f };
+        });
+
+        candidates_.resize(count);
+        if (count == n_vocab_) {
+            std::ranges::copy(vocab, candidates_.begin());
+        } else if (count == 1) {
+            // max_element keeps the first of equal maxima, as llama.cpp's greedy sampler does.
+            candidates_[0] = *std::ranges::max_element(vocab, {}, &llama_token_data::logit);
+        } else {
+            std::ranges::partial_sort_copy(vocab, candidates_, std::ranges::greater{}, &llama_token_data::logit,
+                                           &llama_token_data::logit);
         }
 
         llama_token_data_array array = { candidates_.data(), candidates_.size(), /*selected*/ -1, /*sorted*/ false };
@@ -549,7 +570,8 @@ private:
         }
     }
 
-    const int32_t                 n_vocab_;            ///< Size of the candidate list the grammar path builds.
+    const int32_t                 n_vocab_;            ///< Candidates built when the chain keeps every token, or the grammar retries.
+    const int32_t                 n_selectable_;       ///< How many of the highest logits the chain can select from.
     llama_sampler *               chain_   = nullptr;  ///< Owned probability filters and final selection.
     llama_sampler *               grammar_ = nullptr;  ///< Owned grammar, or null when the request has none.
     std::vector<llama_token_data> candidates_;         ///< Reused per token to avoid a vocabulary-sized allocation.
