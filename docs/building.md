@@ -35,9 +35,12 @@ relatives cross their APIs, so GCC's libstdc++ cannot link against them.
 project uses, and installs it under `build-deps/`. It takes about fifteen minutes and a gigabyte.
 
 `./scripts/build.sh` then compiles llama.cpp's C and Objective-C Metal sources with Apple clang,
-which GCC cannot parse, and every C++ source with `g++-16`. Accelerate and BLAS are off, because
-their headers do not compile with GCC; that costs only prompt-processing speed on the CPU path.
-It also names the CPU's features for ggml (`-march=armv8.2-a+fp16+dotprod+...`, from `sysctl
+which GCC cannot parse, and every C++ source with `g++-16`. Accelerate's umbrella header does not
+compile with GCC, so ggml's Accelerate paths are off; its BLAS backend still reaches
+Accelerate's BLAS through vecLib's plain `cblas.h`, which cuts CPU prompt-processing time for
+K-quant models by about 40%.
+
+`build.sh` also names the CPU's features for ggml (`-march=armv8.2-a+fp16+dotprod+...`, from `sysctl
 hw.optional.arm`) instead of relying on `-mcpu=native`: GCC's native CPU for Apple silicon lacks
 FP16 vector arithmetic, which ggml's attention over the F16 KV cache runs on.
 

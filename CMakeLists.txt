@@ -43,6 +43,13 @@ if(NOT LLAMAD_CLIENT_ONLY)
     set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
     set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
     add_subdirectory(third_party/llama.cpp EXCLUDE_FROM_ALL)
+
+    # On macOS, build.sh points ggml's BLAS backend at vecLib's cblas.h, whose classic interface
+    # Apple marks deprecated in favour of one GCC cannot compile. The warning is about
+    # llama.cpp's source, not this project's.
+    if(TARGET ggml-blas)
+        target_compile_options(ggml-blas PRIVATE -Wno-deprecated-declarations)
+    endif()
 endif()
 
 # llamad is written in C++26 and relies on static reflection (<meta>), which GCC enables with
