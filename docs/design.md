@@ -45,6 +45,13 @@
   reply with one matching JSON object; that is what carries its property
   descriptions to the model, and it takes the place of a template's own default
   system prompt.
+- **One model, one kind of work.** A model whose GGUF declares a pooling type is an embedding
+  model: the daemon serves `Embed` and refuses `Generate` and `Chat`; any other model is the
+  reverse, and the refusal is `FAILED_PRECONDITION`. Pooling runs over the micro-batch a
+  sequence is decoded in, and an encoder's non-causal attention cannot split a sequence at all,
+  so each input is decoded whole, one per `llama_decode`. On the CPU that is as fast as packing
+  several inputs into one decode as separate sequences, which would also mean a context sized
+  for many sequences. Vectors are always L2-normalised.
 - **Errors are typed.** Caller mistakes map to `INVALID_ARGUMENT`, a missing capability to
   `FAILED_PRECONDITION`, everything else to `INTERNAL`.
 

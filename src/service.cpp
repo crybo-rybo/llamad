@@ -63,6 +63,14 @@ grpc::Status guarded(const char * rpc_name, Body && body) {
     }
 }
 
+/// Why Generate and Chat refuse an embedding model.
+constexpr const char * kEmbeddingModel = "the model is an embedding model: it serves Embed, not Generate or Chat";
+
+/// Milliseconds since `started`, for the per-request log line.
+double ms_since(std::chrono::steady_clock::time_point started) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+}
+
 }  // namespace
 
 grpc::Status LlamaService::GetModelInfo(grpc::ServerContext *,
@@ -167,9 +175,7 @@ grpc::Status LlamaService::stream_generation(const char * rpc_name,
         }
     }
 
-    const double wall_ms =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
-    log_request(rpc_name, result.stats, wire::value_name(reason), wall_ms,
+    log_request(rpc_name, result.stats, wire::value_name(reason), ms_since(started),
                 stream != nullptr ? static_cast<int>(tool_calls.size()) : -1);
 
     return grpc::Status::OK;
@@ -179,6 +185,9 @@ grpc::Status LlamaService::Generate(grpc::ServerContext * context,
                                     const v1::GenerateRequest * request,
                                     grpc::ServerWriter<v1::GenerateChunk> * writer) {
     return guarded("Generate", [&] {
+        if (engine_.serves_embeddings()) {
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, kEmbeddingModel);
+        }
         return stream_generation("Generate", context, request->prompt(), from_proto(request->sampling()), writer,
                                  /*stream*/ nullptr);
     });
@@ -190,6 +199,9 @@ grpc::Status LlamaService::Chat(grpc::ServerContext * context,
     return guarded("Chat", [&] {
         if (request->messages().empty()) {
             return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "messages must not be empty");
+        }
+        if (engine_.serves_embeddings()) {
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, kEmbeddingModel);
         }
         if (chat_format_ == nullptr) {
             return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, chat_unavailable_reason_);
@@ -223,6 +235,37 @@ grpc::Status LlamaService::Chat(grpc::ServerContext * context,
         ChatFormat::Stream stream = chat_format_->stream(rendered);
 
         return stream_generation("Chat", context, rendered.prompt, params, writer, &stream);
+    });
+}
+
+grpc::Status LlamaService::Embed(grpc::ServerContext * context,
+                                 const v1::EmbedRequest * request,
+                                 v1::EmbedResponse * response) {
+    return guarded("Embed", [&] {
+        if (request->inputs().empty()) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "inputs must not be empty");
+        }
+        if (!engine_.serves_embeddings()) {
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                                "the model is not an embedding model: its GGUF declares no pooling type");
+        }
+
+        const auto        started = std::chrono::steady_clock::now();
+        const EmbedResult result  = engine_.embed({request->inputs().begin(), request->inputs().end()},
+                                                  [context] { return !context->IsCancelled(); });
+
+        // The engine stops short of the whole batch only when the client has gone (a cancel or
+        // a deadline), and then the vectors it did make have no one to go to.
+        const bool cancelled = result.embeddings.size() < static_cast<size_t>(request->inputs().size());
+        std::fprintf(stderr, "[llamad] Embed inputs=%d embedded=%zu input_tokens=%d%s %.0fms\n",
+                     request->inputs().size(), result.embeddings.size(), result.input_tokens,
+                     cancelled ? " cancelled" : "", ms_since(started));
+        if (cancelled) {
+            return grpc::Status(grpc::StatusCode::CANCELLED, "the client cancelled the call");
+        }
+
+        wire::to_proto(result, response);
+        return grpc::Status::OK;
     });
 }
 

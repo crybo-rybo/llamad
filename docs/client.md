@@ -79,7 +79,7 @@ auto result = client.chat(history, params, on_chunk,
 - A stop cancels the call even when no text is arriving: while the daemon reads a long prompt,
   while it serves another client first, during a tool-call round. A streaming call returns
   `FinishReason::Cancelled`, unless its final chunk had already arrived, whose reason stands.
-  `get_model_info` and `tokenize` throw `RpcError` with code `CANCELLED` (1).
+  `get_model_info`, `tokenize` and `embed` throw `RpcError` with code `CANCELLED` (1).
 - The timeout applies to each RPC, from its start. When it runs out the call throws `RpcError`
   with code `DEADLINE_EXCEEDED` (4), so a `get_model_info` with a short timeout is a health
   check that cannot hang.
@@ -225,6 +225,30 @@ annotations on `T` reach the model as property descriptions and can steer the an
 `llamad-chat --demo-json` is that worked through end to end
 (`client/examples/chat_cli.cpp`): it asks for a verdict like this one on a single message,
 streams the JSON and prints the fields.
+
+## Embeddings
+
+A daemon serving an embedding model answers `embed`, which takes a batch of texts and returns
+one vector per text, in order:
+
+```cpp
+llamad::client::Client client("/tmp/embed.sock");
+
+auto result = client.embed({"How do I bake sourdough?", "Sourdough needs a starter.", "Tax law"});
+const std::vector<float> & query = result.embeddings[0].values;   // ModelInfo::n_embd values
+```
+
+Every vector is L2-normalised, so the dot product of two is their cosine similarity; there is no
+option to get them unnormalised. `result.input_tokens` counts the tokens across every input.
+`get_model_info()` says whether the daemon serves embeddings and how long the vectors are.
+
+- A daemon serving a generative model refuses `embed`, and an embedding daemon refuses
+  `generate` and `chat`, both with `RpcError` code `FAILED_PRECONDITION` (9).
+- An empty batch, or an input longer than the daemon's per-input limit (at most 512 tokens),
+  is `INVALID_ARGUMENT` (3), and no vectors come back.
+- An instruction prefix a model expects on queries is part of the text you send.
+
+`llamad-chat --embed` is that worked through (`client/examples/chat_cli.cpp`).
 
 ### Not supported
 

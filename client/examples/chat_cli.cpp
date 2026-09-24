@@ -1,7 +1,8 @@
 /** @file
  * @brief Interactive chat client with annotated time-tool and typed-reply examples.
  *
- * llamad-chat: a multi-turn chat REPL against a running llamad daemon.
+ * llamad-chat: a multi-turn chat REPL against a running llamad daemon, or with --embed a
+ * one-shot embedding against a daemon serving an embedding model.
  * It uses only <llamad/client.h>: no gRPC or protobuf headers anywhere.
  */
 
@@ -113,6 +114,11 @@ struct Options {
             "its fields; one turn, then exit"}]]
     bool demo_json = false;  ///< Ask the model for a fixed struct and print the fields; one turn, then exit.
 
+    [[=help{"TEXT", "embed TEXT with the daemon's embedding model (repeatable),\n"
+                    "print each vector's first values and its cosine with the\n"
+                    "first TEXT, and exit"}]]
+    std::vector<std::string> embed;  ///< Texts to embed in one request instead of chatting.
+
     // Hidden, for testing cancellation: cancel the turn after N chunks.
     std::optional<long> cancel_after;  ///< Hidden test flag: cancel after this many delivered chunks.
 };
@@ -208,6 +214,27 @@ void print_stats(const llamad::client::GenerateResult & result) {
                  result.stats.completion_tokens,
                  result.stats.prompt_ms,
                  result.stats.completion_ms);
+}
+
+/// One line per vector: its first values and its cosine with the first input's, which for the
+/// unit vectors the daemon returns is just their dot product.
+void print_embeddings(const llamad::client::EmbedResult & result) {
+    const std::vector<float> & first = result.embeddings.front().values;
+    for (size_t i = 0; i < result.embeddings.size(); ++i) {
+        const std::vector<float> & values = result.embeddings[i].values;
+        double cosine = 0.0;
+        for (size_t k = 0; k < values.size() && k < first.size(); ++k) {
+            cosine += static_cast<double>(values[k]) * first[k];
+        }
+        std::printf("embedding %zu: cosine with 0: %.4f  values:", i, cosine);
+        for (size_t k = 0; k < values.size() && k < 4; ++k) {
+            std::printf(" %.6f", values[k]);
+        }
+        std::printf(" ...\n");
+    }
+    std::fflush(stdout);
+    std::fprintf(stderr, "[stats] inputs=%zu n_embd=%zu input_tokens=%d\n", result.embeddings.size(),
+                 first.size(), result.input_tokens);
 }
 
 /// Runs one turn: streams the reply to stdout while the client appends every assistant and
@@ -344,6 +371,9 @@ int main(int argc, char ** argv) {
         if (options.demo_json && (options.once || options.demo_tools)) {
             throw llamad::cli::FlagError("--demo-json cannot be combined with --once or --demo-tools");
         }
+        if (!options.embed.empty() && (options.once || options.demo_tools || options.demo_json)) {
+            throw llamad::cli::FlagError("--embed cannot be combined with --once, --demo-tools or --demo-json");
+        }
     } catch (const llamad::cli::FlagError & e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         print_usage(argv[0]);
@@ -380,6 +410,11 @@ int main(int argc, char ** argv) {
 
     try {
         llamad::client::Client client(socket_path);
+
+        if (!options.embed.empty()) {
+            print_embeddings(client.embed(options.embed));
+            return 0;
+        }
 
         if (options.demo_json) {
             run_json_demo(client, history, sampling);

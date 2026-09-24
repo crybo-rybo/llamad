@@ -30,12 +30,16 @@ static_assert(wire::mirrors<client::GenerateStats, v1::GenerateStats>());
 static_assert(wire::mirrors<client::Tool, v1::Tool>());
 static_assert(wire::mirrors<client::ToolCall, v1::ToolCall>());
 static_assert(wire::mirrors<client::ChatMessage, v1::ChatMessage>());
+static_assert(wire::mirrors<client::Embedding, v1::Embedding>());
+static_assert(wire::mirrors<client::EmbedResult, v1::EmbedResponse>());
 
 static_assert(wire::mirrors<llamad::ModelInfo, v1::ModelInfo>());
 static_assert(wire::mirrors<llamad::GenerateStats, v1::GenerateStats>());
 static_assert(wire::mirrors<llamad::Tool, v1::Tool>());
 static_assert(wire::mirrors<llamad::ToolCall, v1::ToolCall>());
 static_assert(wire::mirrors<llamad::ChatMessage, v1::ChatMessage>());
+static_assert(wire::mirrors<llamad::Embedding, v1::Embedding>());
+static_assert(wire::mirrors<llamad::EmbedResult, v1::EmbedResponse>());
 
 // And the guard itself. Each struct below differs from the message in exactly one way that the
 // converters would carry out silently, or not at all; drifted() is mirrors() with the compile
@@ -49,6 +53,8 @@ struct NarrowedParams {
     uint32_t    n_ctx             = 0;
     uint32_t    n_ctx_train       = 0;
     bool        has_chat_template = false;
+    uint32_t    n_embd            = 0;
+    bool        serves_embeddings = false;
 };
 static_assert(wire::drifted<NarrowedParams, v1::ModelInfo>());
 
@@ -59,6 +65,8 @@ struct OptionalNCtx {
     std::optional<uint32_t> n_ctx;  // the message's n_ctx has no presence
     uint32_t                n_ctx_train       = 0;
     bool                    has_chat_template = false;
+    uint32_t                n_embd            = 0;
+    bool                    serves_embeddings = false;
 };
 static_assert(wire::drifted<OptionalNCtx, v1::ModelInfo>());
 
@@ -86,6 +94,11 @@ struct LongTool {
     std::string returns_json_schema;  // the message has no such field
 };
 static_assert(wire::drifted<LongTool, v1::Tool>());
+
+struct DoubleEmbedding {
+    std::vector<double> values;  // the message says `repeated float`
+};
+static_assert(wire::drifted<DoubleEmbedding, v1::Embedding>());
 
 // Instantiating enum_cast without a fallback demands a twin for every value of the source enum,
 // so these also fail the build if either FinishReason gains a value llamad.proto does not name.
@@ -154,6 +167,29 @@ void test_sampling_params_round_trip() {
     CHECK(back.stop == params.stop);
 }
 
+// A repeated message whose own field is repeated: both levels have to survive the trip, in order.
+void test_embed_result_round_trip() {
+    llamad::EmbedResult result;
+    result.embeddings.push_back({{0.6f, 0.8f}});
+    result.embeddings.push_back({{1.0f, 0.0f}});
+    result.input_tokens = 7;
+
+    v1::EmbedResponse proto;
+    wire::to_proto(result, &proto);
+
+    CHECK(proto.embeddings().size() == 2);
+    CHECK(proto.embeddings(0).values().size() == 2);
+    CHECK(proto.embeddings(0).values(1) == 0.8f);
+    CHECK(proto.embeddings(1).values(0) == 1.0f);
+    CHECK(proto.input_tokens() == 7);
+
+    const client::EmbedResult back = wire::from_proto<client::EmbedResult>(proto);
+    CHECK(back.embeddings.size() == 2);
+    CHECK(back.embeddings[0].values == result.embeddings[0].values);
+    CHECK(back.embeddings[1].values == result.embeddings[1].values);
+    CHECK(back.input_tokens == 7);
+}
+
 void test_finish_reason_names() {
     CHECK(std::string(wire::value_name(v1::FINISH_REASON_TOOL_CALLS)) == "TOOL_CALLS");
     CHECK(std::string(wire::value_name(v1::FINISH_REASON_EOG)) == "EOG");
@@ -169,6 +205,7 @@ void test_finish_reason_names() {
 int main() {
     test_chat_message_round_trip();
     test_sampling_params_round_trip();
+    test_embed_result_round_trip();
     test_finish_reason_names();
 
     return tests::report();

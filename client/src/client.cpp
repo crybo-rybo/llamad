@@ -245,6 +245,20 @@ GenerateResult Client::chat_request(const std::vector<ChatMessage> & messages,
     return impl_->consume(call.context, reader, on_chunk, options.stop);
 }
 
+EmbedResult Client::embed(const std::vector<std::string> & inputs, const CallOptions & options) {
+    CallContext call(options);
+
+    v1::EmbedRequest request;
+    request.mutable_inputs()->Add(inputs.begin(), inputs.end());
+
+    v1::EmbedResponse  response;
+    const grpc::Status status = impl_->stub->Embed(&call.context, request, &response);
+    if (!status.ok()) {
+        throw_rpc_error(status);
+    }
+    return wire::from_proto<EmbedResult>(response);
+}
+
 GenerateResult Client::chat(std::vector<ChatMessage> & history,
                             const ToolSet & tools,
                             const SamplingParams & params,

@@ -1,10 +1,11 @@
 /** @file
- * @brief Tool-loop, typed-reply and history contracts against a scripted service on a private socket.
+ * @brief Tool-loop, typed-reply, history and embedding contracts against a scripted service on a private socket.
  *
- * Client::chat, against a scripted fake daemon on a private Unix socket. No model and no
- * inference: the fake replays canned rounds, so what is under test is the history the loop
- * builds, the requests it sends, its summed stats, where it stops, what chat<T> makes of a
- * reply the daemon says is finished, and how a call is stopped or timed out from outside it.
+ * Client::chat and Client::embed, against a scripted fake daemon on a private Unix socket. No
+ * model and no inference: the fake replays canned rounds, so what is under test is the history
+ * the loop builds, the requests it sends, its summed stats, where it stops, what chat<T> makes of
+ * a reply the daemon says is finished, how a call is stopped or timed out from outside it, and
+ * that embed() hands back each input's vector in order.
  */
 
 #include "check.h"
@@ -131,6 +132,27 @@ public:
         writer->Write(final_chunk);
         return grpc::Status::OK;
     }
+
+    // Each input's vector is its length and its position, so the caller can tell which is which.
+    grpc::Status Embed(grpc::ServerContext *,
+                       const v1::EmbedRequest * request,
+                       v1::EmbedResponse * response) override {
+        if (!serves_embeddings) {
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "not an embedding model");
+        }
+        int32_t tokens = 0;
+        for (int i = 0; i < request->inputs_size(); ++i) {
+            v1::Embedding * embedding = response->add_embeddings();
+            embedding->add_values(static_cast<float>(request->inputs(i).size()));
+            embedding->add_values(static_cast<float>(i));
+            tokens += static_cast<int32_t>(request->inputs(i).size());
+        }
+        response->set_input_tokens(tokens);
+        return grpc::Status::OK;
+    }
+
+    /// Set before a call, which then reaches Embed after it.
+    bool serves_embeddings = true;
 
     // Chat runs on a gRPC server thread, so the assertions read a copy taken under the lock.
     std::vector<std::vector<client::ChatMessage>> requests() const {
@@ -612,6 +634,49 @@ void test_timeout() {
     CHECK(code == 4);   // DEADLINE_EXCEEDED
 }
 
+void test_embed_returns_vectors_in_order() {
+    Harness harness({Round{}});
+
+    const client::EmbedResult result = harness.client.embed({"cat", "kitten", ""});
+
+    CHECK(result.embeddings.size() == 3);
+    CHECK((result.embeddings[0].values == std::vector<float>{3.0f, 0.0f}));
+    CHECK((result.embeddings[1].values == std::vector<float>{6.0f, 1.0f}));
+    CHECK((result.embeddings[2].values == std::vector<float>{0.0f, 2.0f}));
+    CHECK(result.input_tokens == 9);
+}
+
+// A daemon without an embedding model says so with FAILED_PRECONDITION, which the caller sees as
+// the RpcError's code.
+void test_embed_refused() {
+    Harness harness({Round{}});
+    harness.daemon.serves_embeddings = false;
+
+    int code = 0;
+    try {
+        harness.client.embed({"cat"});
+    } catch (const client::RpcError & e) {
+        code = e.code;
+    }
+    CHECK(code == static_cast<int>(grpc::StatusCode::FAILED_PRECONDITION));
+}
+
+// A stop cancels embed() like any other call, and it throws, having no partial result to return.
+void test_embed_stopped() {
+    Harness harness({Round{}});
+
+    std::stop_source stop;
+    stop.request_stop();
+
+    int code = 0;
+    try {
+        harness.client.embed({"cat"}, {.stop = stop.get_token()});
+    } catch (const client::RpcError & e) {
+        code = e.code;
+    }
+    CHECK(code == static_cast<int>(grpc::StatusCode::CANCELLED));
+}
+
 }  // namespace
 
 int main() {
@@ -632,6 +697,9 @@ int main() {
     test_stop_after_the_final_chunk();
     test_stop_before_tools_run();
     test_timeout();
+    test_embed_returns_vectors_in_order();
+    test_embed_refused();
+    test_embed_stopped();
 
     return tests::report();
 }

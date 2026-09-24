@@ -189,13 +189,19 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    const llamad::ModelInfo info = engine->info();
+
     // One ChatFormat for the whole daemon: it is immutable, so every request renders and parses
     // through it concurrently (the per-request parser state is a separate Stream). A model with no
     // usable template still serves Generate, Tokenize and GetModelInfo; only Chat is refused, and
-    // a template that will not parse is a warning rather than a reason not to start.
+    // a template that will not parse is a warning rather than a reason not to start. An embedding
+    // model serves no Chat at all, so its template is not looked at.
     std::unique_ptr<llamad::ChatFormat> chat_format;
     std::string chat_unavailable_reason = "the model has no built-in chat template";
-    {
+    if (info.serves_embeddings) {
+        std::fprintf(stderr, "[llamad] embedding model (n_embd=%u): serves Embed; Generate and Chat are disabled\n",
+                     info.n_embd);
+    } else {
         const llamad::ChatTemplateInfo tmpl = engine->chat_template();
         if (!tmpl.source.empty()) {
             try {
@@ -244,7 +250,6 @@ int main(int argc, char ** argv) {
         server->Shutdown(std::chrono::system_clock::now() + std::chrono::milliseconds(500));
     });
 
-    const llamad::ModelInfo info = engine->info();
     std::fprintf(stderr, "[llamad] model: %s (n_ctx=%u)\n", info.description.c_str(), info.n_ctx);
     std::fprintf(stderr, "[llamad] listening on unix:%s\n", socket_path.c_str());
     std::fflush(stderr);

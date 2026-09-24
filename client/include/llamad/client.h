@@ -35,6 +35,8 @@ struct ModelInfo {
     uint32_t    n_ctx             = 0;      ///< Actual context capacity configured by the daemon, in tokens.
     uint32_t    n_ctx_train       = 0;      ///< Training context length recorded by the model, in tokens.
     bool        has_chat_template = false;  ///< Whether the model stores a template; does not guarantee it parses successfully.
+    uint32_t    n_embd            = 0;      ///< Length of every vector embed() returns; zero unless serves_embeddings.
+    bool        serves_embeddings = false;  ///< An embedding model: embed() is served, generate() and chat() are not.
 };
 
 /// Unset fields use the daemon defaults (see llamad.proto).
@@ -258,6 +260,17 @@ struct Typed {
     GenerateResult   result;  ///< Reason generation ended, plus the stats for it.
 };
 
+/// One input's embedding: ModelInfo::n_embd values, L2-normalised to unit length.
+struct Embedding {
+    std::vector<float> values;  ///< Unit-length vector, so a dot product of two is their cosine.
+};
+
+/// The vectors for a batch of inputs and the tokens it took.
+struct EmbedResult {
+    std::vector<Embedding> embeddings;        ///< One per input, in input order.
+    int32_t                input_tokens = 0;  ///< Tokens decoded across every input, including special tokens.
+};
+
 /// Called with each piece of generated text, in order. Return false to cancel the request.
 using ChunkCallback = std::function<bool(const std::string & text)>;
 
@@ -274,7 +287,8 @@ struct CallOptions {
     /// request_stop() on its source, from any thread, cancels the call even while no text is
     /// arriving: a long prompt, a queue behind another client, a tool-call round, a wedged daemon.
     /// A streaming call then returns FinishReason::Cancelled, unless its final chunk had already
-    /// arrived, whose reason stands. get_model_info() and tokenize() throw RpcError with CANCELLED (1).
+    /// arrived, whose reason stands. get_model_info(), tokenize() and embed() throw RpcError with
+    /// CANCELLED (1).
     std::stop_token stop;
     /// Time allowed for each RPC, from its start. When it runs out the call throws RpcError with
     /// DEADLINE_EXCEEDED (4).
@@ -386,6 +400,17 @@ public:
                   const SamplingParams & params,
                   const ChunkCallback & on_chunk,
                   const CallOptions & options = {});
+
+    /// Embed each input on its own with the daemon's embedding model.
+    /// @param inputs Texts to embed; must not be empty, and each must fit the daemon's per-input
+    ///        token limit.
+    /// @param options Stop token and deadline for the call.
+    /// @return One L2-normalised vector per input, in input order, so the dot product of two is
+    ///         their cosine similarity.
+    /// @throws RpcError FAILED_PRECONDITION if the daemon's model is not an embedding model,
+    ///         INVALID_ARGUMENT for no inputs or an input that is too long, CANCELLED (1) or
+    ///         DEADLINE_EXCEEDED (4) from options, or a transport failure.
+    EmbedResult embed(const std::vector<std::string> & inputs, const CallOptions & options = {});
 
 private:
     /// One Chat request: the tools overload of chat() and the typed chat() are both written over it.
