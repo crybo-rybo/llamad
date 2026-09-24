@@ -851,7 +851,18 @@ Engine::Engine(const EngineConfig & config) : impl_(new Impl()) {
     cparams.n_threads       = n_threads;
     cparams.n_threads_batch = n_threads;
 
-    impl_->ctx = llama_init_from_model(impl_->model, cparams);
+    // Generation reads only the logits of a batch's last token, so the context reserves one
+    // output per micro-batch rather than one per token. A vocabulary's worth of floats per token
+    // is most of the compute buffer: this takes Qwen2.5 0.5B's on Metal from 298 MiB to 36 MiB.
+    // Pooling reads every token's output, so a model that pools gets its context again with
+    // llama.cpp's default.
+    cparams.n_outputs_max = 1;
+    impl_->ctx            = llama_init_from_model(impl_->model, cparams);
+    if (impl_->ctx != nullptr && llama_pooling_type(impl_->ctx) != LLAMA_POOLING_TYPE_NONE) {
+        llama_free(impl_->ctx);
+        cparams.n_outputs_max = 0;
+        impl_->ctx            = llama_init_from_model(impl_->model, cparams);
+    }
     if (impl_->ctx == nullptr) {
         throw EngineError("failed to create a llama context for '" + config.model_path + "'");
     }
