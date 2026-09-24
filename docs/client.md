@@ -96,11 +96,12 @@ auto result = client.chat(history, tools, params, [](const std::string & text) {
 ```
 
 A tool returning `std::string` is handed to the model as it is; any other return type
-is written as JSON, as are the arguments read out of a call. A tool that does not
-exist, arguments that do not parse and an exception thrown by the tool all become an
-`{"error":"..."}` result the model can recover from. The loop stops after eight rounds
-of tool calls, which the caller sees as a `ToolCalls` result; that limit is `chat`'s last
-argument and must be positive.
+is written as JSON, as are the arguments read out of a call. A function with no parameters
+is a tool that takes no arguments: its schema is an object with no properties, and the
+model calls it with `{}`. A tool that does not exist, arguments that do not parse and an
+exception thrown by the tool all become an `{"error":"..."}` result the model can recover
+from. The loop stops after eight rounds of tool calls, which the caller sees as a
+`ToolCalls` result; that limit is `chat`'s last argument and must be positive.
 
 `llamad-chat --demo-tools` is that worked through end to end
 (`client/examples/chat_cli.cpp`): it offers one `get_current_time` tool and answers

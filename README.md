@@ -69,7 +69,8 @@ auto result = client.chat({{"user", "Name three primes."}}, params,
 ```
 
 `llamad/client.h` exposes no gRPC or protobuf types. Tools are plain C++ functions
-registered with `ToolSet::add`; the client runs the execute-and-resend loop.
+registered with `ToolSet::add`, with or without parameters; the client runs the
+execute-and-resend loop.
 `chat<T>` returns the reply as an instance of a reflected struct, constrained by its schema.
 [docs/client.md](docs/client.md) has the full walkthrough.
 

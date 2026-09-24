@@ -238,6 +238,20 @@ void test_schema() {
     CHECK(schema["required"] == nlohmann::json::array({"points"}));
 }
 
+// A tool that takes no arguments has this as its argument struct.
+struct Nothing {};
+
+void test_empty_struct() {
+    CHECK_EQ(json::schema<Nothing>(), R"({"type":"object","properties":{},"required":[]})");
+    CHECK_EQ(json::write(Nothing{}), "{}");
+
+    Nothing nothing;
+    json::read("{}", nothing);
+    json::read(R"({"unexpected":[1,2]})", nothing);   // unknown keys are ignored, as for any struct
+    CHECK(rejects<Nothing>("[]"));
+    CHECK(rejects<Nothing>("null"));
+}
+
 }  // namespace
 
 int main() {
@@ -248,6 +262,7 @@ int main() {
     test_reflected_result();
     test_vectors_and_enums();
     test_schema();
+    test_empty_struct();
 
     return tests::report();
 }

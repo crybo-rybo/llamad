@@ -60,6 +60,11 @@ std::string fails_with_a_stray_byte() {
     throw std::runtime_error("cannot read caf\xe9");
 }
 
+[[=desc{"Say what time it is."}]]
+std::string get_time() {
+    return "12:00";
+}
+
 int invocation_count = 0;
 
 uint32_t count_items(uint32_t count) {
@@ -155,6 +160,19 @@ void test_checked_arguments_and_results() {
     CHECK(result.at("error") == "json: non-finite number");
 }
 
+void test_tool_without_arguments() {
+    client::ToolSet tools;
+    tools.add<^^get_time>();
+
+    const client::Tool & tool = tools.definitions().front();
+    CHECK_EQ(tool.name, "get_time");
+    CHECK_EQ(tool.description, "Say what time it is.");
+    CHECK_EQ(tool.parameters_json_schema, R"({"type":"object","properties":{},"required":[]})");
+
+    CHECK_EQ(tools.call({"call_0", "get_time", "{}"}), "12:00");
+    CHECK_EQ(tools.call({"call_1", "get_time", R"({"zone":"UTC"})"}), "12:00");
+}
+
 }  // namespace
 
 int main() {
@@ -163,6 +181,7 @@ int main() {
     test_call_reports_failures();
     test_call_never_throws();
     test_checked_arguments_and_results();
+    test_tool_without_arguments();
 
     return tests::report();
 }
