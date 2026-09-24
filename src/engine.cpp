@@ -676,27 +676,31 @@ struct Engine::Impl {
         return 0;
     }
 
-    /// Query the vocabulary for required capacity, then tokenize into an owned buffer.
+    /// Tokenize into an owned buffer, in one pass unless the text needs more tokens than bytes.
     std::vector<int32_t> tokenize(const std::string & text, bool add_special, bool parse_special) const {
-        // llama_tokenize returns -(number of tokens) when the buffer is too small.
-        int32_t n = llama_tokenize(vocab, text.c_str(), static_cast<int32_t>(text.size()), nullptr, 0,
-                                   add_special, parse_special);
+        static_assert(std::is_same<llama_token, int32_t>::value, "llama_token must be int32_t");
+
+        // A token almost always spans at least one byte, and add_special adds only a few, so this
+        // buffer is nearly always big enough: measuring first would tokenize everything twice.
+        // llama_tokenize returns -(number of tokens) when it is not.
+        std::vector<int32_t> tokens(text.size() + 8);
+        const auto           fill = [&] {
+            return llama_tokenize(vocab, text.c_str(), static_cast<int32_t>(text.size()), tokens.data(),
+                                  static_cast<int32_t>(tokens.size()), add_special, parse_special);
+        };
+
+        int32_t n = fill();
         if (n == INT32_MIN) {
             throw EngineError("tokenization overflowed int32");
         }
         if (n < 0) {
-            n = -n;
+            tokens.resize(static_cast<size_t>(-n));
+            n = fill();
         }
-
-        static_assert(std::is_same<llama_token, int32_t>::value, "llama_token must be int32_t");
-
-        std::vector<int32_t> tokens(static_cast<size_t>(n));
-        const int32_t written = llama_tokenize(vocab, text.c_str(), static_cast<int32_t>(text.size()),
-                                               tokens.data(), n, add_special, parse_special);
-        if (written < 0) {
+        if (n < 0) {
             throw EngineError("failed to tokenize the input text");
         }
-        tokens.resize(static_cast<size_t>(written));
+        tokens.resize(static_cast<size_t>(n));
         return tokens;
     }
 
