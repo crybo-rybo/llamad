@@ -464,13 +464,18 @@ private:
         // token the chain chooses is usually one the grammar allows. sample() checks that token
         // alone and reruns the chain behind the grammar only when it is refused, as
         // common/sampling.cpp does. Greedy decoding picks the same token either way: the most
-        // likely one the grammar allows.
+        // likely one the grammar allows. Sampled decoding does not draw from quite the distribution
+        // a grammar ahead of the chain gives: an allowed token the unconstrained chain draws is
+        // kept, and only a refusal redraws among the allowed tokens alone, so the allowed tokens
+        // the model itself ranks highest come up somewhat more often. That is llama.cpp's own
+        // default, and every reply still satisfies the grammar.
         //
         // The chain below can only ever select among the highest logits: greedy the single highest,
         // top-k the k highest. sample() therefore hands it only those, n_selectable_ of them, since
         // filling and scanning a candidate for every token of a ~150k vocabulary is a measurable
-        // share of decode time. The chain's own top-k still sorts them, so top-p, min-p, temp and
-        // dist see the candidates they would over the whole vocabulary.
+        // share of decode time. They arrive sorted, so the chain's top-k keeps them as they are and
+        // top-p, min-p, temp and dist see the candidates they would over the whole vocabulary;
+        // only the order among equal logits can differ from a sort of the whole vocabulary.
         if (!params.grammar.grammar.empty()) {
             add_grammar(vocab, params, resolved);
         }
@@ -547,7 +552,10 @@ private:
                                            &llama_token_data::logit);
         }
 
-        llama_token_data_array array = { candidates_.data(), candidates_.size(), /*selected*/ -1, /*sorted*/ false };
+        // Fewer candidates than the vocabulary are its highest logits in descending order, which
+        // the chain's top-k then leaves as they are; the whole vocabulary arrives in token order.
+        llama_token_data_array array = { candidates_.data(), candidates_.size(), /*selected*/ -1,
+                                         /*sorted*/ count < n_vocab_ };
         if (apply_grammar) {
             llama_sampler_apply(grammar_, &array);
         }
