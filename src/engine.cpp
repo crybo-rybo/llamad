@@ -867,9 +867,12 @@ Engine::Engine(const EngineConfig & config) : impl_(new Impl()) {
     // batch's last token, so it reserves one output per micro-batch rather than one per token; a
     // vocabulary's worth of floats per token is most of llama.cpp's default compute buffer. That
     // leaves room for a micro-batch as large as the batch, which decodes a long prompt in fewer,
-    // larger graphs, a few percent faster, still in half the compute buffer of llama.cpp's
-    // defaults (144 MiB rather than 298 for Qwen2.5 0.5B on Metal). Pooling reads every token's
-    // output, so a model that turns out to pool gets its context again with those defaults.
+    // larger graphs, a few percent faster. Activations grow with the micro-batch, though, so the
+    // net saving is largest for a small model with a large vocabulary (144 MiB rather than 298 for
+    // Qwen2.5 0.5B on Metal) and turns into a cost for a large model with a small one, or where
+    // flash attention is unavailable and attention scores scale with the micro-batch too. A device
+    // that cannot allocate that gets llama.cpp's defaults instead, as does a model that turns out
+    // to pool, since pooling reads every token's output.
     llama_context_params generation = cparams;
     generation.n_outputs_max        = 1;
     generation.n_ubatch             = generation.n_batch;
@@ -877,6 +880,9 @@ Engine::Engine(const EngineConfig & config) : impl_(new Impl()) {
     impl_->ctx = llama_init_from_model(impl_->model, generation);
     if (impl_->ctx != nullptr && llama_pooling_type(impl_->ctx) != LLAMA_POOLING_TYPE_NONE) {
         llama_free(impl_->ctx);
+        impl_->ctx = nullptr;
+    }
+    if (impl_->ctx == nullptr) {
         impl_->ctx = llama_init_from_model(impl_->model, cparams);
     }
     if (impl_->ctx == nullptr) {
