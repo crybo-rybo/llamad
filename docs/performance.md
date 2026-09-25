@@ -48,4 +48,5 @@ efficiency cores as well as the performance cores.
 For scale, llama.cpp's own `llama-bench` at the pinned commit measures the Qwen2.5 model on the
 Metal build at 5562 (pp512) and 208.7 (tg128). It decodes without reading logits, so it can
 queue the next token's work before the last one finishes; `generate` cannot, because each token
-depends on the one sampled before it.
+depends on the one sampled before it. Its tg128 is also 128 decodes, where `generate` decodes 127
+of the 128 tokens it samples: the one that ends a reply never enters the cache.
