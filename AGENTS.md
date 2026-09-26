@@ -27,7 +27,7 @@ single source of truth for how things work.
 | `src/cli/flags.h` | The one command-line parser and `--help` printer, over a struct whose members are a binary's flags. Target `llamad_flags` exposes only `src/cli`, so `llamad-chat` uses it without reaching a daemon header. |
 | `src/engine_flags.h` | The context and offload flags `llamad` and `engine_smoke` share, the `EngineConfig` they describe, and `print_device_table` for `--list-devices`. |
 | `client/` | Client library (`include/llamad/client.h`, `src/client.cpp`) and `llamad-chat` (`examples/chat_cli.cpp`). `include/llamad/json.h` maps reflected tool arguments, results and schemas to nlohmann/json and reports what does not fit as `json::Error`; `client.h` includes it, so an application still includes one header. |
-| `tests/` | Plain-executable tests registered with CTest, needing no model file and sharing the `CHECK` macros in `check.h`, and `engine_smoke.cpp`: a CLI that drives the engine and chat layer in-process, with no daemon and no gRPC. |
+| `tests/` | Plain-executable tests registered with CTest, needing no model file and sharing the `CHECK` macros in `check.h`. Two CLIs that need a model drive the engine and chat layer in-process, with no daemon and no gRPC: `engine_smoke.cpp` for behaviour, and `engine_bench.cpp` for prefill and decode speed (`scripts/bench.sh`, docs/performance.md). |
 | `tests/consumer/` | A separate CMake project that pulls llamad in with `FetchContent` and no submodules, the way an application does, and links `llamad::client` and `llamad::proto`. Included by another project, llamad builds client-only (`LLAMAD_CLIENT_ONLY`); CI builds and runs this against each commit. |
 | `third_party/llama.cpp` | Pinned, unmodified submodule. |
 | `models/` | Local GGUF files. Gitignored; not available in CI. |
@@ -170,6 +170,8 @@ Match the effort to the risk, and report what you actually ran.
   stronger one. Pass its path explicitly to `./scripts/smoke-test.sh cpu` or
   `./scripts/smoke-test.sh gpu`; the script requires a model argument, and model files are local
   and gitignored.
+- A change made for speed: measure it with `./scripts/bench.sh` against the build before it, run
+  in the same sitting, and put both numbers in the commit message (docs/performance.md).
 - CI builds Linux CPU-only with GCC and runs the tests. It does not exercise GPU execution or
   load a model, so inference paths are only verified locally. Say so when that is the case
   rather than implying coverage.

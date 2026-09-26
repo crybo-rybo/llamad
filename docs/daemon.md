@@ -11,7 +11,7 @@
 | `--socket PATH` | `$XDG_RUNTIME_DIR/llamad.sock`, else `/tmp/llamad-<uid>.sock` | Unix socket to listen on |
 | `--ctx N` | 4096 | context size in tokens |
 | `--ngl N` | 99 | layers to offload to the GPU; 0 disables offload |
-| `--threads N` | 0 | inference threads; 0 = auto, half the hardware threads |
+| `--threads N` | 0 | inference threads; 0 = auto: half the hardware threads to generate, all of them for prompts |
 | `--devices NAMES` | every discrete GPU | comma-separated offload devices, e.g. `Vulkan0` or `MTL0` |
 | `--tensor-split S` | by free memory | comma-separated share per device, e.g. `3,1` |
 | `--list-devices` | | print the devices this build can offload to, and exit |

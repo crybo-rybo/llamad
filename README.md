@@ -105,6 +105,7 @@ thread, and a timeout.
 | [docs/daemon.md](docs/daemon.md) | Daemon flags, socket, signals, `llamad-chat` and `engine_smoke` |
 | [docs/client.md](docs/client.md) | Client library, tool calling, typed replies, embeddings, JSON conversions |
 | [docs/design.md](docs/design.md) | Design notes: layering, stream shape, chat templates |
+| [docs/performance.md](docs/performance.md) | Measuring prefill and decode speed, and reference numbers |
 | `./scripts/docs.sh` | Doxygen API reference in `build-docs/html/` (needs CMake and Doxygen 1.17) |
 | `AGENTS.md` | Layout and rules for changing the code |
 

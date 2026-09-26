@@ -27,10 +27,24 @@ if [[ $(uname -s) == Darwin ]]; then
     fi
     # Apple clang compiles llama.cpp's C and Objective-C Metal sources, which GCC's C compiler
     # rejects; g++-16 compiles every C++ source, because reflection needs it. Accelerate's
-    # headers do not compile with GCC either, and it only accelerates prompt processing.
+    # umbrella header does not compile with GCC either, so ggml's Accelerate paths stay off and
+    # its BLAS backend reaches Accelerate's BLAS through vecLib's plain cblas.h, which does. On
+    # the CPU that speeds up prompt processing for K-quant models by more than half.
+    veclib="$(xcrun --show-sdk-path)/System/Library/Frameworks/vecLib.framework/Headers"
     platform=(-DCMAKE_C_COMPILER=/usr/bin/clang -DCMAKE_CXX_COMPILER=g++-16
-        -DGGML_METAL="$offload" -DGGML_ACCELERATE=OFF -DGGML_BLAS=OFF
+        -DGGML_METAL="$offload" -DGGML_ACCELERATE=OFF
+        -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Generic -DBLAS_INCLUDE_DIRS="$veclib"
         -DCMAKE_PREFIX_PATH="$root/build-deps/prefix;$(brew --prefix openssl@3)")
+    # GCC's -mcpu=native on Apple silicon leaves out FP16 vector arithmetic, which ggml's F16
+    # kernels need (the KV cache is F16, so attention runs through them), and ggml's feature
+    # probes hand GCC a -mcpu=native+feature it rejects. Name the features the CPU reports.
+    arch=armv8.2-a
+    for feature in fp16:FP16 dotprod:DotProd i8mm:I8MM bf16:BF16; do
+        if [[ $(sysctl -n "hw.optional.arm.FEAT_${feature#*:}" 2>/dev/null) == 1 ]]; then
+            arch+="+${feature%%:*}"
+        fi
+    done
+    platform+=(-DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH="$arch")
 else
     platform=(-DGGML_VULKAN="$offload")
 fi

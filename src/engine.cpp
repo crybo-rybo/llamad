@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <ranges>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -399,11 +400,15 @@ struct ResolvedTokens {
     std::vector<llama_token>        prefill;           ///< non-lazy grammar: tokens it consumes before sampling
 };
 
-/// RAII wrapper so the sampler chain is freed on every path, exceptions included.
+/// RAII wrapper so the sampler chain and its grammar are freed on every path, exceptions included.
 class SamplerChain {
 public:
     /// Allocate and populate a sampler chain; release it on construction failure.
-    SamplerChain(const llama_vocab * vocab, const SamplingParams & params, const ResolvedTokens & resolved) {
+    SamplerChain(const llama_vocab * vocab, const SamplingParams & params, const ResolvedTokens & resolved) :
+        n_vocab_(llama_vocab_n_tokens(vocab)),
+        n_selectable_(params.temperature <= 0.0f ? 1
+                      : params.top_k > 0         ? std::min(params.top_k, n_vocab_)
+                                                 : n_vocab_) {
         llama_sampler_chain_params cparams = llama_sampler_chain_default_params();
         cparams.no_perf                    = true;
 
@@ -412,40 +417,65 @@ public:
             throw EngineError("failed to create the sampler chain");
         }
 
-        // A constructor that throws gets no destructor call, so the chain is freed by hand.
+        // A constructor that throws gets no destructor call, so the samplers are freed by hand.
         try {
             build(vocab, params, resolved);
         } catch (...) {
-            llama_sampler_free(chain_);
-            chain_ = nullptr;
+            free_samplers();
             throw;
         }
     }
 
-    /// Free the owned chain and every sampler added to it.
-    ~SamplerChain() {
-        if (chain_ != nullptr) {
-            llama_sampler_free(chain_);
-        }
-    }
+    /// Free the owned chain, every sampler added to it, and the grammar.
+    ~SamplerChain() { free_samplers(); }
 
-    /// Copying is disabled because the chain has a single owner.
+    /// Copying is disabled because the samplers have a single owner.
     SamplerChain(const SamplerChain &)             = delete;
-    /// Copying is disabled because the chain has a single owner.
+    /// Copying is disabled because the samplers have a single owner.
     SamplerChain & operator=(const SamplerChain &) = delete;
 
-    /// Borrow the chain for sampling; ownership stays with this wrapper.
-    llama_sampler * get() const { return chain_; }
+    /// Choose the next token from the logits of the last decoded position and accept it into
+    /// every sampler, which advances the grammar and fires its lazy triggers.
+    llama_token sample(llama_context * ctx) {
+        llama_token token = choose(ctx, n_selectable_, /*apply_grammar*/ false);
+
+        if (grammar_ != nullptr) {
+            // A lazy grammar that has not triggered leaves the logit alone, so this check passes.
+            llama_token_data       single       = { token, /*logit*/ 1.0f, /*p*/ 0.0f };
+            llama_token_data_array single_array = { &single, /*size*/ 1, /*selected*/ -1, /*sorted*/ false };
+            llama_sampler_apply(grammar_, &single_array);
+            if (single.logit == -INFINITY) {
+                // The grammar may refuse every token the chain alone could select, so the retry
+                // starts from the whole vocabulary.
+                token = choose(ctx, n_vocab_, /*apply_grammar*/ true);
+            }
+            llama_sampler_accept(grammar_, token);
+        }
+
+        llama_sampler_accept(chain_, token);
+        return token;
+    }
 
 private:
-    /// Add grammar before any probability filters, including the greedy path.
+    /// Build the probability filters; the grammar, if any, is kept apart from them.
     void build(const llama_vocab * vocab, const SamplingParams & params, const ResolvedTokens & resolved) {
-        // The grammar goes first, ahead of the greedy short-circuit too: every other sampler must
-        // only ever see tokens the grammar allows. common/sampling.cpp keeps the grammar outside
-        // the chain and rejection-samples for speed; in-chain is simpler and just as correct,
-        // because llama_sampler_sample() accepts the sampled token into the chain, which forwards
-        // accept() to every sampler in it: that is what advances the grammar and fires its
-        // lazy triggers.
+        // The grammar stays outside the chain so it runs only when it has to: applying it to the
+        // whole vocabulary costs more than the rest of a token's sampling put together, and the
+        // token the chain chooses is usually one the grammar allows. sample() checks that token
+        // alone and reruns the chain behind the grammar only when it is refused, as
+        // common/sampling.cpp does. Greedy decoding picks the same token either way: the most
+        // likely one the grammar allows. Sampled decoding does not draw from quite the distribution
+        // a grammar ahead of the chain gives: an allowed token the unconstrained chain draws is
+        // kept, and only a refusal redraws among the allowed tokens alone, so the allowed tokens
+        // the model itself ranks highest come up somewhat more often. That is llama.cpp's own
+        // default, and every reply still satisfies the grammar.
+        //
+        // The chain below can only ever select among the highest logits: greedy the single highest,
+        // top-k the k highest. sample() therefore hands it only those, n_selectable_ of them, since
+        // filling and scanning a candidate for every token of a ~150k vocabulary is a measurable
+        // share of decode time. They arrive sorted, so the chain's top-k keeps them as they are and
+        // top-p, min-p, temp and dist see the candidates they would over the whole vocabulary;
+        // only the order among equal logits can differ from a sort of the whole vocabulary.
         if (!params.grammar.grammar.empty()) {
             add_grammar(vocab, params, resolved);
         }
@@ -470,7 +500,7 @@ private:
                                 llama_sampler_init_dist(params.seed ? *params.seed : LLAMA_DEFAULT_SEED));
     }
 
-    /// Attach an eager or triggered GBNF sampler; reject grammars that cannot be parsed.
+    /// Create the eager or triggered GBNF sampler; reject grammars that cannot be parsed.
     void add_grammar(const llama_vocab * vocab, const SamplingParams & params, const ResolvedTokens & resolved) {
         std::vector<const char *> patterns;
         patterns.reserve(resolved.trigger_patterns.size());
@@ -480,32 +510,79 @@ private:
 
         // A non-empty grammar string that does not parse (bad syntax, no root rule, left recursion)
         // makes both of these return null; they never hand back a sampler with no grammar in it.
-        llama_sampler * grammar =
+        grammar_ =
             params.grammar.lazy
                 ? llama_sampler_init_grammar_lazy_patterns(vocab, params.grammar.grammar.c_str(), /*grammar_root*/ "root",
                                                            patterns.data(), patterns.size(),
                                                            resolved.trigger_tokens.data(),
                                                            resolved.trigger_tokens.size())
                 : llama_sampler_init_grammar(vocab, params.grammar.grammar.c_str(), /*grammar_root*/ "root");
-        if (grammar == nullptr) {
+        if (grammar_ == nullptr) {
             throw EngineError("failed to parse the grammar");
         }
-
-        llama_sampler_chain_add(chain_, grammar);
 
         // The chat layer's grammars describe the whole assistant turn, whose opening the template
         // has already written into the prompt. Advancing the grammar past that text is what makes
         // the model continue the turn instead of being constrained to repeat its opening.
         try {
             for (const llama_token token : resolved.prefill) {
-                llama_sampler_accept(grammar, token);
+                llama_sampler_accept(grammar_, token);
             }
         } catch (const std::exception & e) {
             throw EngineError(std::string("the grammar does not accept the prompt's final text: ") + e.what());
         }
     }
 
-    llama_sampler * chain_ = nullptr;  ///< Owned sampler chain, including its grammar sampler.
+    /// Run the chain, behind the grammar when asked, over the `count` highest logits and return its
+    /// choice. A count below the vocabulary size is only correct without the grammar.
+    llama_token choose(llama_context * ctx, int32_t count, bool apply_grammar) {
+        const float * logits = llama_get_logits_ith(ctx, /*i*/ -1);
+        const auto    vocab  = std::views::iota(0, n_vocab_) | std::views::transform([logits](llama_token id) {
+            return llama_token_data{ id, logits[id], /*p*/ 0.0f };
+        });
+
+        candidates_.resize(count);
+        if (count == n_vocab_) {
+            std::ranges::copy(vocab, candidates_.begin());
+        } else if (count == 1) {
+            // max_element keeps the first of equal maxima, as llama.cpp's greedy sampler does.
+            candidates_[0] = *std::ranges::max_element(vocab, {}, &llama_token_data::logit);
+        } else {
+            std::ranges::partial_sort_copy(vocab, candidates_, std::ranges::greater{}, &llama_token_data::logit,
+                                           &llama_token_data::logit);
+        }
+
+        // Fewer candidates than the vocabulary are its highest logits in descending order, which
+        // the chain's top-k then leaves as they are; the whole vocabulary arrives in token order.
+        llama_token_data_array array = { candidates_.data(), candidates_.size(), /*selected*/ -1,
+                                         /*sorted*/ count < n_vocab_ };
+        if (apply_grammar) {
+            llama_sampler_apply(grammar_, &array);
+        }
+        llama_sampler_apply(chain_, &array);
+        if (array.selected < 0 || array.selected >= static_cast<int64_t>(array.size)) {
+            throw EngineError("the sampler chain selected no token");
+        }
+        return array.data[array.selected].id;
+    }
+
+    /// Free whichever samplers exist; the constructor's failure path calls this too.
+    void free_samplers() {
+        if (grammar_ != nullptr) {
+            llama_sampler_free(grammar_);
+            grammar_ = nullptr;
+        }
+        if (chain_ != nullptr) {
+            llama_sampler_free(chain_);
+            chain_ = nullptr;
+        }
+    }
+
+    const int32_t                 n_vocab_;            ///< Candidates built when the chain keeps every token, or the grammar retries.
+    const int32_t                 n_selectable_;       ///< How many of the highest logits the chain can select from.
+    llama_sampler *               chain_   = nullptr;  ///< Owned probability filters and final selection.
+    llama_sampler *               grammar_ = nullptr;  ///< Owned grammar, or null when the request has none.
+    std::vector<llama_token_data> candidates_;         ///< Reused per token to avoid a vocabulary-sized allocation.
 };
 
 /// The vector scaled to unit length, as llama.cpp's own tools normalise a pooled embedding; a
@@ -607,27 +684,31 @@ struct Engine::Impl {
         return 0;
     }
 
-    /// Query the vocabulary for required capacity, then tokenize into an owned buffer.
+    /// Tokenize into an owned buffer, in one pass unless the text needs more tokens than bytes.
     std::vector<int32_t> tokenize(const std::string & text, bool add_special, bool parse_special) const {
-        // llama_tokenize returns -(number of tokens) when the buffer is too small.
-        int32_t n = llama_tokenize(vocab, text.c_str(), static_cast<int32_t>(text.size()), nullptr, 0,
-                                   add_special, parse_special);
+        static_assert(std::is_same<llama_token, int32_t>::value, "llama_token must be int32_t");
+
+        // A token almost always spans at least one byte, and add_special adds only a few, so this
+        // buffer is nearly always big enough: measuring first would tokenize everything twice.
+        // llama_tokenize returns -(number of tokens) when it is not.
+        std::vector<int32_t> tokens(text.size() + 8);
+        const auto           fill = [&] {
+            return llama_tokenize(vocab, text.c_str(), static_cast<int32_t>(text.size()), tokens.data(),
+                                  static_cast<int32_t>(tokens.size()), add_special, parse_special);
+        };
+
+        int32_t n = fill();
         if (n == INT32_MIN) {
             throw EngineError("tokenization overflowed int32");
         }
         if (n < 0) {
-            n = -n;
+            tokens.resize(static_cast<size_t>(-n));
+            n = fill();
         }
-
-        static_assert(std::is_same<llama_token, int32_t>::value, "llama_token must be int32_t");
-
-        std::vector<int32_t> tokens(static_cast<size_t>(n));
-        const int32_t written = llama_tokenize(vocab, text.c_str(), static_cast<int32_t>(text.size()),
-                                               tokens.data(), n, add_special, parse_special);
-        if (written < 0) {
+        if (n < 0) {
             throw EngineError("failed to tokenize the input text");
         }
-        tokens.resize(static_cast<size_t>(written));
+        tokens.resize(static_cast<size_t>(n));
         return tokens;
     }
 
@@ -774,15 +855,36 @@ Engine::Engine(const EngineConfig & config) : impl_(new Impl()) {
     llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx                = config.n_ctx;
     cparams.no_perf              = true;
-    // Generation is memory-bound, so more threads than about half the hardware threads
-    // stops helping (and on hybrid CPUs starts to hurt).
-    const int32_t n_threads = config.n_threads > 0
-                                  ? config.n_threads
-                                  : std::max<int32_t>(1, static_cast<int32_t>(std::thread::hardware_concurrency() / 2));
-    cparams.n_threads       = n_threads;
-    cparams.n_threads_batch = n_threads;
+    // Generation is memory-bound, so more threads than about half the hardware threads stops
+    // helping (and on hybrid CPUs starts to hurt). A prompt is compute-bound and keeps gaining
+    // up to every hardware thread: on an M3 Pro, 12 threads decode a 2048-token prompt 24% faster
+    // than 6, while generation is 36% slower at 12. An explicit count is used for both.
+    const int32_t hardware = std::max<int32_t>(1, static_cast<int32_t>(std::thread::hardware_concurrency()));
+    cparams.n_threads       = config.n_threads > 0 ? config.n_threads : std::max<int32_t>(1, hardware / 2);
+    cparams.n_threads_batch = config.n_threads > 0 ? config.n_threads : hardware;
 
-    impl_->ctx = llama_init_from_model(impl_->model, cparams);
+    // A generative model gets a context shaped for generate(). It reads only the logits of a
+    // batch's last token, so it reserves one output per micro-batch rather than one per token; a
+    // vocabulary's worth of floats per token is most of llama.cpp's default compute buffer. That
+    // leaves room for a micro-batch as large as the batch, which decodes a long prompt in fewer,
+    // larger graphs, a few percent faster. Activations grow with the micro-batch, though, so the
+    // net saving is largest for a small model with a large vocabulary (144 MiB rather than 298 for
+    // Qwen2.5 0.5B on Metal) and turns into a cost for a large model with a small one, or where
+    // flash attention is unavailable and attention scores scale with the micro-batch too. A device
+    // that cannot allocate that gets llama.cpp's defaults instead, as does a model that turns out
+    // to pool, since pooling reads every token's output.
+    llama_context_params generation = cparams;
+    generation.n_outputs_max        = 1;
+    generation.n_ubatch             = generation.n_batch;
+
+    impl_->ctx = llama_init_from_model(impl_->model, generation);
+    if (impl_->ctx != nullptr && llama_pooling_type(impl_->ctx) != LLAMA_POOLING_TYPE_NONE) {
+        llama_free(impl_->ctx);
+        impl_->ctx = nullptr;
+    }
+    if (impl_->ctx == nullptr) {
+        impl_->ctx = llama_init_from_model(impl_->model, cparams);
+    }
     if (impl_->ctx == nullptr) {
         throw EngineError("failed to create a llama context for '" + config.model_path + "'");
     }
@@ -953,7 +1055,7 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
             break;
         }
 
-        const llama_token token = llama_sampler_sample(sampler.get(), impl_->ctx, -1);
+        const llama_token token = sampler.sample(impl_->ctx);
 
         if (llama_vocab_is_eog(impl_->vocab, token)) {
             result.reason = FinishReason::Eog;
