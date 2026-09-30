@@ -43,7 +43,7 @@ library and compiler targets. gRPC requires its config package in either case.
 
 Proto-only takes precedence when client-only is also enabled, including its default in a
 `FetchContent` build. Client-only and proto-only fail if transport dependencies are missing.
-A containing project owns its tests; llamad registers none in that project. The README shows
+Client-only and proto-only register no tests in a containing project. The README shows
 minimal `FetchContent` examples for each consumer. Client and direct-stub users in one program
 link the same generated-message target; generating another copy of the protocol duplicates
 Protobuf's descriptors.
