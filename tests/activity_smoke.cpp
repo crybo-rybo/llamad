@@ -6,21 +6,27 @@
  *   activity_smoke model.gguf /tmp/llamad-test.sock 0
  * For GPU offload, use daemon --ngl 99 and harness final argument 99.
  * The last argument controls only the direct engine's GPU layer count.
+ * Queue checks use the real service in-process with that engine held at a text callback.
  */
 
 #include "check.h"
 #include "engine.h"
+#include "service.h"
 
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <grpcpp/grpcpp.h>
 
@@ -32,6 +38,8 @@ namespace v1 = llamad::v1;
 using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
 
+constexpr const char * held_prompt = "Write a sentence about cats:";
+
 // Hold the context at a text callback, so a waiter really competes with active inference.
 class HeldGeneration {
 public:
@@ -39,7 +47,7 @@ public:
         llamad::SamplingParams params;
         params.temperature = 0;
         params.max_tokens = 32;
-        engine.generate("Write a sentence about cats:", params, [&](const std::string &) {
+        engine.generate(held_prompt, params, [&](const std::string &) {
             std::unique_lock lock(mutex_);
             ready_ = true;
             wake_.notify_all();
@@ -179,36 +187,104 @@ ReadResult read(v1::Llama::Stub & stub, const std::string & prompt, int cancel_a
     return result;
 }
 
+// The real service shares the held engine, so queue checks do not depend on batch duration.
+class QueueServer {
+public:
+    explicit QueueServer(llamad::Engine & engine) : service_(engine, nullptr) {
+        char pattern[] = "/tmp/llamad-activity-XXXXXX";
+        const char * made = mkdtemp(pattern);
+        if (made == nullptr) {
+            throw std::runtime_error("cannot create activity socket directory");
+        }
+        directory_ = made;
+        socket_ = directory_ + "/daemon.sock";
+        grpc::ServerBuilder builder;
+        builder.AddListeningPort("unix:" + socket_, grpc::InsecureServerCredentials());
+        builder.RegisterService(&service_);
+        server_ = builder.BuildAndStart();
+        if (!server_) {
+            ::unlink(socket_.c_str());
+            ::rmdir(directory_.c_str());
+            throw std::runtime_error("cannot start activity queue server");
+        }
+        if (::chmod(socket_.c_str(), 0600) != 0) {
+            server_->Shutdown();
+            server_->Wait();
+            ::unlink(socket_.c_str());
+            ::rmdir(directory_.c_str());
+            throw std::runtime_error("cannot restrict activity socket permissions");
+        }
+    }
+
+    ~QueueServer() {
+        server_->Shutdown();
+        server_->Wait();
+        ::unlink(socket_.c_str());
+        ::rmdir(directory_.c_str());
+    }
+
+    const std::string & socket() const { return socket_; }
+
+private:
+    llamad::LlamaService service_;
+    std::string directory_;
+    std::string socket_;
+    std::unique_ptr<grpc::Server> server_;
+};
+
+void check_queue(llamad::Engine & engine) {
+    QueueServer server(engine);
+    const auto channel = grpc::CreateChannel("unix:" + server.socket(), grpc::InsecureChannelCredentials());
+    auto stub = v1::Llama::NewStub(channel);
+    {
+        // Its constructor waits for the text callback to hold the engine lock. Keep it held
+        // until both waiters finish, regardless of how quickly this backend decodes a batch.
+        HeldGeneration holder(engine);
+        const auto cancelled = read(*stub, "Cancelled waiter with a different prompt", 1);
+        CHECK(cancelled.valid);
+        CHECK(cancelled.status.error_code() == grpc::StatusCode::CANCELLED);
+        CHECK(cancelled.activities == 1);
+        CHECK(cancelled.texts == 0);
+        CHECK(cancelled.finals == 0);
+        CHECK(cancelled.max_gap_ms < 1500);
+
+        const auto expired = read(*stub, "Expired waiter with a different prompt", -1, 1200);
+        CHECK(expired.valid);
+        CHECK(expired.status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED);
+        CHECK(expired.activities >= 1);
+        CHECK(expired.texts == 0);
+        CHECK(expired.finals == 0);
+        CHECK(expired.max_gap_ms < 1500);
+    }
+    llamad::SamplingParams params;
+    params.temperature = 0;
+    params.max_tokens = 1;
+    const auto retained = engine.generate(held_prompt, params, nullptr);
+    CHECK(retained.stats.cached_prompt_tokens == retained.stats.prompt_tokens - 1);
+    std::fprintf(stderr, "queued transport: cancellation and deadline left held cache intact\n");
+}
+
 void check_transport(const std::string & socket, const std::string & prompt) {
     const auto channel = grpc::CreateChannel("unix:" + socket, grpc::InsecureChannelCredentials());
     auto stub = v1::Llama::NewStub(channel);
 
-    // A second request must remain observable while waiting behind uncached prefill.
-    // Stop the first upon its first activity frame, before any user-visible text.
-    ReadResult partial;
-    std::jthread prefilling([&] { partial = read(*stub, prompt, 1); });
-    std::this_thread::sleep_for(200ms);
-    const auto expired = read(*stub, "Queue a different prompt", -1, 1200);
-    prefilling.join();
+    // Stop uncached prefill on an observed activity frame, before any user-visible text.
+    // No unrelated request may run between cancellation and the cache-reuse check.
+    const auto partial = read(*stub, prompt, 1);
     CHECK(partial.valid);
     CHECK(partial.status.error_code() == grpc::StatusCode::CANCELLED);
     CHECK(partial.activities == 1);
     CHECK(partial.texts == 0);
     CHECK(partial.finals == 0);
     CHECK(partial.max_gap_ms < 1500);
-    CHECK(expired.valid);
-    CHECK(expired.status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED);
-    CHECK(expired.activities >= 1);
-    CHECK(expired.texts == 0);
-    CHECK(expired.finals == 0);
-    CHECK(expired.max_gap_ms < 1500);
 
     const auto resumed = read(*stub, prompt);
     CHECK(resumed.valid);
     CHECK(resumed.status.ok());
     CHECK(resumed.finals == 1);
     CHECK(resumed.final.stats().cached_prompt_tokens() > 0);
-    CHECK(resumed.final.stats().cached_prompt_tokens() < resumed.final.stats().prompt_tokens() - 1);
+    // Cancellation can arrive after the final prompt batch but before the first text token.
+    CHECK(resumed.final.stats().cached_prompt_tokens() <= resumed.final.stats().prompt_tokens() - 1);
     CHECK(resumed.max_gap_ms < 1500);
     std::fprintf(stderr, "raw prefill: %d activity frames, maximum gap %.0fms, cached %d/%d tokens\n",
                  resumed.activities, resumed.max_gap_ms, resumed.final.stats().cached_prompt_tokens(),
@@ -253,6 +329,7 @@ int main(int argc, char ** argv) {
         llamad::Engine engine(config);
         const auto prompt = long_prompt();
         check_engine(engine, prompt);
+        check_queue(engine);
         check_transport(argv[2], prompt);
         return tests::report();
     } catch (const std::exception & error) {

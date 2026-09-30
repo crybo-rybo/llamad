@@ -63,6 +63,6 @@ target_link_libraries(engine_bench PRIVATE llamad_engine llamad_chat llamad_flag
 
 # Real-engine and raw-daemon activity/cancellation checks; needs a model and private daemon.
 if(TARGET llamad_proto)
-    add_executable(activity_smoke activity_smoke.cpp)
-    target_link_libraries(activity_smoke PRIVATE llamad_engine llamad_proto)
+    add_executable(activity_smoke activity_smoke.cpp ../src/service.cpp)
+    target_link_libraries(activity_smoke PRIVATE llamad_engine llamad_chat llamad_flags llamad_proto)
 endif()
