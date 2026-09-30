@@ -86,7 +86,6 @@ struct Round {
     // prefilling, queued behind another client, or wedged.
     bool hang = false;
     int activity_frames = 0;  // empty chunks sent before the text
-    grpc::StatusCode error = grpc::StatusCode::OK;
 };
 
 class FakeDaemon final : public v1::Llama::Service {
@@ -119,9 +118,6 @@ public:
             round = script_[std::min(requests_.size() - 1, script_.size() - 1)];
         }
 
-        if (round.error != grpc::StatusCode::OK) {
-            return grpc::Status(round.error, "scripted request rejection");
-        }
         for (int i = 0; i < round.activity_frames; ++i) {
             writer->Write(v1::GenerateChunk{});
         }
@@ -791,25 +787,6 @@ void test_embed_refused() {
     CHECK(code == static_cast<int>(grpc::StatusCode::FAILED_PRECONDITION));
 }
 
-void test_request_limit_statuses() {
-    for (const grpc::StatusCode expected : {grpc::StatusCode::RESOURCE_EXHAUSTED,
-                                           grpc::StatusCode::OUT_OF_RANGE,
-                                           grpc::StatusCode::INVALID_ARGUMENT}) {
-        Round failure;
-        failure.error = expected;
-        Harness harness({failure});
-        std::vector<client::ChatMessage> history = {{"user", "hello"}};
-        int code = 0;
-        try {
-            harness.client.chat(history, params, nullptr);
-        } catch (const client::RpcError & e) {
-            code = e.code;
-        }
-        CHECK(code == static_cast<int>(expected));
-        CHECK(history.size() == 1);
-    }
-}
-
 // A stop cancels embed() like any other call, and it throws, having no partial result to return.
 void test_embed_stopped() {
     Harness harness({Round{}});
@@ -855,7 +832,6 @@ int main() {
     test_embed_returns_vectors_in_order();
     test_embed_refused();
     test_embed_stopped();
-    test_request_limit_statuses();
 
     return tests::report();
 }

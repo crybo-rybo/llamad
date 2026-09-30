@@ -9,7 +9,7 @@
 |---|---|---|
 | `--model PATH` | required | GGUF model to load |
 | `--socket PATH` | `$XDG_RUNTIME_DIR/llamad.sock`, else `/tmp/llamad-<uid>.sock` | Unix socket to listen on |
-| `--max-request-bytes N` | 4194304 | positive maximum serialized incoming RPC size, in bytes |
+| `--max-request-bytes N` | 4194304 | largest request the daemon accepts, in serialized bytes |
 | `--ctx N` | 4096 | context size in tokens |
 | `--ngl N` | 99 | layers to offload to the GPU; 0 disables offload |
 | `--threads N` | 0 | inference threads; 0 = auto: half the hardware threads to generate, all of them for prompts |
@@ -20,18 +20,9 @@
 The socket is created mode 0600, so only your user can talk to it. The daemon logs one
 `[llamad] ...` line per request to stderr and writes nothing to stdout.
 
-The receive limit applies to each serialized incoming `Generate`, `Chat`, `Tokenize`,
-`Embed`, and metadata request, including protobuf overhead, history, schemas and tool data.
-`--max-request-bytes` accepts positive sizes representable by gRPC's `int` setter. A request
-above this limit fails with `RESOURCE_EXHAUSTED` before the handler runs, so it has no
-per-request handler log. Increasing this limit permits larger messages but does not increase
-the model's token context.
-
-A `Generate` prompt or rendered `Chat` prompt that reaches the usable token context capacity
-fails with `OUT_OF_RANGE`: the prompt must leave at least one position for generation.
-Malformed input remains `INVALID_ARGUMENT`, and a missing model capability remains
-`FAILED_PRECONDITION`. `Embed` has its separate per-input token limit described below; an
-overlong embedding input is `INVALID_ARGUMENT`.
+A request larger than `--max-request-bytes`, serialized, fails with `RESOURCE_EXHAUSTED` before
+the daemon handles it, so it gets no log line. A prompt, raw or rendered from a chat, that leaves
+the context no room to generate fails with `OUT_OF_RANGE`; the byte limit does not change that.
 
 SIGINT/SIGTERM shut the daemon down and remove the socket. A daemon put in the background by a
 script inherits SIGINT ignored, and macOS discards a signal that is both ignored and blocked, so

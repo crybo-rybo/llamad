@@ -138,16 +138,13 @@ struct EngineError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
-/// A generation prompt needs at least one free context position for its completion.
+/// A generation prompt that leaves the context no position for its completion. Its own type
+/// because it is not malformed input: the service reports it as OUT_OF_RANGE.
 struct ContextOverflowError : EngineError {
-    /// Record both counts for callers that choose how to shorten the prompt.
+    /// Describe the overflow in the error message.
     ContextOverflowError(size_t prompt_tokens, uint32_t context_tokens)
-        : EngineError("prompt is too long: " + std::to_string(prompt_tokens) +
-                      " tokens for a context of " + std::to_string(context_tokens)),
-          prompt_tokens(prompt_tokens), context_tokens(context_tokens) {}
-
-    size_t   prompt_tokens;   ///< Actual tokenized prompt length, including special tokens.
-    uint32_t context_tokens;  ///< Usable sequence capacity; the prompt must be smaller than this.
+        : EngineError("prompt is too long: " + std::to_string(prompt_tokens) + " tokens for a context of " +
+                      std::to_string(context_tokens)) {}
 };
 
 /// How many leading tokens of `prompt` a generation keeps from a KV cache holding `cached`: the

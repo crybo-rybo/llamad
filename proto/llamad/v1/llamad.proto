@@ -9,9 +9,8 @@ package llamad.v1;
 /// Typed, streaming interface to a single llama.cpp model hosted by the llamad daemon.
 /// Messages are deliberately engine-agnostic: nothing here depends on how the daemon
 /// runs inference, so the engine can change without breaking clients.
-/// Incoming serialized requests, including protobuf overhead, default to a 4 MiB receive
-/// limit configured by the daemon's --max-request-bytes. Larger messages fail with
-/// RESOURCE_EXHAUSTED before application handling or request logging.
+/// A request larger than the daemon's --max-request-bytes fails with RESOURCE_EXHAUSTED; a
+/// prompt that leaves the context no room to generate fails with OUT_OF_RANGE.
 service Llama {
   /// Return metadata without running inference.
   rpc GetModelInfo(GetModelInfoRequest) returns (ModelInfo);
@@ -68,8 +67,7 @@ message SamplingParams {
   repeated string stop = 7;         ///< generation ends before any of these strings
 }
 
-/// Raw prompt and optional sampling overrides. A prompt reaching the usable token context
-/// capacity fails with OUT_OF_RANGE; malformed input fails with INVALID_ARGUMENT.
+/// Raw prompt and optional sampling overrides.
 message GenerateRequest {
   string prompt = 1;  ///< Raw model input; no chat template is applied.
   SamplingParams sampling = 2;  ///< Unset fields use the daemon defaults.
@@ -99,9 +97,7 @@ message ChatMessage {
   string tool_call_id = 4;           ///< role "tool": the call this message answers
 }
 
-/// Complete conversation and request-local tool definitions. The serialized request is subject
-/// to the daemon's receive-byte limit (RESOURCE_EXHAUSTED). A rendered prompt reaching the
-/// usable token context capacity fails with OUT_OF_RANGE, independently of that byte limit.
+/// Complete conversation and request-local tool definitions.
 message ChatRequest {
   repeated ChatMessage messages = 1;  ///< Entire ordered conversation; must not be empty.
   SamplingParams sampling = 2;  ///< Unset fields use the daemon defaults.
