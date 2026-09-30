@@ -51,27 +51,23 @@ if(NOT (LLAMAD_CLIENT_ONLY OR LLAMAD_PROTO_ONLY))
     endif()
 endif()
 
-if(NOT LLAMAD_PROTO_ONLY)
-    # The client and flag parser reflect over application structs. The probe is independent of
-    # the generated stubs' ordinary C++ requirements; flags are attached to their users below.
+# The client and flag parser reflect over application structs, so every build but proto-only
+# checks for reflection and fails at configure time with a reason. The function scope keeps the
+# probe's C++26 standard from reaching llama.cpp or the stubs; each target that reflects
+# declares C++26 and -freflection itself.
+function(llamad_check_reflection)
     include(CheckCXXSourceCompiles)
-    include(CMakePushCheckState)
-    cmake_push_check_state(RESET)
-    set(llamad_saved_cxx_standard "${CMAKE_CXX_STANDARD}")
     set(CMAKE_CXX_STANDARD 26)
-    set(CMAKE_REQUIRED_FLAGS "-std=c++26 -freflection")
+    set(CMAKE_REQUIRED_FLAGS "-freflection")
     check_cxx_source_compiles("
         #include <meta>
         struct S { int a; };
         static_assert(std::meta::nonstatic_data_members_of(^^S, std::meta::access_context::current()).size() == 1);
         int main() {}" LLAMAD_HAVE_REFLECTION)
-    cmake_pop_check_state()
-    if(llamad_saved_cxx_standard)
-        set(CMAKE_CXX_STANDARD "${llamad_saved_cxx_standard}")
-    else()
-        unset(CMAKE_CXX_STANDARD)
-    endif()
-    unset(llamad_saved_cxx_standard)
+endfunction()
+
+if(NOT LLAMAD_PROTO_ONLY)
+    llamad_check_reflection()
     if(NOT LLAMAD_HAVE_REFLECTION)
         message(FATAL_ERROR "llamad needs a compiler with C++26 static reflection (GCC 16 or later): "
                             "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} does not provide it.")

@@ -75,24 +75,6 @@ Included by another project, llamad builds only the client and its protocol code
 (`llamad::proto`): no llama.cpp, no daemon, no tests. It needs gRPC, Protobuf and nlohmann/json
 from your build or your system; [docs/client.md](docs/client.md#linking) has the details.
 
-For direct access to generated messages and gRPC stubs with an ordinary compiler, set
-`LLAMAD_PROTO_ONLY` before fetching and link the shared `llamad::proto` target:
-
-```cmake
-set(LLAMAD_PROTO_ONLY ON CACHE BOOL "" FORCE)
-include(FetchContent)
-FetchContent_Declare(llamad
-    GIT_REPOSITORY https://github.com/crybo-rybo/llamad.git
-    GIT_TAG        main
-    GIT_SUBMODULES "")
-FetchContent_MakeAvailable(llamad)
-target_link_libraries(myapp PRIVATE llamad::proto)
-```
-
-This mode needs neither reflection nor nlohmann/json. On Ubuntu 24.04, install
-`libgrpc++-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc` alongside your
-C++ compiler and CMake. [docs/building.md](docs/building.md#build-modes) describes each mode.
-
 ```cpp
 #include <llamad/client.h>
 
@@ -115,6 +97,10 @@ client runs the execute-and-resend loop.
 Every call takes a trailing `CallOptions`: a `std::stop_token` that cancels it from another
 thread, and a timeout.
 [docs/client.md](docs/client.md) has the full walkthrough.
+
+To use the generated messages and gRPC stubs directly instead, set `LLAMAD_PROTO_ONLY` to `ON`
+before fetching and link `llamad::proto`. That needs only gRPC, Protobuf and an ordinary C++17
+compiler; [docs/building.md](docs/building.md#build-modes) compares the modes.
 
 ## Documentation
 

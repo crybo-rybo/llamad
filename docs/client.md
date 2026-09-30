@@ -38,9 +38,8 @@ daemon but no model: implement `llamad::v1::Llama::Service` with scripted replie
 a private socket and point a `Client` at it. `tests/consumer/` is such a project, built by CI
 against every commit.
 
-Set `LLAMAD_PROTO_ONLY=ON` before fetching to build just `llamad::proto` with an ordinary
-C++17 compiler. It takes precedence over the client-only default and requires neither
-reflection nor nlohmann/json; the README shows the minimal direct-stub example.
+An application that only wants the stubs sets `LLAMAD_PROTO_ONLY=ON` before fetching and gets
+`llamad::proto` alone, with no reflection or nlohmann/json ([building.md](building.md#build-modes)).
 
 ## Streaming chat
 

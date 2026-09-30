@@ -5,9 +5,7 @@
 llamad is written in C++26 and uses static reflection, so it needs GCC 16 or later. Clang and
 Apple Clang do not implement reflection. Linux and macOS on Apple silicon are the supported
 platforms; on both, GCC compiles every C++ source, including your own if you link the client.
-The wire-stub target `llamad::proto` needs only ordinary C++17, or the language level required
-by the installed gRPC/Protobuf packages. Proto-only consumers can use GCC or Clang without
-reflection.
+The proto-only build below is the exception: any C++17 compiler will do.
 
 ## Linux
 
@@ -29,9 +27,9 @@ cmake -S . -B build-proto -G Ninja -DLLAMAD_PROTO_ONLY=ON
 cmake --build build-proto
 ```
 
-Protobuf's config package is preferred, preserving its dependency targets for modern
-Protobuf/Abseil installations. When it is absent, CMake's `FindProtobuf` module supplies the
-library and compiler targets. gRPC requires its config package in either case.
+Protobuf's CMake config package is preferred, because newer Protobuf releases declare their
+Abseil dependencies there; without one, as on Ubuntu, CMake's `FindProtobuf` module is used.
+gRPC always needs its config package.
 
 ## Build modes
 
@@ -41,12 +39,9 @@ library and compiler targets. gRPC requires its config package in either case.
 | Client-only | Inclusion default, or `LLAMAD_CLIENT_ONLY=ON` | `llamad::client` and `llamad::proto`; GCC 16 reflection, gRPC/Protobuf, nlohmann/json; no C compiler or submodules. |
 | Proto-only | `LLAMAD_PROTO_ONLY=ON` | `llamad::proto`; ordinary C++17, gRPC/Protobuf; no reflected client, nlohmann/json, C compiler, submodules, daemon utilities or project tests. |
 
-Proto-only takes precedence when client-only is also enabled, including its default in a
-`FetchContent` build. Client-only and proto-only fail if transport dependencies are missing.
-Client-only and proto-only register no tests in a containing project. The README shows
-minimal `FetchContent` examples for each consumer. Client and direct-stub users in one program
-link the same generated-message target; generating another copy of the protocol duplicates
-Protobuf's descriptors.
+Proto-only wins over client-only, including client-only's default under `FetchContent`. A
+program that uses both the client and the stubs links the one `llamad::proto`: Protobuf refuses
+to register a second generated copy of `llamad/v1/llamad.proto`.
 
 ## macOS
 
