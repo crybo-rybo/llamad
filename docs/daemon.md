@@ -112,7 +112,9 @@ the prompt) embeds instead and prints what `llamad-chat --embed` does. `--help` 
 `activity_smoke` checks cancellation before admission, while queued and during an uncached
 multi-batch prefill, then checks the retained cache with the same, shorter and unrelated
 prompts. Its raw gRPC reader checks empty activity frames, deadlines, text cancellation and
-final ordering against a private daemon. Run the daemon with `--ctx 8192 --threads 1`, then
-`build-gpu/tests/activity_smoke MODEL /tmp/PRIVATE.sock 0` for CPU, or replace `0` with `99`
-for offload. The prefill must last more than two seconds on the test hardware so that the
-queue and timer checks exercise their intended phases; a larger model can provide that load.
+final ordering against a private daemon. For CPU, run the daemon with
+`--ctx 8192 --threads 1 --ngl 0`, then
+`build-gpu/tests/activity_smoke MODEL /tmp/PRIVATE.sock 0`. For GPU offload, use daemon
+`--ngl 99` and replace the harness's final argument with `99`. The prefill must last more
+than two seconds on the test hardware so that the queue and timer checks exercise their
+intended phases; a larger model can provide that load.

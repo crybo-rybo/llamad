@@ -1,9 +1,11 @@
 /** @file
  * @brief Model-backed cancellation, cache reuse and raw transport activity checks.
  *
- * Run against a private daemon using the same model, --ctx 8192 and --threads 1:
+ * For CPU, run against a private daemon using the same model with
+ * --ctx 8192 --threads 1 --ngl 0:
  *   activity_smoke model.gguf /tmp/llamad-test.sock 0
- * The last argument is the direct engine's GPU layer count (0 for CPU, 99 for offload).
+ * For GPU offload, use daemon --ngl 99 and harness final argument 99.
+ * The last argument controls only the direct engine's GPU layer count.
  */
 
 #include "check.h"
