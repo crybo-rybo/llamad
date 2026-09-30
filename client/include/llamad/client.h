@@ -248,6 +248,9 @@ struct GenerateResult {
     FinishReason          reason;      ///< Reason generation ended.
     GenerateStats         stats;       ///< Counts and timings reported for the generation.
     std::vector<ToolCall> tool_calls;  ///< Calls from an assistant turn replayed in history.
+    /// Daemon log identifier for this RPC, or empty when metadata is unavailable. A tool loop
+    /// reports the last generation RPC represented by this result; statistics cover all rounds.
+    std::string request_id;
 };
 
 /// A reply constrained to T's JSON Schema. value is set when the reply is a complete JSON
@@ -276,9 +279,11 @@ using ChunkCallback = std::function<bool(const std::string & text)>;
 
 /// Thrown when an RPC fails (daemon unreachable, invalid request, ...).
 struct RpcError : std::runtime_error {
-    /// Preserve the numeric gRPC status and human-readable error message.
-    RpcError(int code, const std::string & message) : std::runtime_error(message), code(code) {}
+    /// Preserve the numeric gRPC status, human-readable error and available daemon log identifier.
+    RpcError(int code, const std::string & message, std::string request_id = {})
+        : std::runtime_error(message), code(code), request_id(std::move(request_id)) {}
     int code;  ///< grpc::StatusCode value
+    std::string request_id;  ///< Failing RPC's daemon log identifier, or empty when unavailable.
 };
 
 /// How a call can be called off from outside it, for a caller that runs it on a worker thread or
@@ -286,9 +291,9 @@ struct RpcError : std::runtime_error {
 struct CallOptions {
     /// request_stop() on its source, from any thread, cancels the call even while no text is
     /// arriving: a long prompt, a queue behind another client, a tool-call round, a wedged daemon.
-    /// A streaming call then returns FinishReason::Cancelled, unless its final chunk had already
-    /// arrived, whose reason stands. get_model_info(), tokenize() and embed() throw RpcError with
-    /// CANCELLED (1).
+    /// An individual streaming RPC returns FinishReason::Cancelled, unless its final chunk
+    /// had already arrived, whose reason stands. get_model_info(), tokenize() and embed()
+    /// throw RpcError with CANCELLED (1).
     std::stop_token stop;
     /// Time allowed for each RPC, from its start. When it runs out the call throws RpcError with
     /// DEADLINE_EXCEEDED (4).
@@ -337,9 +342,9 @@ public:
 
     /// Complete a raw prompt without applying the chat template.
     /// Blocks until the stream ends, invoking on_chunk from the calling thread.
-    /// If on_chunk returns false or options.stop is requested, the request is cancelled and reason
-    /// is Cancelled. Cancelling ends the stream before the daemon's final chunk; stats are
-    /// available only if that chunk arrives.
+    /// If on_chunk returns false or options.stop is requested before a final chunk is accepted,
+    /// reason is Cancelled. Statistics are available when a final chunk is accepted; a later
+    /// stop preserves that result.
     /// @param prompt Raw model input.
     /// @param params Optional overrides of the daemon sampling defaults.
     /// @param on_chunk Text receiver, or empty to discard text.

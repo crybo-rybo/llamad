@@ -69,6 +69,13 @@ waits for the engine, reads its prompt or generates. A watchdog that records whe
 tell a long prompt from a daemon that has gone away. What it throws cancels the call and
 propagates, as with the text callback.
 
+`GenerateResult.request_id` identifies the daemon's matching request log line, including on
+normal cancellation when metadata has arrived. `RpcError.request_id` identifies a failing
+RPC for streaming and unary calls. Either string is empty when metadata is unavailable,
+such as an unreachable daemon or an oversized request refused before handler entry;
+cancellation and deadlines can also prevent delivery. The numeric status and error text
+retain their meanings.
+
 ## Stopping a call
 
 A call blocks its thread until the stream ends, and returning `false` from the callback can
@@ -84,7 +91,8 @@ auto result = client.chat(history, params, on_chunk,
 
 - A stop cancels the call even when no text is arriving: while the daemon reads a long prompt,
   while it serves another client first, during a tool-call round. A streaming call returns
-  `FinishReason::Cancelled`, unless its final chunk had already arrived, whose reason stands.
+  `FinishReason::Cancelled` for an individual RPC, unless its final chunk had already arrived,
+  whose reason stands. The tool loop can still cancel before executing returned tools.
   `get_model_info`, `tokenize` and `embed` throw `RpcError` with code `CANCELLED` (1). The
   daemon drops the work too: a queued call leaves the queue, and a prompt stops at the next
   decode batch.
@@ -126,6 +134,9 @@ assistant { tool_calls: [...] }         finish_reason = TOOL_CALLS
 tool      { tool_call_id, content }     one per call, the result, as a string
 assistant "It is 06:28 in Tokyo."       finish_reason = EOG
 ```
+
+The tool loop's `GenerateResult.request_id` identifies its last generation RPC, while its
+stats sum every round. A failed round throws `RpcError` with that round's identifier.
 
 ### Tools as C++ functions
 

@@ -4,12 +4,15 @@
 
 #include "service.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdio>
 #include <exception>
 #include <mutex>
+#include <random>
 #include <string>
 #include <thread>
 #include <utility>
@@ -34,41 +37,66 @@ SamplingParams from_proto(const v1::SamplingParams & p) {
 }
 
 /// `tool_calls` < 0 leaves the count out of the line entirely (Generate has no tool calls).
-void log_request(const char * rpc_name, const GenerateStats & stats, const char * reason, double wall_ms,
-                 int tool_calls) {
+std::string generation_details(const GenerateStats & stats, const char * reason, int tool_calls) {
     char tools[32] = "";
     if (tool_calls >= 0) {
         std::snprintf(tools, sizeof(tools), " tool_calls=%d", tool_calls);
     }
-    std::fprintf(stderr,
-                 "[llamad] %s prompt_tokens=%d cached_prompt_tokens=%d completion_tokens=%d finish=%s%s %.0fms\n",
-                 rpc_name, stats.prompt_tokens, stats.cached_prompt_tokens, stats.completion_tokens, reason, tools,
-                 wall_ms);
+    char details[256];
+    std::snprintf(details, sizeof(details),
+                  "prompt_tokens=%d cached_prompt_tokens=%d completion_tokens=%d finish=%s%s",
+                  stats.prompt_tokens, stats.cached_prompt_tokens, stats.completion_tokens, reason, tools);
+    return details;
 }
 
-/// Runs one RPC body and turns what it throws into the status the contract promises: caller
-/// mistakes (EngineError, ChatFormatError) INVALID_ARGUMENT, context overflow OUT_OF_RANGE,
+/// Allocate a process-scoped identifier without request contents or a shared request registry.
+std::string next_request_id() {
+    // Each process chooses a random prefix; the counter separates concurrent RPCs.
+    static const uint64_t prefix = [] {
+        std::random_device random;
+        return (static_cast<uint64_t>(random()) << 32) | random();
+    }();
+    static std::atomic<uint64_t> sequence{0};
+    char id[34];
+    std::snprintf(id, sizeof(id), "%016llx-%016llx", static_cast<unsigned long long>(prefix),
+                  static_cast<unsigned long long>(sequence.fetch_add(1, std::memory_order_relaxed)));
+    return id;
+}
+
+/// One log site covers returned errors, exceptions and successful RPCs. Caller mistakes
+/// (EngineError, ChatFormatError) map to INVALID_ARGUMENT, context overflow OUT_OF_RANGE,
 /// anything else INTERNAL.
 template <typename Body>
-grpc::Status guarded(const char * rpc_name, Body && body) {
+grpc::Status guarded(grpc::ServerContext * context, const char * rpc_name, Body && body) {
+    const auto started = std::chrono::steady_clock::now();
+    const std::string id = next_request_id();
+    context->AddInitialMetadata("x-request-id", id);
+    std::string details;
+    grpc::Status status;
     try {
-        return body();
+        status = body(details);
     } catch (const ContextOverflowError & e) {
-        std::fprintf(stderr, "[llamad] %s error: %s\n", rpc_name, e.what());
-        return grpc::Status(grpc::StatusCode::OUT_OF_RANGE, e.what());
+        status = grpc::Status(grpc::StatusCode::OUT_OF_RANGE, e.what());
     } catch (const EngineError & e) {
-        std::fprintf(stderr, "[llamad] %s error: %s\n", rpc_name, e.what());
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, e.what());
+        status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, e.what());
     } catch (const ChatFormatError & e) {
-        std::fprintf(stderr, "[llamad] %s error: %s\n", rpc_name, e.what());
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, e.what());
+        status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, e.what());
     } catch (const std::exception & e) {
-        std::fprintf(stderr, "[llamad] %s internal error: %s\n", rpc_name, e.what());
-        return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
+        status = grpc::Status(grpc::StatusCode::INTERNAL, e.what());
     } catch (...) {
-        std::fprintf(stderr, "[llamad] %s internal error: unknown exception\n", rpc_name);
-        return grpc::Status(grpc::StatusCode::INTERNAL, "unknown error");
+        status = grpc::Status(grpc::StatusCode::INTERNAL, "unknown error");
     }
+    // Keep the daemon record on one line; the client's status retains the complete error text.
+    std::string error = status.error_message();
+    std::replace(error.begin(), error.end(), '\n', ' ');
+    std::replace(error.begin(), error.end(), '\r', ' ');
+    const double wall_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    std::fprintf(stderr, "[llamad] %s request_id=%s%s%s status=%d%s%s%s %.0fms\n",
+                  rpc_name, id.c_str(), details.empty() ? "" : " ", details.c_str(),
+                  static_cast<int>(status.error_code()), context->IsCancelled() ? " cancelled" : "",
+                  status.ok() ? "" : " error: ", error.c_str(), wall_ms);
+    return status;
 }
 
 /// One stream's writes and liveness timer. The synchronous gRPC writer permits one write at
@@ -150,43 +178,35 @@ private:
 /// Why Generate and Chat refuse an embedding model.
 constexpr const char * kEmbeddingModel = "the model is an embedding model: it serves Embed, not Generate or Chat";
 
-/// Milliseconds since `started`, for the per-request log line.
-double ms_since(std::chrono::steady_clock::time_point started) {
-    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
-}
-
 }  // namespace
 
-grpc::Status LlamaService::GetModelInfo(grpc::ServerContext *,
+grpc::Status LlamaService::GetModelInfo(grpc::ServerContext * context,
                                         const v1::GetModelInfoRequest *,
                                         v1::ModelInfo * response) {
-    return guarded("GetModelInfo", [&] {
+    return guarded(context, "GetModelInfo", [&](std::string &) {
         wire::to_proto(engine_.info(), response);
-        std::fprintf(stderr, "[llamad] GetModelInfo\n");
         return grpc::Status::OK;
     });
 }
 
-grpc::Status LlamaService::Tokenize(grpc::ServerContext *,
+grpc::Status LlamaService::Tokenize(grpc::ServerContext * context,
                                     const v1::TokenizeRequest * request,
                                     v1::TokenizeResponse * response) {
-    return guarded("Tokenize", [&] {
+    return guarded(context, "Tokenize", [&](std::string & details) {
         const std::vector<int32_t> tokens =
             engine_.tokenize(request->text(), request->add_special(), request->parse_special());
         response->mutable_tokens()->Add(tokens.begin(), tokens.end());
-        std::fprintf(stderr, "[llamad] Tokenize tokens=%zu\n", tokens.size());
+        details = "tokens=" + std::to_string(tokens.size());
         return grpc::Status::OK;
     });
 }
 
-grpc::Status LlamaService::stream_generation(const char * rpc_name,
+grpc::Status LlamaService::stream_generation(std::string & log_details,
                                              grpc::ServerContext * context,
                                              const std::string & prompt,
                                              const SamplingParams & params,
                                              grpc::ServerWriter<v1::GenerateChunk> * writer,
                                              ChatFormat::Stream * stream) {
-    const auto started = std::chrono::steady_clock::now();
-
     // Activity frames start here, after Chat's template rendering. A timer sends them rather
     // than the engine's loop because a single decode batch can outlast the one-second interval.
     StreamOutput output(context, writer);
@@ -249,8 +269,8 @@ grpc::Status LlamaService::stream_generation(const char * rpc_name,
         output.write(final_chunk);
     }
 
-    log_request(rpc_name, result.stats, wire::value_name(reason), ms_since(started),
-                stream != nullptr ? static_cast<int>(tool_calls.size()) : -1);
+    log_details = generation_details(result.stats, wire::value_name(reason),
+                                     stream != nullptr ? static_cast<int>(tool_calls.size()) : -1);
 
     return grpc::Status::OK;
 }
@@ -258,11 +278,12 @@ grpc::Status LlamaService::stream_generation(const char * rpc_name,
 grpc::Status LlamaService::Generate(grpc::ServerContext * context,
                                     const v1::GenerateRequest * request,
                                     grpc::ServerWriter<v1::GenerateChunk> * writer) {
-    return guarded("Generate", [&] {
+    return guarded(context, "Generate", [&](std::string & details) {
+        writer->SendInitialMetadata();
         if (engine_.serves_embeddings()) {
             return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, kEmbeddingModel);
         }
-        return stream_generation("Generate", context, request->prompt(), from_proto(request->sampling()), writer,
+        return stream_generation(details, context, request->prompt(), from_proto(request->sampling()), writer,
                                  /*stream*/ nullptr);
     });
 }
@@ -270,7 +291,8 @@ grpc::Status LlamaService::Generate(grpc::ServerContext * context,
 grpc::Status LlamaService::Chat(grpc::ServerContext * context,
                                 const v1::ChatRequest * request,
                                 grpc::ServerWriter<v1::GenerateChunk> * writer) {
-    return guarded("Chat", [&] {
+    return guarded(context, "Chat", [&](std::string & details) {
+        writer->SendInitialMetadata();
         if (request->messages().empty()) {
             return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "messages must not be empty");
         }
@@ -308,14 +330,14 @@ grpc::Status LlamaService::Chat(grpc::ServerContext * context,
         // One parser per request; the ChatFormat it came from is shared and immutable.
         ChatFormat::Stream stream = chat_format_->stream(rendered);
 
-        return stream_generation("Chat", context, rendered.prompt, params, writer, &stream);
+        return stream_generation(details, context, rendered.prompt, params, writer, &stream);
     });
 }
 
 grpc::Status LlamaService::Embed(grpc::ServerContext * context,
                                  const v1::EmbedRequest * request,
                                  v1::EmbedResponse * response) {
-    return guarded("Embed", [&] {
+    return guarded(context, "Embed", [&](std::string & details) {
         if (request->inputs().empty()) {
             return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "inputs must not be empty");
         }
@@ -324,16 +346,15 @@ grpc::Status LlamaService::Embed(grpc::ServerContext * context,
                                 "the model is not an embedding model: its GGUF declares no pooling type");
         }
 
-        const auto        started = std::chrono::steady_clock::now();
         const EmbedResult result  = engine_.embed({request->inputs().begin(), request->inputs().end()},
                                                   [context] { return !context->IsCancelled(); });
 
         // The engine stops short of the whole batch only when the client has gone (a cancel or
         // a deadline), and then the vectors it did make have no one to go to.
         const bool cancelled = result.embeddings.size() < static_cast<size_t>(request->inputs().size());
-        std::fprintf(stderr, "[llamad] Embed inputs=%d embedded=%zu input_tokens=%d%s %.0fms\n",
-                     request->inputs().size(), result.embeddings.size(), result.input_tokens,
-                     cancelled ? " cancelled" : "", ms_since(started));
+        details = "inputs=" + std::to_string(request->inputs_size()) +
+                  " embedded=" + std::to_string(result.embeddings.size()) +
+                  " input_tokens=" + std::to_string(result.input_tokens);
         if (cancelled) {
             return grpc::Status(grpc::StatusCode::CANCELLED, "the client cancelled the call");
         }

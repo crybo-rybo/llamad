@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -86,6 +87,8 @@ struct Round {
     // prefilling, queued behind another client, or wedged.
     bool hang = false;
     int activity_frames = 0;  // empty chunks sent before the text
+    grpc::StatusCode error = grpc::StatusCode::OK;
+    std::string request_id;
 };
 
 class FakeDaemon final : public v1::Llama::Service {
@@ -118,6 +121,13 @@ public:
             round = script_[std::min(requests_.size() - 1, script_.size() - 1)];
         }
 
+        if (!round.request_id.empty()) {
+            context->AddInitialMetadata("x-request-id", round.request_id);
+            writer->SendInitialMetadata();
+        }
+        if (round.error != grpc::StatusCode::OK) {
+            return grpc::Status(round.error, "scripted request rejection");
+        }
         for (int i = 0; i < round.activity_frames; ++i) {
             writer->Write(v1::GenerateChunk{});
         }
@@ -146,10 +156,26 @@ public:
         return grpc::Status::OK;
     }
 
+    grpc::Status GetModelInfo(grpc::ServerContext * context,
+                              const v1::GetModelInfoRequest *,
+                              v1::ModelInfo *) override {
+        return unary_status(context);
+    }
+
+    grpc::Status Tokenize(grpc::ServerContext * context,
+                          const v1::TokenizeRequest *,
+                          v1::TokenizeResponse *) override {
+        return unary_status(context);
+    }
+
     // Each input's vector is its length and its position, so the caller can tell which is which.
-    grpc::Status Embed(grpc::ServerContext *,
+    grpc::Status Embed(grpc::ServerContext * context,
                        const v1::EmbedRequest * request,
                        v1::EmbedResponse * response) override {
+        const grpc::Status status = unary_status(context);
+        if (!status.ok()) {
+            return status;
+        }
         if (!serves_embeddings) {
             return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "not an embedding model");
         }
@@ -166,6 +192,8 @@ public:
 
     /// Set before a call, which then reaches Embed after it.
     bool serves_embeddings = true;
+    std::string unary_request_id;
+    grpc::StatusCode unary_error = grpc::StatusCode::OK;
 
     // Chat runs on a gRPC server thread, so the assertions read a copy taken under the lock.
     std::vector<std::vector<client::ChatMessage>> requests() const {
@@ -186,6 +214,14 @@ public:
     }
 
 private:
+    grpc::Status unary_status(grpc::ServerContext * context) const {
+        if (!unary_request_id.empty()) {
+            context->AddInitialMetadata("x-request-id", unary_request_id);
+        }
+        return unary_error == grpc::StatusCode::OK ? grpc::Status::OK :
+            grpc::Status(unary_error, "scripted unary failure");
+    }
+
     mutable std::mutex                            mutex_;
     std::vector<Round>                            script_;
     std::vector<std::vector<client::ChatMessage>> requests_;
@@ -325,9 +361,11 @@ void test_two_calls_in_one_round() {
 void test_stats_are_summed_over_rounds() {
     Round asking        = tool_round({{"call_0", "shout", R"({"word":"Oslo"})"}});
     asking.stats        = {10, 5, 1.5, 2.5, 0};
+    asking.request_id   = "tool-round";
     Round answer;
     answer.text  = {"ok"};
     answer.stats = {20, 7, 3.0, 4.0, 9};
+    answer.request_id = "answer-round";
 
     Harness harness({asking, answer});
 
@@ -339,6 +377,7 @@ void test_stats_are_summed_over_rounds() {
     CHECK(result.stats.prompt_ms == 4.5);
     CHECK(result.stats.completion_ms == 6.5);
     CHECK(result.stats.cached_prompt_tokens == 9);
+    CHECK_EQ(result.request_id, "answer-round");
 }
 
 // A model that keeps asking spends the budget and stops, with the last round's results in history.
@@ -581,6 +620,7 @@ void test_stop_after_the_final_chunk() {
     Round answer;
     answer.final_text = "done";
     answer.stats      = {5, 3, 1.0, 2.0};
+    answer.request_id = "accepted-final";
 
     Harness harness({answer});
 
@@ -593,6 +633,7 @@ void test_stop_after_the_final_chunk() {
 
     CHECK(stop.stop_requested());
     CHECK(result.reason == client::FinishReason::Eog);
+    CHECK_EQ(result.request_id, "accepted-final");
     CHECK(result.stats.prompt_tokens == 5);
     CHECK(result.stats.completion_tokens == 3);
 }
@@ -628,6 +669,8 @@ void test_stop_before_tools_run() {
 void test_timeout() {
     Round silent;
     silent.hang = true;
+    silent.activity_frames = 1;
+    silent.request_id = "deadline-rpc";
     Round answer;
     answer.text = {"in time"};
 
@@ -639,11 +682,15 @@ void test_timeout() {
     CHECK(result.reason == client::FinishReason::Eog);
 
     int code = 0;
+    int activity = 0;
     try {
-        harness.client.chat({{"user", "hello"}}, params, nullptr, {.timeout = std::chrono::milliseconds(50)});
+        harness.client.chat({{"user", "hello"}}, params, nullptr, {
+            .timeout = std::chrono::milliseconds(50), .on_activity = [&] { ++activity; }});
     } catch (const client::RpcError & e) {
         code = e.code;
+        CHECK_EQ(e.request_id, "deadline-rpc");
     }
+    CHECK(activity == 1);  // a received frame establishes that initial metadata arrived
     CHECK(code == 4);   // DEADLINE_EXCEEDED
 }
 
@@ -787,6 +834,124 @@ void test_embed_refused() {
     CHECK(code == static_cast<int>(grpc::StatusCode::FAILED_PRECONDITION));
 }
 
+void test_stream_request_ids() {
+    Round answer;
+    answer.text = {"ok"};
+    answer.request_id = "successful-rpc";
+    Round failure;
+    failure.error = grpc::StatusCode::INVALID_ARGUMENT;
+    failure.request_id = "failed-rpc";
+    Harness harness({answer, failure, Round{}});
+
+    const auto result = harness.client.chat({{"user", "hello"}}, params, nullptr);
+    CHECK_EQ(result.request_id, "successful-rpc");
+    int code = 0;
+    try {
+        harness.client.generate("hello", params, nullptr);
+    } catch (const client::RpcError & e) {
+        code = e.code;
+        CHECK_EQ(e.request_id, "failed-rpc");
+        CHECK_EQ(std::string(e.what()), "scripted request rejection");
+    }
+    CHECK(code == static_cast<int>(grpc::StatusCode::INVALID_ARGUMENT));
+    CHECK(harness.client.generate("hello", params, nullptr).request_id.empty());
+}
+
+void test_unary_request_ids() {
+    Harness harness({Round{}});
+    harness.daemon.unary_error = grpc::StatusCode::FAILED_PRECONDITION;
+    const std::function<void()> calls[] = {
+        [&] { harness.client.get_model_info(); },
+        [&] { harness.client.tokenize("hello"); },
+        [&] { harness.client.embed({"hello"}); },
+    };
+    for (const std::string id : {std::string("unary-rpc"), std::string()}) {
+        harness.daemon.unary_request_id = id;
+        for (const auto & call : calls) {
+            int code = 0;
+            try {
+                call();
+            } catch (const client::RpcError & e) {
+                code = e.code;
+                CHECK_EQ(e.request_id, id);
+                CHECK_EQ(std::string(e.what()), "scripted unary failure");
+            }
+            CHECK(code == static_cast<int>(grpc::StatusCode::FAILED_PRECONDITION));
+        }
+    }
+}
+
+void test_tool_round_error_id() {
+    Round asking = tool_round({{"call_0", "shout", R"({"word":"Oslo"})"}});
+    asking.request_id = "first-round";
+    Round failure;
+    failure.error = grpc::StatusCode::INTERNAL;
+    failure.request_id = "failing-round";
+    Harness harness({asking, failure});
+    std::vector<client::ChatMessage> history = {{"user", "hello"}};
+    int code = 0;
+    try {
+        harness.client.chat(history, make_tools(), params, nullptr);
+    } catch (const client::RpcError & e) {
+        code = e.code;
+        CHECK_EQ(e.request_id, "failing-round");
+    }
+    CHECK(code == static_cast<int>(grpc::StatusCode::INTERNAL));
+    CHECK_EQ(tool_log, "shout:Oslo;");
+    CHECK(history.size() == 3);
+}
+
+void test_cancelled_request_id() {
+    Round answer;
+    answer.text = {"stop here"};
+    answer.hang = true;
+    answer.request_id = "cancelled-rpc";
+    Harness harness({answer});
+    const auto result = harness.client.generate("hello", params, [](const std::string &) { return false; });
+    CHECK(result.reason == client::FinishReason::Cancelled);
+    CHECK_EQ(result.request_id, "cancelled-rpc");
+}
+
+void test_unreachable_request_id() {
+    TempSocket socket;
+    client::Client client(socket.path);
+    int code = 0;
+    try {
+        client.get_model_info({.timeout = std::chrono::seconds(1)});
+    } catch (const client::RpcError & e) {
+        code = e.code;
+        CHECK(e.request_id.empty());
+    }
+    CHECK(code == static_cast<int>(grpc::StatusCode::UNAVAILABLE));
+}
+
+void test_concurrent_request_ids() {
+    std::vector<Round> script(4);
+    for (size_t i = 0; i < script.size(); ++i) {
+        script[i].text = {std::to_string(i)};
+        script[i].request_id = "rpc-" + std::to_string(i);
+    }
+    Harness harness(script);
+    std::vector<std::string> text(script.size()), ids(script.size());
+    std::vector<std::jthread> workers;
+    for (size_t i = 0; i < script.size(); ++i) {
+        workers.emplace_back([&, i] {
+            ids[i] = harness.client.generate("hello", params, [&](const std::string & chunk) {
+                text[i] += chunk;
+                return true;
+            }).request_id;
+        });
+    }
+    for (auto & worker : workers) {
+        worker.join();
+    }
+    for (size_t i = 0; i < script.size(); ++i) {
+        CHECK_EQ(ids[i], "rpc-" + text[i]);
+    }
+    std::sort(ids.begin(), ids.end());
+    CHECK(std::adjacent_find(ids.begin(), ids.end()) == ids.end());
+}
+
 // A stop cancels embed() like any other call, and it throws, having no partial result to return.
 void test_embed_stopped() {
     Harness harness({Round{}});
@@ -832,6 +997,12 @@ int main() {
     test_embed_returns_vectors_in_order();
     test_embed_refused();
     test_embed_stopped();
+    test_stream_request_ids();
+    test_unary_request_ids();
+    test_tool_round_error_id();
+    test_cancelled_request_id();
+    test_unreachable_request_id();
+    test_concurrent_request_ids();
 
     return tests::report();
 }

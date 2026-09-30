@@ -20,6 +20,7 @@
 namespace llamad {
 
 /// Stateless RPC adapter; serializes generation through Engine and owns no model or tools.
+/// Each entered RPC sends x-request-id initial metadata and emits one matching request log.
 class LlamaService final : public v1::Llama::Service {
 public:
     /// `chat_format` may be null: a model whose template is missing or unparsable still serves
@@ -68,7 +69,8 @@ private:
     /// write the single final chunk carrying finish_reason, stats and any tool calls.
     /// `stream` is Chat's parser, which decides what text the client sees and parses the tool
     /// calls once generation is over; Generate passes null. What the engine throws propagates.
-    grpc::Status stream_generation(const char * rpc_name,
+    /// `log_details` receives the final token counts and finish reason for the handler's log.
+    grpc::Status stream_generation(std::string & log_details,
                                    grpc::ServerContext * context,
                                    const std::string & prompt,
                                    const SamplingParams & params,

@@ -23,9 +23,17 @@ namespace llamad {
 namespace client {
 namespace {
 
+/// Read after RPC completion, when initial metadata is available even on received error statuses.
+std::string request_id(const grpc::ClientContext & context) {
+    const auto & metadata = context.GetServerInitialMetadata();
+    const auto entry = metadata.find("x-request-id");
+    return entry == metadata.end() ? std::string{} :
+                                    std::string(entry->second.data(), entry->second.size());
+}
+
 /// Translate a failed transport status into the public client exception.
-[[noreturn]] void throw_rpc_error(const grpc::Status & status) {
-    throw RpcError(static_cast<int>(status.error_code()), status.error_message());
+[[noreturn]] void throw_rpc_error(const grpc::Status & status, const grpc::ClientContext & context) {
+    throw RpcError(static_cast<int>(status.error_code()), status.error_message(), request_id(context));
 }
 
 /// What a tool that could not run reports back to the model: {"error":"..."}.
@@ -101,7 +109,7 @@ struct Client::Impl {
                            Reader & reader,
                            const ChunkCallback & on_chunk,
                            const CallOptions & options) {
-        GenerateResult result{FinishReason::Eog, {}};
+        GenerateResult result{FinishReason::Eog, {}, {}, {}};
         bool cancelled = false;  // by on_chunk
         bool finished  = false;  // the final chunk arrived
 
@@ -139,10 +147,11 @@ struct Client::Impl {
         }
 
         const grpc::Status status = reader->Finish();
+        result.request_id = request_id(context);
         // This side asked for the cancel, so CANCELLED here is the expected outcome.
         const bool asked_to_cancel = cancelled || options.stop.stop_requested();
         if (!status.ok() && !(asked_to_cancel && status.error_code() == grpc::StatusCode::CANCELLED)) {
-            throw_rpc_error(status);
+            throw_rpc_error(status, context);
         }
         // A stop that arrives after the final chunk is too late to cancel anything, and the
         // reason that chunk carried stands.
@@ -182,7 +191,7 @@ ModelInfo Client::get_model_info(const CallOptions & options) {
     v1::ModelInfo          response;
     const grpc::Status status = impl_->stub->GetModelInfo(&call.context, request, &response);
     if (!status.ok()) {
-        throw_rpc_error(status);
+        throw_rpc_error(status, call.context);
     }
 
     return wire::from_proto<ModelInfo>(response);
@@ -202,7 +211,7 @@ std::vector<int32_t> Client::tokenize(const std::string & text,
     v1::TokenizeResponse response;
     const grpc::Status status = impl_->stub->Tokenize(&call.context, request, &response);
     if (!status.ok()) {
-        throw_rpc_error(status);
+        throw_rpc_error(status, call.context);
     }
     return std::vector<int32_t>(response.tokens().begin(), response.tokens().end());
 }
@@ -267,7 +276,7 @@ EmbedResult Client::embed(const std::vector<std::string> & inputs, const CallOpt
     v1::EmbedResponse  response;
     const grpc::Status status = impl_->stub->Embed(&call.context, request, &response);
     if (!status.ok()) {
-        throw_rpc_error(status);
+        throw_rpc_error(status, call.context);
     }
     return wire::from_proto<EmbedResult>(response);
 }
@@ -284,7 +293,7 @@ GenerateResult Client::chat(std::vector<ChatMessage> & history,
         throw std::invalid_argument("chat: max_rounds must be positive");
     }
 
-    GenerateResult result{FinishReason::Eog, {}, {}};
+    GenerateResult result{FinishReason::Eog, {}, {}, {}};
     GenerateStats  total{};
 
     for (int round = 0; round < max_rounds; ++round) {
