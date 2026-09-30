@@ -19,9 +19,10 @@ client, `llamad::client`, and the generated protocol code, `llamad::proto`, and 
 No llama.cpp, so no submodules to clone; no daemon, no C compiler, and no tests registered with
 your CTest. Your build type and compile-commands settings are left alone.
 
-It still needs, found through their CMake configs:
+The reflected client needs:
 
-- gRPC and Protobuf. On macOS, the ones `scripts/build-deps-macos.sh` builds, with its
+- gRPC and Protobuf. gRPC uses its CMake config; Protobuf prefers its config and otherwise
+  uses CMake's `FindProtobuf` module. On macOS, the ones `scripts/build-deps-macos.sh` builds, with its
   `build-deps/prefix` on your `CMAKE_PREFIX_PATH` (see [building.md](building.md)).
 - nlohmann/json: your project's `nlohmann_json::nlohmann_json` target if it defines one before
   including llamad, or else an installed package (`pacman -S nlohmann-json`,
@@ -36,6 +37,10 @@ is compiled with GCC 16 or later too.
 daemon but no model: implement `llamad::v1::Llama::Service` with scripted replies, serve it on
 a private socket and point a `Client` at it. `tests/consumer/` is such a project, built by CI
 against every commit.
+
+Set `LLAMAD_PROTO_ONLY=ON` before fetching to build just `llamad::proto` with an ordinary
+C++17 compiler. It takes precedence over the client-only default and requires neither
+reflection nor nlohmann/json; the README shows the minimal direct-stub example.
 
 ## Streaming chat
 

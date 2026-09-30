@@ -55,7 +55,17 @@ int main() {
     llamad::client::ToolSet tools;
     tools.add<^^hello>();
 
+    auto stub = llamad::v1::Llama::NewStub(
+        grpc::CreateChannel("unix:" + socket, grpc::InsecureChannelCredentials()));
+    grpc::ClientContext            context;
+    llamad::v1::GetModelInfoRequest request;
+    llamad::v1::ModelInfo          info;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(10));
+    const grpc::Status status = stub->GetModelInfo(&context, request, &info);
+
     const bool ok = server != nullptr &&
+                    status.ok() && info.description() == "fake" &&
+                    info.GetDescriptor()->file()->name() == "llamad/v1/llamad.proto" &&
                     client.get_model_info({.timeout = std::chrono::seconds(10)}).description == "fake" &&
                     tools.call({"call_0", "hello", "{}"}) == "hello";
 

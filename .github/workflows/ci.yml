@@ -90,3 +90,37 @@ jobs:
           ctest --test-dir build-consumer -N | tee ctest-list.txt
           grep -q "Total Tests: 1$" ctest-list.txt
           ctest --test-dir build-consumer --output-on-failure --no-tests=error
+
+  proto-consumer:
+    name: Wire stubs with Ubuntu packages and ordinary C++
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      # Ubuntu's Protobuf has no config package, exercising FindProtobuf's module fallback.
+      - name: Install dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          cmake ninja-build g++ libgrpc++-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc
+
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Configure consumer
+        run: |
+          cmake -S tests/proto_consumer -B build-proto-consumer -G Ninja \
+            -DLLAMAD_GIT_REPOSITORY="$GITHUB_WORKSPACE" \
+            -DLLAMAD_GIT_TAG="$(git rev-parse HEAD)" \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Build and verify compiler flags
+        run: |
+          cmake --build build-proto-consumer --parallel 2
+          ! grep -q -- '-freflection\|-std=.*26' build-proto-consumer/compile_commands.json
+
+      - name: Run consumer test
+        run: |
+          ctest --test-dir build-proto-consumer -N | tee ctest-list.txt
+          grep -q "Total Tests: 1$" ctest-list.txt
+          ctest --test-dir build-proto-consumer --output-on-failure --no-tests=error

@@ -5,6 +5,9 @@
 llamad is written in C++26 and uses static reflection, so it needs GCC 16 or later. Clang and
 Apple Clang do not implement reflection. Linux and macOS on Apple silicon are the supported
 platforms; on both, GCC compiles every C++ source, including your own if you link the client.
+The wire-stub target `llamad::proto` needs only ordinary C++17, or the language level required
+by the installed gRPC/Protobuf packages. Proto-only consumers can use GCC or Clang without
+reflection.
 
 ## Linux
 
@@ -17,6 +20,33 @@ cd llamad
 ```
 
 If you already cloned without submodules: `git submodule update --init --recursive`.
+
+For a proto-only build on Ubuntu 24.04, the distribution packages suffice:
+
+```sh
+sudo apt install g++ cmake ninja-build libgrpc++-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc
+cmake -S . -B build-proto -G Ninja -DLLAMAD_PROTO_ONLY=ON
+cmake --build build-proto
+```
+
+Protobuf's config package is preferred, preserving its dependency targets for modern
+Protobuf/Abseil installations. When it is absent, CMake's `FindProtobuf` module supplies the
+library and compiler targets. gRPC requires its config package in either case.
+
+## Build modes
+
+| Mode | Selection | Targets and requirements |
+| --- | --- | --- |
+| Full | Top-level default | Daemon, client, engine utilities, tests; GCC 16 reflection and llama.cpp checkout. Without gRPC/Protobuf, only engine utilities and their tests build. |
+| Client-only | Inclusion default, or `LLAMAD_CLIENT_ONLY=ON` | `llamad::client` and `llamad::proto`; GCC 16 reflection, gRPC/Protobuf, nlohmann/json; no C compiler or submodules. |
+| Proto-only | `LLAMAD_PROTO_ONLY=ON` | `llamad::proto`; ordinary C++17, gRPC/Protobuf; no reflected client, nlohmann/json, C compiler, submodules, daemon utilities or project tests. |
+
+Proto-only takes precedence when client-only is also enabled, including its default in a
+`FetchContent` build. Client-only and proto-only fail if transport dependencies are missing.
+A containing project owns its tests; llamad registers none in that project. The README shows
+minimal `FetchContent` examples for each consumer. Client and direct-stub users in one program
+link the same generated-message target; generating another copy of the protocol duplicates
+Protobuf's descriptors.
 
 ## macOS
 

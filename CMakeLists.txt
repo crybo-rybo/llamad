@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.21)
 project(llamad LANGUAGES CXX)
 
-# A project that pulls llamad in wants the client, not a second copy of the daemon: client-only
-# builds llamad_proto and llamad_client and nothing else, so it needs neither llama.cpp (nor the
-# submodule checked out) nor a C compiler.
+# Included by another project, the client is the default. Proto-only takes precedence and
+# needs neither the reflected client nor a C compiler or a llama.cpp checkout.
+option(LLAMAD_PROTO_ONLY "Build only llamad_proto, without reflection or llama.cpp" OFF)
 if(PROJECT_IS_TOP_LEVEL)
     option(LLAMAD_CLIENT_ONLY "Build only llamad_proto and llamad_client, without llama.cpp" OFF)
 else()
@@ -23,11 +23,10 @@ if(PROJECT_IS_TOP_LEVEL)
     endif()
 endif()
 
-if(NOT LLAMAD_CLIENT_ONLY)
+if(NOT (LLAMAD_CLIENT_ONLY OR LLAMAD_PROTO_ONLY))
     enable_language(C)
 
-    # llama.cpp builds at the standard it is written for. The project's own targets are declared
-    # after it and use C++26 (see below).
+    # llama.cpp builds at the standard it is written for. Our targets declare their own level.
     set(CMAKE_CXX_STANDARD 17)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -52,35 +51,47 @@ if(NOT LLAMAD_CLIENT_ONLY)
     endif()
 endif()
 
-# llamad is written in C++26 and relies on static reflection (<meta>), which GCC enables with
-# -freflection. Checked here so an unsupported compiler fails at configure time with a reason.
-set(CMAKE_CXX_STANDARD 26)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-include(CheckCXXSourceCompiles)
-set(CMAKE_REQUIRED_FLAGS "-std=c++26 -freflection")
-check_cxx_source_compiles("
-    #include <meta>
-    struct S { int a; };
-    static_assert(std::meta::nonstatic_data_members_of(^^S, std::meta::access_context::current()).size() == 1);
-    int main() {}" LLAMAD_HAVE_REFLECTION)
-unset(CMAKE_REQUIRED_FLAGS)
-if(NOT LLAMAD_HAVE_REFLECTION)
-    message(FATAL_ERROR "llamad needs a compiler with C++26 static reflection (GCC 16 or later): "
-                        "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} does not provide it.")
+if(NOT LLAMAD_PROTO_ONLY)
+    # The client and flag parser reflect over application structs. The probe is independent of
+    # the generated stubs' ordinary C++ requirements; flags are attached to their users below.
+    include(CheckCXXSourceCompiles)
+    include(CMakePushCheckState)
+    cmake_push_check_state(RESET)
+    set(llamad_saved_cxx_standard "${CMAKE_CXX_STANDARD}")
+    set(CMAKE_CXX_STANDARD 26)
+    set(CMAKE_REQUIRED_FLAGS "-std=c++26 -freflection")
+    check_cxx_source_compiles("
+        #include <meta>
+        struct S { int a; };
+        static_assert(std::meta::nonstatic_data_members_of(^^S, std::meta::access_context::current()).size() == 1);
+        int main() {}" LLAMAD_HAVE_REFLECTION)
+    cmake_pop_check_state()
+    if(llamad_saved_cxx_standard)
+        set(CMAKE_CXX_STANDARD "${llamad_saved_cxx_standard}")
+    else()
+        unset(CMAKE_CXX_STANDARD)
+    endif()
+    unset(llamad_saved_cxx_standard)
+    if(NOT LLAMAD_HAVE_REFLECTION)
+        message(FATAL_ERROR "llamad needs a compiler with C++26 static reflection (GCC 16 or later): "
+                            "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} does not provide it.")
+    endif()
 endif()
-add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-freflection>)
 
-if(NOT LLAMAD_CLIENT_ONLY)
+if(NOT (LLAMAD_CLIENT_ONLY OR LLAMAD_PROTO_ONLY))
     # Command-line flags, from a struct whose members are the flags. Header-only and standard
     # library only; its one include directory is src/cli, so llamad-chat parses its flags without
     # any daemon header becoming reachable from the client tree.
     add_library(llamad_flags INTERFACE)
     target_include_directories(llamad_flags INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src/cli)
+    target_compile_features(llamad_flags INTERFACE cxx_std_26)
+    target_compile_options(llamad_flags INTERFACE $<$<COMPILE_LANGUAGE:CXX>:-freflection>)
 
     # Engine: libllama wrapper, no gRPC/protobuf.
     add_library(llamad_engine STATIC src/engine.cpp)
     target_include_directories(llamad_engine PUBLIC src)
     target_link_libraries(llamad_engine PUBLIC llama)
+    target_compile_features(llamad_engine PUBLIC cxx_std_26)
 
     # Chat layer: the only place llama.cpp's unstable `common` chat API is used. llama-common is
     # PRIVATE so none of its headers (or nlohmann/json) leak to consumers of chat_format.h; CMake
@@ -91,21 +102,28 @@ if(NOT LLAMAD_CLIENT_ONLY)
     set_target_properties(llama-common nlohmann PROPERTIES SYSTEM ON)
     target_include_directories(llamad_chat PUBLIC src)
     target_link_libraries(llamad_chat PRIVATE llama-common)
+    target_compile_features(llamad_chat PUBLIC cxx_std_26)
 endif()
 
 # Registered with a project that includes llamad, the tests would be its tests.
-if(PROJECT_IS_TOP_LEVEL)
+if(PROJECT_IS_TOP_LEVEL AND NOT LLAMAD_PROTO_ONLY)
     enable_testing()
 endif()
 
 # Everything below needs gRPC; the engine can be built and tested without it, but the client
 # cannot.
-find_package(Protobuf CONFIG)
-find_package(gRPC CONFIG)
+find_package(Protobuf CONFIG QUIET)
+if(NOT Protobuf_FOUND)
+    find_package(Protobuf MODULE QUIET)
+endif()
+find_package(gRPC CONFIG QUIET)
 if(NOT (Protobuf_FOUND AND gRPC_FOUND))
-    if(LLAMAD_CLIENT_ONLY)
-        message(FATAL_ERROR "gRPC/Protobuf not found, and the client needs them: `pacman -S grpc protobuf` "
-                            "on Arch Linux; on macOS, build them with llamad's scripts/build-deps-macos.sh "
+    if(LLAMAD_CLIENT_ONLY OR LLAMAD_PROTO_ONLY)
+        message(FATAL_ERROR "gRPC/Protobuf not found, and client-only/proto-only builds require both: "
+                            "`pacman -S grpc protobuf` on Arch Linux; "
+                            "`apt install libgrpc++-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc` "
+                            "on Ubuntu; "
+                            "on macOS, build them with llamad's scripts/build-deps-macos.sh "
                             "and put its build-deps/prefix on CMAKE_PREFIX_PATH (see docs/building.md)")
     endif()
     message(WARNING "gRPC/Protobuf not found: building the engine only (see README.md for dependencies)")
@@ -113,22 +131,10 @@ if(NOT (Protobuf_FOUND AND gRPC_FOUND))
     return()
 endif()
 
-# `proto` is on the include path alongside the generated sources, so convert.h sits next to the
-# .proto it converts and both sides spell it "llamad/v1/convert.h".
-add_library(llamad_proto STATIC proto/llamad/v1/llamad.proto)
-add_library(llamad::proto ALIAS llamad_proto)
-target_link_libraries(llamad_proto PUBLIC protobuf::libprotobuf gRPC::grpc++)
-target_include_directories(llamad_proto PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/proto ${CMAKE_CURRENT_BINARY_DIR}/gen)
-file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/gen)
-protobuf_generate(TARGET llamad_proto
-    IMPORT_DIRS proto
-    PROTOC_OUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/gen)
-protobuf_generate(TARGET llamad_proto
-    LANGUAGE grpc
-    GENERATE_EXTENSIONS .grpc.pb.h .grpc.pb.cc
-    PLUGIN "protoc-gen-grpc=$<TARGET_FILE:gRPC::grpc_cpp_plugin>"
-    IMPORT_DIRS proto
-    PROTOC_OUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/gen)
+add_subdirectory(proto)
+if(LLAMAD_PROTO_ONLY)
+    return()
+endif()
 
 add_subdirectory(client)
 if(LLAMAD_CLIENT_ONLY)
