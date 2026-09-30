@@ -457,9 +457,8 @@ ChatFormat::Stream::Final ChatFormat::Stream::finish() {
     final.content_tail           = advanced.delta;
 
     if (!advanced.ok) {
-        // The parser rejected the output outright. There is no parse to take content from, so the
-        // raw remainder is the only honest answer: nothing generated is silently dropped. This is
-        // fallback can include markup the parser did not classify as a tool call.
+        // Without a parse, preserve the raw remainder if it can be located. This fallback can
+        // include markup the parser did not classify as a tool call.
         const size_t offset = impl_->raw_offset_after_emitted();
         if (offset != std::string::npos && offset < impl_->accumulated.size()) {
             final.content_tail = impl_->accumulated.substr(offset);
