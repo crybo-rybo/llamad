@@ -93,13 +93,8 @@ registered with `ToolSet::add`, free or bound to an object, with or without para
 client runs the execute-and-resend loop.
 `chat<T>` returns the reply as an instance of a reflected struct, constrained by its schema.
 `embed` returns one unit-length vector per input from a daemon serving an embedding model.
-Generation calls wait for the shared engine; admission order is unspecified. Empty activity
-frames report handler liveness about once a second after Chat template rendering, including
-queueing and prefill. `CallOptions::on_activity` observes every streaming message on the
-calling thread while the text callback receives only user-visible content.
-
 Every call takes a trailing `CallOptions`: a `std::stop_token` that cancels it from another
-thread, and a timeout.
+thread, a timeout, and an `on_activity` callback that shows a streaming call is still alive.
 [docs/client.md](docs/client.md) has the full walkthrough.
 
 ## Documentation

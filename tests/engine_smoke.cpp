@@ -70,7 +70,7 @@ struct Options {
     long cancel_after = -1;  ///< Return false from the chunk callback after N chunks.
 
     [[=help{"cancel after N milliseconds, including queueing and prompt processing"}]]
-    long cancel_after_ms = -1;  ///< Elapsed-time cancellation checked between decode batches.
+    long cancel_after_ms = -1;  ///< Cancel after N milliseconds, including queueing and prompt processing.
 
     [[=help{"run generate() N times in the same process"}]]
     long repeat = 1;  ///< Run generate() N times in the same process.
@@ -269,6 +269,14 @@ int main(int argc, char ** argv) {
                 stream.emplace(format->stream(rendered));
             }
 
+            // The engine asks keep_going only up to the end of the prompt, so on_chunk asks it too,
+            // as the daemon's callback does.
+            const auto started    = std::chrono::steady_clock::now();
+            const auto keep_going = [&] {
+                return options.cancel_after_ms < 0 ||
+                    std::chrono::steady_clock::now() - started < std::chrono::milliseconds(options.cancel_after_ms);
+            };
+
             long chunks = 0;
             auto on_chunk = [&](const std::string & piece) -> bool {
                 ++chunks;
@@ -277,14 +285,10 @@ int main(int argc, char ** argv) {
                     std::fwrite(visible.data(), 1, visible.size(), stdout);
                     std::fflush(stdout);
                 }
-                return !(options.cancel_after >= 0 && chunks >= options.cancel_after);
+                return !(options.cancel_after >= 0 && chunks >= options.cancel_after) && keep_going();
             };
 
-            const auto started = std::chrono::steady_clock::now();
-            const llamad::GenerateResult result = engine.generate(text, params, on_chunk, [&] {
-                return options.cancel_after_ms < 0 ||
-                    std::chrono::steady_clock::now() - started < std::chrono::milliseconds(options.cancel_after_ms);
-            });
+            const llamad::GenerateResult result = engine.generate(text, params, on_chunk, keep_going);
 
             std::fflush(stdout);
             std::fprintf(stderr,

@@ -80,6 +80,7 @@ agreement first, not a clever workaround.
    `finish_reason` and `stats`. Tool calls arrive whole on that final chunk, and `tool_calls` is
    non-empty if and only if the finish reason is `TOOL_CALLS`. Text chunks carry user-visible
    content only — never tool-call markup, never partial UTF-8, never part of a matched stop string.
+   Empty activity chunks, carrying nothing but liveness, may come anywhere before the final one.
 6. **Local only.** A Unix socket created 0600. No TCP listener.
 
 ## How to make changes

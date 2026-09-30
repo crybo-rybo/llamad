@@ -183,8 +183,8 @@ grpc::Status LlamaService::stream_generation(const char * rpc_name,
                                              ChatFormat::Stream * stream) {
     const auto started = std::chrono::steady_clock::now();
 
-    // Reporting starts here, after Chat's template rendering. The timer reports handler
-    // liveness during queueing, prefill and generation, rather than decoder progress.
+    // Activity frames start here, after Chat's template rendering. A timer sends them rather
+    // than the engine's loop because a single decode batch can outlast the one-second interval.
     StreamOutput output(context, writer);
 
     const auto write_text = [&](const std::string & text) {
@@ -201,7 +201,8 @@ grpc::Status LlamaService::stream_generation(const char * rpc_name,
             return write_text(text);
         }
         // Chat: the parser decides what is visible content. An empty delta means the text is
-        // part of a tool call (or not yet known to be), so nothing goes on the wire for it.
+        // part of a tool call (or not yet known to be), so nothing goes on the wire for it; a
+        // departed client is still reported, since generation stops only through this callback.
         const std::string visible = stream->push(text);
         return visible.empty() ? output.active() : write_text(visible);
     };

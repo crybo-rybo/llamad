@@ -106,14 +106,14 @@ message ChatRequest {
   string response_json_schema = 4;
 }
 
-/// Why generation ended; UNSPECIFIED marks text or activity before the final chunk.
+/// Why generation ended; UNSPECIFIED marks a text or activity chunk.
 enum FinishReason {
-  FINISH_REASON_UNSPECIFIED = 0;  ///< Non-final text or empty activity frame.
+  FINISH_REASON_UNSPECIFIED = 0;  ///< Text or activity chunk; generation is still in progress.
   FINISH_REASON_EOG = 1;        ///< model emitted an end-of-generation token
   FINISH_REASON_LENGTH = 2;     ///< max_tokens or context limit reached
   FINISH_REASON_STOP = 3;       ///< a stop string matched
-  /// Assigned cancellation value, not emitted by this daemon: a client that leaves receives
-  /// no final chunk. Engine and client results also use this value for local cancellation.
+  /// Never sent: a cancelled stream ends without a final chunk. The client library reports a
+  /// call it cancelled with this reason.
   FINISH_REASON_CANCELLED = 4;
   FINISH_REASON_TOOL_CALLS = 5; ///< the model asked for one or more tools
 }
@@ -134,13 +134,12 @@ message GenerateStats {
 /// that same final chunk, whole and never as fragments; `text` chunks only ever
 /// carry user-visible content, never tool-call markup. Transport failure or cancellation
 /// can end the stream before the final chunk; tool_calls is non-empty iff the final
-/// finish_reason is FINISH_REASON_TOOL_CALLS. An activity frame has empty text, UNSPECIFIED
-/// finish_reason, no stats and no tool calls. The daemon sends these about once a second from
-/// entry to generation (after Chat template rendering), including while queued or decoding.
-/// They indicate handler/transport liveness, not inference progress.
+/// finish_reason is FINISH_REASON_TOOL_CALLS. An activity chunk is empty: the daemon sends one
+/// about once a second, also while the call waits for the engine, to show that the call is
+/// alive, not that it is making progress.
 message GenerateChunk {
   string text = 1;  ///< User-visible output, excluding recognized tool markup and matched stops.
-  FinishReason finish_reason = 2;  ///< UNSPECIFIED on text/activity chunks; a concrete reason on the single final chunk.
+  FinishReason finish_reason = 2;  ///< UNSPECIFIED on text and activity chunks; a concrete reason on the single final chunk.
   GenerateStats stats = 3;  ///< Present on the final chunk; counts and timings for this generation.
   repeated ToolCall tool_calls = 4;  ///< only ever set on the final chunk
 }

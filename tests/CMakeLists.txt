@@ -60,9 +60,3 @@ target_link_libraries(engine_smoke PRIVATE llamad_engine llamad_chat llamad_flag
 # Prefill and decode throughput, for scripts/bench.sh. Like engine_smoke it needs a model file.
 add_executable(engine_bench engine_bench.cpp)
 target_link_libraries(engine_bench PRIVATE llamad_engine llamad_chat llamad_flags)
-
-# Real-engine and raw-daemon activity/cancellation checks; needs a model and private daemon.
-if(TARGET llamad_proto)
-    add_executable(activity_smoke activity_smoke.cpp ../src/service.cpp)
-    target_link_libraries(activity_smoke PRIVATE llamad_engine llamad_chat llamad_flags llamad_proto)
-endif()

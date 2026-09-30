@@ -24,16 +24,14 @@ script inherits SIGINT ignored, and macOS discards a signal that is both ignored
 stop one started that way with SIGTERM.
 
 The engine serves one generation at a time: concurrent clients queue rather than sharing the
-context; admission order is unspecified. A cancelled waiter leaves promptly, and a cancelled
-prompt stops between decode batches. An individual decode batch runs to completion, including
-GPU synchronization, before the shared context is released. Successful partial prompt batches
-remain available for cache reuse.
+context, in no particular order. A call whose client cancels or times out leaves the queue
+promptly, and one decoding its prompt stops before the next decode batch; the batches it already
+decoded stay in the cache for the next request.
 
-`Generate` and `Chat` send empty activity frames about once a second after entering generation
-(after Chat template rendering), including while waiting for the engine or running a long
-decode batch. These carry no text, stats, finish reason or tool calls. They report handler and
-transport liveness; they do not establish that inference advances. Whole-call deadlines still
-bound total call time.
+While a `Generate` or `Chat` call waits for the engine, decodes its prompt or generates, the
+daemon sends it an empty chunk about once a second: no text, no finish reason, no stats. These
+activity frames say that the call is alive, not that the model is making progress, so a client
+can tell a long prompt from a daemon that has gone away.
 
 The KV cache keeps what the previous request decoded, and a request decodes only the
 part of its prompt after the prefix the two share, so a chat turn or a tool round pays for its
@@ -104,19 +102,6 @@ TEXT in one request, prints the first few values of each and its cosine with the
 It takes the same context and offload flags as the daemon, plus `--chat` to render the prompt
 through the model's chat template, `--demo-tool` to add the same `get_current_time` tool to
 that rendering, `--grammar-file PATH` to constrain generation with a GBNF file of your own,
-`--stop`, `--cancel-after` (text chunks) and `--cancel-after-ms` (elapsed generation time,
-including queueing and prefill). With an embedding model, `--embed TEXT` (repeatable, in place of
-the prompt) embeds instead and prints what `llamad-chat --embed` does. `--help` lists them all.
-
-
-`activity_smoke` checks cancellation before admission, while queued and during an uncached
-multi-batch prefill, then checks the retained cache with the same, shorter and unrelated
-prompts. For queued transport checks, the real service shares an engine held at an observed
-text callback until cancelled and expired waiters finish; their prompts leave its cache
-intact. A separate raw gRPC sequence checks prefill activity and immediate cache reuse,
-text cancellation and final ordering against a private daemon. For CPU, run the daemon with
-`--ctx 8192 --threads 1 --ngl 0`, then
-`build-gpu/tests/activity_smoke MODEL /tmp/PRIVATE.sock 0`. For GPU offload, use daemon
-`--ngl 99` and replace the harness's final argument with `99`. The prefill must last more
-than one second on the test hardware to observe activity before text; a larger model can
-provide that load. Queue checks do not depend on prefill duration.
+`--stop`, `--cancel-after` (text chunks) and `--cancel-after-ms` (elapsed time, including
+queueing and the prompt). With an embedding model, `--embed TEXT` (repeatable, in place of the
+prompt) embeds instead and prints what `llamad-chat --embed` does. `--help` lists them all.

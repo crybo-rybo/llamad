@@ -350,14 +350,14 @@ public:
     /// Called when generation ended on its own: a held-back stop prefix that never
     /// completed is real output and must be delivered; an incomplete UTF-8 tail is
     /// dropped because it can never become a valid character.
-    bool flush() {
+    void flush() {
         if (pending_.empty()) {
-            return true;
+            return;
         }
         std::string out;
         out.swap(pending_);
         out.resize(out.size() - incomplete_utf8_tail(out));
-        return deliver(out);
+        deliver(out);
     }
 
 private:
@@ -999,29 +999,20 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
         throw EngineError("the model is an embedding model: it cannot generate text");
     }
 
+    // A request whose client has left gives up its place in the queue rather than waiting for,
+    // and then holding, the engine.
+    const auto cancelled = [&] { return keep_going && !keep_going(); };
     GenerateResult result{FinishReason::Cancelled, {}};
-    const auto active = [&] { return !keep_going || keep_going(); };
-    if (!active()) {
-        return result;
-    }
 
     std::unique_lock<std::timed_mutex> lock(impl_->context_mutex, std::defer_lock);
     while (!lock.try_lock_for(std::chrono::milliseconds(50))) {
-        if (!active()) {
+        if (cancelled()) {
             return result;
         }
     }
-    if (!active()) {
+    if (cancelled()) {
         return result;
     }
-
-    /// Complete outstanding GPU work on every exit, including exceptions and cancellation,
-    /// before another request can reuse or trim the shared cache.
-    struct Synchronize {
-        llama_context * ctx;  ///< Borrowed context; outlives this guard.
-        /// Complete submitted work before the context lock is released.
-        ~Synchronize() { llama_synchronize(ctx); }
-    } synchronize{impl_->ctx};
 
     std::vector<int32_t> tokens = impl_->tokenize(prompt, /*add_special*/ true, /*parse_special*/ true);
     if (tokens.empty()) {
@@ -1046,17 +1037,14 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
     // --- prompt ---------------------------------------------------------
     // Everything above leaves the cache alone, so a request refused there costs the next one
     // nothing.
-    if (!active()) {
-        result.reason = FinishReason::Cancelled;
-        return result;
-    }
     const size_t kept                 = impl_->keep_prefix(tokens);
     result.stats.cached_prompt_tokens = static_cast<int32_t>(kept);
 
     const auto t_prompt = std::chrono::steady_clock::now();
     for (size_t off = kept; off < tokens.size();) {
-        if (!active()) {
-            llama_synchronize(impl_->ctx);
+        // One batch can take seconds, so an abandoned prompt stops between batches. The batches
+        // already decoded stay in the cache and its record, for the next request to reuse.
+        if (cancelled()) {
             result.reason          = FinishReason::Cancelled;
             result.stats.prompt_ms = ms_since(t_prompt);
             return result;
@@ -1081,11 +1069,6 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
     bool       flush_tail   = true;
 
     while (true) {
-        if (!active()) {
-            result.reason = FinishReason::Cancelled;
-            flush_tail    = false;
-            break;
-        }
         if (params.max_tokens >= 0 && result.stats.completion_tokens >= params.max_tokens) {
             result.reason = FinishReason::Length;
             break;
@@ -1124,12 +1107,6 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
             break;
         }
 
-        if (!active()) {
-            result.reason = FinishReason::Cancelled;
-            flush_tail    = false;
-            break;
-        }
-
         // Only a token the loop goes on from is decoded: the one that ends it (EOG, a stop, a
         // cancel, the budget) never reaches the cache.
         llama_token   next = token;
@@ -1146,14 +1123,9 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
 
     // A stop prefix that never completed is genuine output and must still be
     // delivered; an incomplete UTF-8 tail is dropped.
-    if (!active()) {
-        result.reason = FinishReason::Cancelled;
-        flush_tail    = false;
+    if (flush_tail) {
+        filter.flush();
     }
-    if (flush_tail && !filter.flush()) {
-        result.reason = FinishReason::Cancelled;
-    }
-    llama_synchronize(impl_->ctx);
 
     result.stats.completion_ms = ms_since(t_completion);
     return result;
