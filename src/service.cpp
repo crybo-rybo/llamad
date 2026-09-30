@@ -4,10 +4,14 @@
 
 #include "service.h"
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <exception>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -63,6 +67,76 @@ grpc::Status guarded(const char * rpc_name, Body && body) {
     }
 }
 
+/// One stream's writes and liveness timer. The synchronous gRPC writer permits one write at
+/// a time; its context and writer outlive this object, whose destructor joins the timer.
+class StreamOutput {
+public:
+    StreamOutput(grpc::ServerContext * context, grpc::ServerWriter<v1::GenerateChunk> * writer)
+        : context_(context), writer_(writer), timer_([this](std::stop_token stop) {
+            try {
+                std::unique_lock lock(mutex_);
+                while (!stop.stop_requested()) {
+                    wake_.wait_for(lock, stop, std::chrono::seconds(1), [] { return false; });
+                    if (stop.stop_requested() || !write_locked(v1::GenerateChunk{})) {
+                        break;
+                    }
+                }
+            } catch (...) {
+                error_ = std::current_exception();
+                gone_.store(true);
+            }
+        }) {}
+
+    ~StreamOutput() { stop_timer(); }
+
+    bool active() {
+        if (context_->IsCancelled()) {
+            gone_.store(true);
+        }
+        return !gone_.load();
+    }
+
+    bool write(const v1::GenerateChunk & chunk) {
+        std::lock_guard lock(mutex_);
+        return write_locked(chunk);
+    }
+
+    // No activity can follow the final chunk, including on exception paths.
+    void finish_activity() {
+        stop_timer();
+        if (error_) {
+            std::rethrow_exception(error_);
+        }
+    }
+
+private:
+    bool write_locked(const v1::GenerateChunk & chunk) {
+        if (!active()) {
+            return false;
+        }
+        if (!writer_->Write(chunk)) {
+            gone_.store(true);
+            return false;
+        }
+        return true;
+    }
+
+    void stop_timer() {
+        if (timer_.joinable()) {
+            timer_.request_stop();
+            timer_.join();
+        }
+    }
+
+    grpc::ServerContext *                 context_;
+    grpc::ServerWriter<v1::GenerateChunk> * writer_;
+    std::atomic<bool>                     gone_{false};
+    std::mutex                            mutex_;
+    std::condition_variable_any           wake_;
+    std::exception_ptr                    error_;
+    std::jthread                          timer_;
+};
+
 /// Why Generate and Chat refuse an embedding model.
 constexpr const char * kEmbeddingModel = "the model is an embedding model: it serves Embed, not Generate or Chat";
 
@@ -103,24 +177,18 @@ grpc::Status LlamaService::stream_generation(const char * rpc_name,
                                              ChatFormat::Stream * stream) {
     const auto started = std::chrono::steady_clock::now();
 
-    // Set as soon as the client is known to be gone (cancel or broken stream);
-    // it suppresses the final chunk, which would only fail to write anyway.
-    bool client_gone = false;
+    // Reporting starts here, after Chat's template rendering. The timer reports handler
+    // liveness during queueing, prefill and generation, rather than decoder progress.
+    StreamOutput output(context, writer);
 
-    // Writes one ordinary text chunk. Returns false once the client is gone.
-    const auto write_text = [&](const std::string & text) -> bool {
+    const auto write_text = [&](const std::string & text) {
         v1::GenerateChunk chunk;
         chunk.set_text(text);
-        if (!writer->Write(chunk)) {
-            client_gone = true;
-            return false;
-        }
-        return true;
+        return output.write(chunk);
     };
 
     const ChunkCallback on_chunk = [&](const std::string & text) -> bool {
-        if (context->IsCancelled()) {
-            client_gone = true;
+        if (!output.active()) {
             return false;
         }
         if (stream == nullptr) {
@@ -129,19 +197,16 @@ grpc::Status LlamaService::stream_generation(const char * rpc_name,
         // Chat: the parser decides what is visible content. An empty delta means the text is
         // part of a tool call (or not yet known to be), so nothing goes on the wire for it.
         const std::string visible = stream->push(text);
-        return visible.empty() ? true : write_text(visible);
+        return visible.empty() ? output.active() : write_text(visible);
     };
 
-    const GenerateResult result = engine_.generate(prompt, params, on_chunk);
-
-    if (context->IsCancelled()) {
-        client_gone = true;
-    }
+    const GenerateResult result = engine_.generate(prompt, params, on_chunk, [&] { return output.active(); });
+    output.finish_activity();
 
     v1::FinishReason      reason = wire::enum_cast<v1::FinishReason>(result.reason);
     std::vector<ToolCall> tool_calls;
 
-    if (!client_gone && stream != nullptr) {
+    if (output.active() && stream != nullptr) {
         ChatFormat::Stream::Final final = stream->finish();
         tool_calls                      = std::move(final.tool_calls);
 
@@ -162,7 +227,7 @@ grpc::Status LlamaService::stream_generation(const char * rpc_name,
         }
     }
 
-    if (!client_gone) {
+    if (output.active()) {
         // Exactly one final chunk, carrying finish_reason, stats and any tool calls.
         v1::GenerateChunk final_chunk;
         final_chunk.set_finish_reason(reason);
@@ -170,9 +235,7 @@ grpc::Status LlamaService::stream_generation(const char * rpc_name,
         for (const ToolCall & call : tool_calls) {
             wire::to_proto(call, final_chunk.add_tool_calls());
         }
-        if (!writer->Write(final_chunk)) {
-            client_gone = true;
-        }
+        output.write(final_chunk);
     }
 
     log_request(rpc_name, result.stats, wire::value_name(reason), ms_since(started),

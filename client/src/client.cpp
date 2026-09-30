@@ -100,40 +100,53 @@ struct Client::Impl {
     GenerateResult consume(grpc::ClientContext & context,
                            Reader & reader,
                            const ChunkCallback & on_chunk,
-                           const std::stop_token & stop) {
+                           const CallOptions & options) {
         GenerateResult result{FinishReason::Eog, {}};
         bool cancelled = false;  // by on_chunk
         bool finished  = false;  // the final chunk arrived
 
         v1::GenerateChunk chunk;
-        while (reader->Read(&chunk)) {
-            if (!cancelled && on_chunk && !chunk.text().empty()) {
-                if (!on_chunk(chunk.text())) {
+        try {
+            while (reader->Read(&chunk)) {
+                if (!finished && options.stop.stop_requested()) {
+                    cancelled = true;
+                }
+                // Accept the final before callbacks: a stop requested upon receiving it cannot
+                // turn an already completed response into a local cancellation.
+                if (!cancelled && chunk.finish_reason() != v1::FINISH_REASON_UNSPECIFIED) {
+                    finished = true;
+                    result.reason = wire::enum_cast(chunk.finish_reason(), FinishReason::Eog);
+                    result.stats  = wire::from_proto<GenerateStats>(chunk.stats());
+                    result.tool_calls.clear();
+                    for (const v1::ToolCall & call : chunk.tool_calls()) {
+                        result.tool_calls.push_back(wire::from_proto<ToolCall>(call));
+                    }
+                }
+                if (!cancelled && options.on_activity) {
+                    options.on_activity();
+                }
+                if (!cancelled && on_chunk && !chunk.text().empty() && !on_chunk(chunk.text())) {
                     cancelled = true;
                     context.TryCancel();
                 }
             }
-            if (chunk.finish_reason() != v1::FINISH_REASON_UNSPECIFIED) {
-                finished = true;
-                // A reason a later daemon knows and this client does not reads as Eog.
-                result.reason = wire::enum_cast(chunk.finish_reason(), FinishReason::Eog);
-                result.stats  = wire::from_proto<GenerateStats>(chunk.stats());
-                result.tool_calls.clear();
-                for (const v1::ToolCall & call : chunk.tool_calls()) {
-                    result.tool_calls.push_back(wire::from_proto<ToolCall>(call));
-                }
-            }
+        } catch (...) {
+            // The reader must finish before the context disappears, even when user code throws.
+            context.TryCancel();
+            while (reader->Read(&chunk)) {}
+            reader->Finish();
+            throw;
         }
 
         const grpc::Status status = reader->Finish();
         // This side asked for the cancel, so CANCELLED here is the expected outcome.
-        const bool asked_to_cancel = cancelled || stop.stop_requested();
+        const bool asked_to_cancel = cancelled || options.stop.stop_requested();
         if (!status.ok() && !(asked_to_cancel && status.error_code() == grpc::StatusCode::CANCELLED)) {
             throw_rpc_error(status);
         }
         // A stop that arrives after the final chunk is too late to cancel anything, and the
         // reason that chunk carried stands.
-        if (cancelled || (!status.ok() && !finished)) {
+        if (!finished && (cancelled || !status.ok())) {
             result.reason = FinishReason::Cancelled;
         }
         return result;
@@ -205,7 +218,7 @@ GenerateResult Client::generate(const std::string & prompt,
     wire::to_proto(params, request.mutable_sampling());
 
     auto reader = impl_->stub->Generate(&call.context, request);
-    return impl_->consume(call.context, reader, on_chunk, options.stop);
+    return impl_->consume(call.context, reader, on_chunk, options);
 }
 
 GenerateResult Client::chat(const std::vector<ChatMessage> & messages,
@@ -242,7 +255,7 @@ GenerateResult Client::chat_request(const std::vector<ChatMessage> & messages,
     wire::to_proto(params, request.mutable_sampling());
 
     auto reader = impl_->stub->Chat(&call.context, request);
-    return impl_->consume(call.context, reader, on_chunk, options.stop);
+    return impl_->consume(call.context, reader, on_chunk, options);
 }
 
 EmbedResult Client::embed(const std::vector<std::string> & inputs, const CallOptions & options) {

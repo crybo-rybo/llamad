@@ -230,7 +230,7 @@ enum class FinishReason {
     Eog,  ///< The model emitted an end-of-generation token.
     Length,  ///< The token budget or context capacity was reached.
     Stop,  ///< A configured stop string matched; its bytes are withheld.
-    Cancelled,  ///< The callback or CallOptions::stop requested cancellation.
+    Cancelled,  ///< Local cancellation, or the assigned wire cancellation reason (not emitted by the daemon).
     ToolCalls  ///< Complete tool calls require client execution.
 };
 
@@ -293,6 +293,12 @@ struct CallOptions {
     /// Time allowed for each RPC, from its start. When it runs out the call throws RpcError with
     /// DEADLINE_EXCEEDED (4).
     std::optional<std::chrono::milliseconds> timeout;
+
+    /// Called on the calling thread for every received Generate/Chat message, including empty
+    /// activity frames and the final chunk. It carries no text and does not run for unary RPCs.
+    /// Activity frames report handler/transport liveness, not inference progress. Exceptions
+    /// cancel the call, wait for transport cleanup and propagate, as text callback exceptions do.
+    std::function<void()> on_activity;
 };
 
 /// Synchronous client for one Unix socket; calls carry all request state.

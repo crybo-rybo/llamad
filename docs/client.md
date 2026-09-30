@@ -61,7 +61,16 @@ int main() {
 
 The callback receives user-visible text only: never tool-call markup, never partial UTF-8,
 never part of a matched stop string. The result carries the finish reason and the stats from
-the stream's final chunk.
+the stream's final chunk. Empty activity frames are not text and do not reach this callback.
+Concurrent generation calls wait for the shared engine; admission order is unspecified.
+
+For a watchdog, pass `.on_activity = [&] { /* record receipt time */ }` in `CallOptions`. This
+optional callback runs on the calling thread for every received streaming message, including
+text, empty activity frames and the final chunk, across raw, typed and tool-loop calls. It
+does not run for unary calls. The daemon emits empty frames about once a second after entering
+generation, including queueing and prefill; Chat template rendering precedes that reporting.
+Activity indicates handler and transport liveness, rather than decoder progress. Callback
+exceptions cancel the RPC, wait for transport cleanup and propagate.
 
 ## Stopping a call
 
@@ -85,6 +94,13 @@ auto result = client.chat(history, params, on_chunk,
   check that cannot hang.
 - The tool loop takes `CallOptions` after `max_rounds`. The stop covers the whole loop, and no
   tool runs once it has been requested; the timeout applies to each round.
+
+The daemon stops abandoned prompt work between decode batches and retains successful batches
+for later cache reuse. Cancellation cannot interrupt an individual decode batch. It sends no
+final chunk to a client that has left. Wire value `FINISH_REASON_CANCELLED` (4) remains assigned
+but is not emitted by this daemon; the client decodes it as `FinishReason::Cancelled` if a
+server sends it. Local stops return that reason, deadlines throw `DEADLINE_EXCEEDED`, and other
+transport failures throw `RpcError`. A stop after an accepted final chunk keeps its result.
 
 `std::jthread` passes its function a `std::stop_token`, so a call made on one with that token
 stops when the thread is asked to. `llamad-chat` stops a reply on Ctrl-C this way.

@@ -16,6 +16,7 @@
 #include "flags.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -67,6 +68,9 @@ struct Options {
 
     [[=help{"return false from the chunk callback after N chunks"}]]
     long cancel_after = -1;  ///< Return false from the chunk callback after N chunks.
+
+    [[=help{"cancel after N milliseconds, including queueing and prompt processing"}]]
+    long cancel_after_ms = -1;  ///< Elapsed-time cancellation checked between decode batches.
 
     [[=help{"run generate() N times in the same process"}]]
     long repeat = 1;  ///< Run generate() N times in the same process.
@@ -276,7 +280,11 @@ int main(int argc, char ** argv) {
                 return !(options.cancel_after >= 0 && chunks >= options.cancel_after);
             };
 
-            const llamad::GenerateResult result = engine.generate(text, params, on_chunk);
+            const auto started = std::chrono::steady_clock::now();
+            const llamad::GenerateResult result = engine.generate(text, params, on_chunk, [&] {
+                return options.cancel_after_ms < 0 ||
+                    std::chrono::steady_clock::now() - started < std::chrono::milliseconds(options.cancel_after_ms);
+            });
 
             std::fflush(stdout);
             std::fprintf(stderr,

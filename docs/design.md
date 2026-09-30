@@ -22,12 +22,19 @@
   for different batch splits, so a greedy reply from a warm cache can differ from the one a
   freshly started daemon gives. `cached_prompt_tokens` in the stats says how much was reused.
 - **v1 serves one generation at a time.** The engine serializes `generate`, so
-  concurrent clients queue rather than sharing the context.
-- **Stream shape.** Zero or more text chunks, then exactly one final chunk carrying
+  concurrent clients wait rather than sharing the context; admission order is unspecified.
+  Cancelled waiters leave without acquiring the context. Cancellation during prefill stops
+  between decode batches, retaining successful batches for reuse; submitted backend work
+  finishes before the context is released.
+- **Stream shape.** Zero or more text or empty activity chunks, then exactly one final chunk carrying
   `finish_reason` and `stats`. Tool calls arrive whole on that final chunk, and `tool_calls`
   is non-empty if and only if the finish reason is `TOOL_CALLS`. Text chunks carry
   user-visible content only: never tool-call markup, never partial UTF-8, never part of a
-  matched stop string.
+  matched stop string. Empty activity frames carry UNSPECIFIED, no stats and no tool calls.
+  A joined request-local timer serializes writes with text and stops before finalization, so
+  no activity follows the final chunk, including when generation throws. It reports handler
+  liveness even during a long decode batch, rather than model progress. Reporting begins
+  after template rendering.
 - **Chat renders the model's own Jinja template**, the one stored in the GGUF,
   through llama.cpp's `common` library, the same path `llama-server` takes. So
   whatever scaffolding the model was trained on (tool blocks, role markers, its

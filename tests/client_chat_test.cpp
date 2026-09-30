@@ -85,11 +85,21 @@ struct Round {
     // After the text, wait for the client to cancel instead of finishing: a daemon still
     // prefilling, queued behind another client, or wedged.
     bool hang = false;
+    int activity_frames = 0;
+    std::chrono::milliseconds text_delay{0};
 };
 
 class FakeDaemon final : public v1::Llama::Service {
 public:
     explicit FakeDaemon(std::vector<Round> script) : script_(std::move(script)) {}
+
+    grpc::Status Generate(grpc::ServerContext * context,
+                          const v1::GenerateRequest * request,
+                          grpc::ServerWriter<v1::GenerateChunk> * writer) override {
+        v1::ChatRequest chat;
+        chat.add_messages()->set_content(request->prompt());
+        return Chat(context, &chat, writer);
+    }
 
     grpc::Status Chat(grpc::ServerContext * context,
                       const v1::ChatRequest * request,
@@ -109,7 +119,12 @@ public:
             round = script_[std::min(requests_.size() - 1, script_.size() - 1)];
         }
 
+        for (int i = 0; i < round.activity_frames; ++i) {
+            writer->Write(v1::GenerateChunk{});
+        }
+
         for (const std::string & text : round.text) {
+            std::this_thread::sleep_for(round.text_delay);
             v1::GenerateChunk chunk;
             chunk.set_text(text);
             writer->Write(chunk);
@@ -634,6 +649,159 @@ void test_timeout() {
     CHECK(code == 4);   // DEADLINE_EXCEEDED
 }
 
+void test_activity_is_separate_from_text() {
+    Round answer;
+    answer.activity_frames = 2;
+    answer.text = {"hello"};
+    answer.stats = {5, 1, 2.0, 3.0};
+    Harness harness({answer});
+
+    const auto calling_thread = std::this_thread::get_id();
+    int activity = 0;
+    int text = 0;
+    const client::CallOptions options{.on_activity = [&] {
+        CHECK(std::this_thread::get_id() == calling_thread);
+        ++activity;
+    }};
+    const auto result = harness.client.generate("hello", params, [&](const std::string & chunk) {
+        CHECK_EQ(chunk, "hello");
+        CHECK(activity == 3);
+        ++text;
+        return true;
+    }, options);
+    CHECK(activity == 4);  // two empty frames, text, then the single final
+    CHECK(text == 1);
+    CHECK(result.reason == client::FinishReason::Eog);
+    CHECK(result.stats.prompt_tokens == 5);
+    CHECK(result.tool_calls.empty());
+
+    harness.client.embed({"hello"}, options);
+    CHECK(activity == 4);  // no activity callback on unary calls
+}
+
+void test_activity_options_reach_typed_and_tool_calls() {
+    Round asking = tool_round({{"call_0", "shout", R"({"word":"hi"})"}});
+    asking.activity_frames = 2;
+    Round answer;
+    answer.activity_frames = 1;
+    answer.text = {"done"};
+    Harness harness({asking, answer});
+    int activity = 0;
+    std::vector<client::ChatMessage> history = {{"user", "shout hi"}};
+    const auto result = harness.client.chat(history, make_tools(), params, nullptr, 8,
+                                            {.on_activity = [&] { ++activity; }});
+    CHECK(activity == 6);
+    CHECK(result.reason == client::FinishReason::Eog);
+    CHECK(history.size() == 4);
+    CHECK_EQ(history.back().content, "done");
+    CHECK_EQ(tool_log, "shout:hi;");
+
+    Round typed;
+    typed.activity_frames = 2;
+    typed.text = {R"({"spam":false,"reasons":[],"confidence":"low"})"};
+    Harness typed_harness({typed});
+    activity = 0;
+    const auto reply = typed_harness.client.chat<Verdict>({{"user", "spam?"}}, params, nullptr,
+                                                         {.on_activity = [&] { ++activity; }});
+    CHECK(activity == 4);
+    CHECK(reply.value.has_value());
+    CHECK(!reply.value->spam);
+}
+
+void test_stop_from_activity() {
+    Round silent;
+    silent.activity_frames = 1;
+    silent.hang = true;
+    Harness harness({silent});
+    std::stop_source stop;
+    int text = 0;
+    const auto result = harness.client.chat({{"user", "hello"}}, params, [&](const std::string &) {
+        ++text;
+        return true;
+    }, {.stop = stop.get_token(), .on_activity = [&] { stop.request_stop(); }});
+    CHECK(result.reason == client::FinishReason::Cancelled);
+    CHECK(result.tool_calls.empty());
+    CHECK(text == 0);
+}
+
+void test_stop_from_final_activity_keeps_result() {
+    Round answer;
+    answer.stats = {5, 3, 1.0, 2.0};
+    Harness harness({answer});
+    std::stop_source stop;
+    const auto result = harness.client.chat({{"user", "hello"}}, params, nullptr,
+        {.stop = stop.get_token(), .on_activity = [&] { stop.request_stop(); }});
+    CHECK(result.reason == client::FinishReason::Eog);
+    CHECK(result.stats.prompt_tokens == 5);
+    CHECK(result.stats.completion_tokens == 3);
+}
+
+void test_text_cancel_on_final_keeps_result() {
+    Round answer;
+    answer.final_text = "done";
+    answer.stats = {5, 3, 1.0, 2.0};
+    Harness harness({answer});
+    const auto result = harness.client.chat({{"user", "hello"}}, params,
+                                            [](const std::string &) { return false; });
+    CHECK(result.reason == client::FinishReason::Eog);
+    CHECK(result.stats.completion_tokens == 3);
+}
+
+void test_deadline_during_text() {
+    Round answer;
+    answer.text = {"one", "two", "three", "four", "five"};
+    answer.text_delay = std::chrono::milliseconds(20);
+    Harness harness({answer});
+    int chunks = 0;
+    int code = 0;
+    try {
+        harness.client.chat({{"user", "hello"}}, params, [&](const std::string &) {
+            ++chunks;
+            return true;
+        }, {.timeout = std::chrono::milliseconds(50)});
+    } catch (const client::RpcError & error) {
+        code = error.code;
+    }
+    CHECK(code == 4);
+    CHECK(chunks > 0);
+}
+
+void test_callback_exceptions_clean_up_the_call() {
+    for (bool activity_callback : {false, true}) {
+        Round silent;
+        silent.activity_frames = activity_callback ? 1 : 0;
+        silent.text = activity_callback ? std::vector<std::string>{} : std::vector<std::string>{"hello"};
+        silent.hang = true;
+        Round answer;
+        answer.text = {"after exception"};
+        Harness harness({silent, answer});
+        const auto fail = [] { throw std::runtime_error("callback failed"); };
+        bool threw = false;
+        try {
+            harness.client.chat({{"user", "hello"}}, params, [&](const std::string &) {
+                fail();
+                return true;
+            }, {.on_activity = activity_callback ? std::function<void()>(fail) : std::function<void()>{}});
+        } catch (const std::runtime_error & e) {
+            CHECK_EQ(std::string(e.what()), "callback failed");
+            threw = true;
+        }
+        CHECK(threw);
+        const auto result = harness.client.chat({{"user", "hello again"}}, params, nullptr);
+        CHECK(result.reason == client::FinishReason::Eog);
+    }
+}
+
+void test_assigned_wire_cancellation_decodes() {
+    Round answer;
+    answer.reason = v1::FINISH_REASON_CANCELLED;
+    answer.stats = {5, 0, 1.0, 0.0};
+    Harness harness({answer});
+    const auto result = harness.client.chat({{"user", "hello"}}, params, nullptr);
+    CHECK(result.reason == client::FinishReason::Cancelled);
+    CHECK(result.stats.prompt_tokens == 5);
+}
+
 void test_embed_returns_vectors_in_order() {
     Harness harness({Round{}});
 
@@ -697,6 +865,14 @@ int main() {
     test_stop_after_the_final_chunk();
     test_stop_before_tools_run();
     test_timeout();
+    test_activity_is_separate_from_text();
+    test_activity_options_reach_typed_and_tool_calls();
+    test_stop_from_activity();
+    test_stop_from_final_activity_keeps_result();
+    test_text_cancel_on_final_keeps_result();
+    test_deadline_during_text();
+    test_callback_exceptions_clean_up_the_call();
+    test_assigned_wire_cancellation_decodes();
     test_embed_returns_vectors_in_order();
     test_embed_refused();
     test_embed_stopped();

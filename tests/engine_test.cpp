@@ -32,6 +32,13 @@ void test_a_cache_that_runs_past_the_prompt_is_cut_back_to_it() {
     CHECK_EQ(llamad::reusable_prefix({1, 2, 3, 4, 5}, {1, 2, 3, 7}), 3u);
 }
 
+void test_partial_prefill_is_reusable() {
+    const Tokens partial = {1, 2, 3};
+    CHECK_EQ(llamad::reusable_prefix(partial, {1, 2, 3, 4, 5}), 3u);
+    CHECK_EQ(llamad::reusable_prefix(partial, {1, 2}), 1u);
+    CHECK_EQ(llamad::reusable_prefix(partial, {9, 8, 7}), 0u);
+}
+
 void test_the_last_prompt_token_is_always_decoded() {
     // Sampling needs the logits of the prompt's last token, which only decoding it produces.
     CHECK_EQ(llamad::reusable_prefix({1, 2, 3}, {1, 2, 3}), 2u);
@@ -46,6 +53,7 @@ int main() {
     test_the_shared_prefix_is_kept();
     test_a_prompt_that_extends_the_cache_keeps_all_of_it();
     test_a_cache_that_runs_past_the_prompt_is_cut_back_to_it();
+    test_partial_prefill_is_reusable();
     test_the_last_prompt_token_is_always_decoded();
     return tests::report();
 }

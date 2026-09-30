@@ -350,14 +350,14 @@ public:
     /// Called when generation ended on its own: a held-back stop prefix that never
     /// completed is real output and must be delivered; an incomplete UTF-8 tail is
     /// dropped because it can never become a valid character.
-    void flush() {
+    bool flush() {
         if (pending_.empty()) {
-            return;
+            return true;
         }
         std::string out;
         out.swap(pending_);
         out.resize(out.size() - incomplete_utf8_tail(out));
-        deliver(out);
+        return deliver(out);
     }
 
 private:
@@ -626,7 +626,7 @@ struct Engine::Impl {
     bool     embeddings       = false;  ///< an embedding model: the context pools and outputs embeddings
     uint32_t max_embed_tokens = 0;      ///< most tokens one embed() input may have
 
-    std::mutex context_mutex;  ///< Serializes requests sharing the context and KV cache.
+    std::timed_mutex context_mutex;  ///< Serializes requests sharing the context and KV cache.
 
     /// The tokens sequence 0 of the KV cache holds, in position order. In a generative model only
     /// decode() and clear_cache() change the cache after construction, and both keep this in step
@@ -994,12 +994,33 @@ ChatTemplateInfo Engine::chat_template() const {
 }
 
 GenerateResult Engine::generate(const std::string & prompt, const SamplingParams & params,
-                                const ChunkCallback & on_chunk) {
+                                const ChunkCallback & on_chunk, const std::function<bool()> & keep_going) {
     if (impl_->embeddings) {
         throw EngineError("the model is an embedding model: it cannot generate text");
     }
 
-    std::lock_guard<std::mutex> lock(impl_->context_mutex);
+    GenerateResult result{FinishReason::Cancelled, {}};
+    const auto active = [&] { return !keep_going || keep_going(); };
+    if (!active()) {
+        return result;
+    }
+
+    std::unique_lock<std::timed_mutex> lock(impl_->context_mutex, std::defer_lock);
+    while (!lock.try_lock_for(std::chrono::milliseconds(50))) {
+        if (!active()) {
+            return result;
+        }
+    }
+    if (!active()) {
+        return result;
+    }
+
+    // llama_decode can return with GPU work outstanding. Every exit, including exceptions and
+    // cancellation, completes it before another request can reuse or trim the shared cache.
+    struct Synchronize {
+        llama_context * ctx;
+        ~Synchronize() { llama_synchronize(ctx); }
+    } synchronize{impl_->ctx};
 
     std::vector<int32_t> tokens = impl_->tokenize(prompt, /*add_special*/ true, /*parse_special*/ true);
     if (tokens.empty()) {
@@ -1010,7 +1031,6 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
                           " tokens for a context of " + std::to_string(impl_->n_ctx_seq));
     }
 
-    GenerateResult result;
     result.reason              = FinishReason::Length;
     result.stats.prompt_tokens = static_cast<int32_t>(tokens.size());
 
@@ -1025,11 +1045,21 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
     // --- prompt ---------------------------------------------------------
     // Everything above leaves the cache alone, so a request refused there costs the next one
     // nothing.
+    if (!active()) {
+        result.reason = FinishReason::Cancelled;
+        return result;
+    }
     const size_t kept                 = impl_->keep_prefix(tokens);
     result.stats.cached_prompt_tokens = static_cast<int32_t>(kept);
 
     const auto t_prompt = std::chrono::steady_clock::now();
     for (size_t off = kept; off < tokens.size();) {
+        if (!active()) {
+            llama_synchronize(impl_->ctx);
+            result.reason          = FinishReason::Cancelled;
+            result.stats.prompt_ms = ms_since(t_prompt);
+            return result;
+        }
         const size_t  n_chunk = std::min<size_t>(impl_->n_batch, tokens.size() - off);
         const int32_t ret     = impl_->decode(tokens.data() + off, n_chunk);
         if (ret != 0) {
@@ -1050,6 +1080,11 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
     bool       flush_tail   = true;
 
     while (true) {
+        if (!active()) {
+            result.reason = FinishReason::Cancelled;
+            flush_tail    = false;
+            break;
+        }
         if (params.max_tokens >= 0 && result.stats.completion_tokens >= params.max_tokens) {
             result.reason = FinishReason::Length;
             break;
@@ -1088,6 +1123,12 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
             break;
         }
 
+        if (!active()) {
+            result.reason = FinishReason::Cancelled;
+            flush_tail    = false;
+            break;
+        }
+
         // Only a token the loop goes on from is decoded: the one that ends it (EOG, a stop, a
         // cancel, the budget) never reaches the cache.
         llama_token   next = token;
@@ -1104,9 +1145,14 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
 
     // A stop prefix that never completed is genuine output and must still be
     // delivered; an incomplete UTF-8 tail is dropped.
-    if (flush_tail) {
-        filter.flush();
+    if (!active()) {
+        result.reason = FinishReason::Cancelled;
+        flush_tail    = false;
     }
+    if (flush_tail && !filter.flush()) {
+        result.reason = FinishReason::Cancelled;
+    }
+    llama_synchronize(impl_->ctx);
 
     result.stats.completion_ms = ms_since(t_completion);
     return result;
@@ -1138,7 +1184,12 @@ EmbedResult Engine::embed(const std::vector<std::string> & inputs, const std::fu
         tokenized.push_back(std::move(tokens));
     }
 
-    std::lock_guard<std::mutex> lock(impl_->context_mutex);
+    std::unique_lock<std::timed_mutex> lock(impl_->context_mutex, std::defer_lock);
+    while (!lock.try_lock_for(std::chrono::milliseconds(50))) {
+        if (keep_going && !keep_going()) {
+            return {};
+        }
+    }
 
     const int32_t n_embd = llama_model_n_embd_out(impl_->model);
 
