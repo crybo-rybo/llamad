@@ -71,6 +71,7 @@ grpc::Status guarded(const char * rpc_name, Body && body) {
 /// a time; its context and writer outlive this object, whose destructor joins the timer.
 class StreamOutput {
 public:
+    /// Borrow the live RPC objects and start its independent liveness timer.
     StreamOutput(grpc::ServerContext * context, grpc::ServerWriter<v1::GenerateChunk> * writer)
         : context_(context), writer_(writer), timer_([this](std::stop_token stop) {
             try {
@@ -87,8 +88,10 @@ public:
             }
         }) {}
 
+    /// Join before the borrowed RPC objects can be destroyed.
     ~StreamOutput() { stop_timer(); }
 
+    /// Remember cancellation so no further writes or inference are attempted.
     bool active() {
         if (context_->IsCancelled()) {
             gone_.store(true);
@@ -96,12 +99,13 @@ public:
         return !gone_.load();
     }
 
+    /// Serialize text and final writes with activity frames.
     bool write(const v1::GenerateChunk & chunk) {
         std::lock_guard lock(mutex_);
         return write_locked(chunk);
     }
 
-    // No activity can follow the final chunk, including on exception paths.
+    /// Stop reporting before finalization; propagate any timer failure after joining.
     void finish_activity() {
         stop_timer();
         if (error_) {
@@ -110,6 +114,7 @@ public:
     }
 
 private:
+    /// A failed transport write makes cancellation visible to the inference thread.
     bool write_locked(const v1::GenerateChunk & chunk) {
         if (!active()) {
             return false;
@@ -121,6 +126,7 @@ private:
         return true;
     }
 
+    /// Interrupt the timer wait and join, including when generation throws.
     void stop_timer() {
         if (timer_.joinable()) {
             timer_.request_stop();
@@ -128,13 +134,13 @@ private:
         }
     }
 
-    grpc::ServerContext *                 context_;
-    grpc::ServerWriter<v1::GenerateChunk> * writer_;
-    std::atomic<bool>                     gone_{false};
-    std::mutex                            mutex_;
-    std::condition_variable_any           wake_;
-    std::exception_ptr                    error_;
-    std::jthread                          timer_;
+    grpc::ServerContext *                 context_;  ///< Borrowed live server context.
+    grpc::ServerWriter<v1::GenerateChunk> * writer_;  ///< Borrowed synchronous stream writer.
+    std::atomic<bool>                     gone_{false};  ///< Cancellation shared with inference.
+    std::mutex                            mutex_;  ///< Guards every writer operation.
+    std::condition_variable_any           wake_;  ///< Timer wait interrupted by its stop token.
+    std::exception_ptr                    error_;  ///< Timer failure, read only after joining.
+    std::jthread                          timer_;  ///< Declared last so it joins before shared state dies.
 };
 
 /// Why Generate and Chat refuse an embedding model.

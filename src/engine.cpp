@@ -1015,10 +1015,11 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
         return result;
     }
 
-    // llama_decode can return with GPU work outstanding. Every exit, including exceptions and
-    // cancellation, completes it before another request can reuse or trim the shared cache.
+    /// Complete outstanding GPU work on every exit, including exceptions and cancellation,
+    /// before another request can reuse or trim the shared cache.
     struct Synchronize {
-        llama_context * ctx;
+        llama_context * ctx;  ///< Borrowed context; outlives this guard.
+        /// Complete submitted work before the context lock is released.
         ~Synchronize() { llama_synchronize(ctx); }
     } synchronize{impl_->ctx};
 
