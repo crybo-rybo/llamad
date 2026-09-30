@@ -198,7 +198,7 @@ struct ParseState {
 struct ChatFormat::Impl {
     common_chat_templates_ptr templates;                    ///< Owned compiled model templates.
     bool                      parallel_tool_calls = false;  ///< Whether the template supports more than one call in a turn.
-    size_t                    tool_call_id_length = 32;
+    size_t                    tool_call_id_length = 32;  ///< ID length accepted by the template when history is replayed.
 };
 
 ChatFormat::ChatFormat(const std::string & template_source,
