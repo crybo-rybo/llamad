@@ -133,8 +133,9 @@ Match the file you are in; consistency beats preference.
 - Anonymous namespaces for file-local helpers. Pimpl where a header must hide a dependency.
 - RAII for every llama.cpp / C handle, so every path — exceptions included — releases it.
 - Errors callers can act on are typed (`EngineError`, `ChatFormatError`, `RpcError`) and map to
-  gRPC status codes in `service.cpp`: caller mistakes → `INVALID_ARGUMENT`, a missing capability
-  → `FAILED_PRECONDITION`, everything else → `INTERNAL`.
+  gRPC status codes in `service.cpp`: caller mistakes → `INVALID_ARGUMENT`, generation prompt
+  overflow (`ContextOverflowError`) → `OUT_OF_RANGE`, a missing capability → `FAILED_PRECONDITION`,
+  everything else → `INTERNAL`.
 - The daemon logs one `[llamad] ...` line per request to stderr and writes nothing to stdout.
 
 ## Comments and documentation

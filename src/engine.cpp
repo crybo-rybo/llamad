@@ -1019,8 +1019,7 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
         throw EngineError("the prompt tokenized to zero tokens");
     }
     if (tokens.size() >= impl_->n_ctx_seq) {
-        throw EngineError("prompt is too long: " + std::to_string(tokens.size()) +
-                          " tokens for a context of " + std::to_string(impl_->n_ctx_seq));
+        throw ContextOverflowError(tokens.size(), impl_->n_ctx_seq);
     }
 
     result.reason              = FinishReason::Length;

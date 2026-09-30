@@ -26,7 +26,9 @@
  * and a finish reason. Transport errors or client cancellation can end a stream before
  * that chunk. Tool calls are atomic and appear only on the final chunk with TOOL_CALLS.
  * Embed returns one L2-normalised vector per input and is served only by an embedding
- * model, which in turn serves no generation. Caller errors map to INVALID_ARGUMENT, a
+ * model, which in turn serves no generation. Serialized incoming requests have a configurable
+ * 4 MiB default receive limit; a refusal before service entry is RESOURCE_EXHAUSTED.
+ * Generation prompt overflow maps to OUT_OF_RANGE. Other caller errors map to INVALID_ARGUMENT, a
  * missing capability (no usable chat template, or the wrong kind of model for the RPC)
  * to FAILED_PRECONDITION, and other failures to INTERNAL.
  *

@@ -52,7 +52,8 @@
   so each input is decoded whole, one per `llama_decode`. On the CPU that is as fast as packing
   several inputs into one decode as separate sequences, which would also mean a context sized
   for many sequences. Vectors are always L2-normalised.
-- **Errors are typed.** Caller mistakes map to `INVALID_ARGUMENT`, a missing capability to
+- **Errors are typed.** Caller mistakes map to `INVALID_ARGUMENT`, generation prompt overflow to
+  `OUT_OF_RANGE`, a missing capability to
   `FAILED_PRECONDITION`, everything else to `INTERNAL`.
 
 The wire contract itself is `proto/llamad/v1/llamad.proto`, and `AGENTS.md` lists the

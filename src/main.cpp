@@ -47,6 +47,9 @@ struct Options {
     [[=help{"PATH", "unix socket to listen on\n"
                     "(default: $XDG_RUNTIME_DIR/llamad.sock, else /tmp/llamad-<uid>.sock)"}]]
     std::optional<std::string> socket;  ///< Unix socket path; empty uses the per-user default.
+
+    [[=help{"N", "maximum serialized incoming RPC bytes (default 4194304)"}]]
+    int max_request_bytes = 4194304;  ///< Positive gRPC receive-message limit, including protobuf overhead.
 };
 
 /// Print usage and reflected flag descriptions to stderr.
@@ -140,6 +143,9 @@ int main(int argc, char ** argv) {
             print_usage(argv[0]);
             return 0;
         }
+        if (options.max_request_bytes <= 0) {
+            throw llamad::cli::FlagError("--max-request-bytes needs a positive integer");
+        }
         config = llamad::to_config(engine_flags);
 
         // Listing devices needs no model, and is the way to find the names --devices takes.
@@ -223,6 +229,7 @@ int main(int argc, char ** argv) {
     grpc::reflection::InitProtoReflectionServerBuilderPlugin();
 
     grpc::ServerBuilder builder;
+    builder.SetMaxReceiveMessageSize(options.max_request_bytes);
     builder.AddListeningPort("unix:" + socket_path, grpc::InsecureServerCredentials());
     builder.RegisterService(&service);
 

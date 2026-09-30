@@ -43,13 +43,14 @@ public:
                           v1::TokenizeResponse * response) override;
 
     /// Stream a raw completion and one final result while the client remains connected.
+    /// A prompt reaching the usable context capacity fails with OUT_OF_RANGE.
     grpc::Status Generate(grpc::ServerContext * context,
                           const v1::GenerateRequest * request,
                           grpc::ServerWriter<v1::GenerateChunk> * writer) override;
 
     /// Render history and tools, stream visible text and finalize atomic tool calls.
     /// @returns FAILED_PRECONDITION without a usable template, INVALID_ARGUMENT for caller
-    /// errors, INTERNAL for other failures, or OK after generation.
+    /// errors, OUT_OF_RANGE for prompt overflow, INTERNAL for other failures, or OK after generation.
     grpc::Status Chat(grpc::ServerContext * context,
                       const v1::ChatRequest * request,
                       grpc::ServerWriter<v1::GenerateChunk> * writer) override;

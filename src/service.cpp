@@ -47,11 +47,15 @@ void log_request(const char * rpc_name, const GenerateStats & stats, const char 
 }
 
 /// Runs one RPC body and turns what it throws into the status the contract promises: caller
-/// mistakes (EngineError, ChatFormatError) INVALID_ARGUMENT, anything else INTERNAL.
+/// mistakes (EngineError, ChatFormatError) INVALID_ARGUMENT, context overflow OUT_OF_RANGE,
+/// anything else INTERNAL.
 template <typename Body>
 grpc::Status guarded(const char * rpc_name, Body && body) {
     try {
         return body();
+    } catch (const ContextOverflowError & e) {
+        std::fprintf(stderr, "[llamad] %s error: %s\n", rpc_name, e.what());
+        return grpc::Status(grpc::StatusCode::OUT_OF_RANGE, e.what());
     } catch (const EngineError & e) {
         std::fprintf(stderr, "[llamad] %s error: %s\n", rpc_name, e.what());
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, e.what());

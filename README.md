@@ -54,6 +54,10 @@ Qwen3-Embedding) is served the same way and answers `Embed` instead of `Generate
 ./build-cpu/client/llamad-chat --socket /tmp/embed.sock --embed "a cat" --embed "a kitten"
 ```
 
+Incoming RPC messages have a 4 MiB serialized size limit, configurable with
+`--max-request-bytes`. Byte-limit rejection is `RESOURCE_EXHAUSTED`; a generation prompt
+that reaches the token context capacity is `OUT_OF_RANGE`.
+
 The project ships no model. Any GGUF works; the daemon takes `--socket`, `--ctx`, `--ngl`,
 `--threads`, `--devices` and `--tensor-split`, described in [docs/daemon.md](docs/daemon.md).
 

@@ -264,3 +264,9 @@ option to get them unnormalised. `result.input_tokens` counts the tokens across 
 reasoning separation (on an ordinary turn a model's `<think>` block, if any, is left in the
 content; a typed turn turns thinking off), a typed reply whose root is not an object, and
 partial structs during streaming (`value` arrives whole, at the end).
+
+`RpcError::code` distinguishes incoming message size (`RESOURCE_EXHAUSTED`, 8), generation
+prompt overflow (`OUT_OF_RANGE`, 11), malformed input (`INVALID_ARGUMENT`, 3), and missing
+capabilities (`FAILED_PRECONDITION`, 9). The daemon defaults to 4 MiB per serialized incoming
+request; its `--max-request-bytes` flag configures that bound. Token capacity is independent
+of message size. The caller decides how to shorten history or handle these failures.
