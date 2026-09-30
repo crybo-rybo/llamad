@@ -459,8 +459,7 @@ ChatFormat::Stream::Final ChatFormat::Stream::finish() {
     if (!advanced.ok) {
         // The parser rejected the output outright. There is no parse to take content from, so the
         // raw remainder is the only honest answer: nothing generated is silently dropped. This is
-        // the one path on which tool-call markup can reach the caller, and it is unreachable for
-        // the formats at this pin (the PEG parsers are lenient and fall back to pure content).
+        // fallback can include markup the parser did not classify as a tool call.
         const size_t offset = impl_->raw_offset_after_emitted();
         if (offset != std::string::npos && offset < impl_->accumulated.size()) {
             final.content_tail = impl_->accumulated.substr(offset);
