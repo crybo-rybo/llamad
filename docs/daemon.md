@@ -20,13 +20,10 @@
 The socket is created mode 0600, so only your user can talk to it. The daemon logs one
 `[llamad] ...` line per request to stderr and writes nothing to stdout.
 
-Every entered application RPC sends an opaque identifier as `x-request-id` initial metadata.
-The same `request_id` appears in its single log line, including validation failures and
-cancellation. A random process prefix and atomic counter distinguish concurrent requests
-and practical process restarts. Generate and Chat send this metadata before template
-rendering, queueing or inference; unary calls send it with their response or status.
-Health/reflection RPCs and transport refusals before handler entry have no application ID
-or request log. A cancelled or expired transport can prevent metadata from reaching its client.
+Each call the daemon handles gets an id, printed as `request_id=` on its log line and sent to
+the client as `x-request-id` metadata before any reply, so a client can report which log line
+is its own. An id carries nothing about the request, and a random per-process prefix keeps ids
+from repeating after a restart.
 
 A request larger than `--max-request-bytes`, serialized, fails with `RESOURCE_EXHAUSTED` before
 the daemon handles it, so it gets no log line. A prompt, raw or rendered from a chat, that leaves
