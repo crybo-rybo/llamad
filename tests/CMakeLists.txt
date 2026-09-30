@@ -8,8 +8,7 @@ target_link_libraries(chat_format_test PRIVATE llamad_chat)
 # makes a response schema and the prompt's assistant opening liable to disagree.
 target_compile_definitions(chat_format_test PRIVATE
     QWEN25_TEMPLATE_PATH="${PROJECT_SOURCE_DIR}/third_party/llama.cpp/models/templates/Qwen-Qwen2.5-7B-Instruct.jinja"
-    QWEN35_TEMPLATE_PATH="${PROJECT_SOURCE_DIR}/third_party/llama.cpp/models/templates/Qwen3.5-4B.jinja"
-    MISTRAL_TEMPLATE_PATH="${PROJECT_SOURCE_DIR}/third_party/llama.cpp/models/templates/mistralai-Mistral-Nemo-Instruct-2407.jinja")
+    QWEN35_TEMPLATE_PATH="${PROJECT_SOURCE_DIR}/third_party/llama.cpp/models/templates/Qwen3.5-4B.jinja")
 
 add_test(NAME chat_format COMMAND chat_format_test)
 

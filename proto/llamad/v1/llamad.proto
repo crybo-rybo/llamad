@@ -82,11 +82,12 @@ message Tool {
 
 /// One complete function call whose ID links its result to the assistant turn.
 message ToolCall {
-  // Assigned by the daemon, unique within this response and against call IDs and
-  // tool-result references in the supplied history. Echo it in the tool reply's tool_call_id.
+  /// Echo it back in the "tool" message's tool_call_id. It is the model's own ID when the chat
+  /// format carries one, passed through as written; otherwise the daemon generates 32 random
+  /// alphanumeric characters, which do not realistically repeat within a response or across rounds.
   string id = 1;
   string name = 2;  ///< Tool function name.
-  string arguments_json = 3;   ///< complete, valid JSON object
+  string arguments_json = 3;   ///< complete, valid JSON object; {} for an argument-free call
 }
 
 /// One history turn; roles and tool-call IDs are interpreted by the model template.

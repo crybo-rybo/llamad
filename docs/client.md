@@ -107,12 +107,11 @@ are being generated, and parse the model's output back into structured calls.
   (`<tool_call>` and friends) never reaches the client.
 - `tool_calls` is non-empty **iff** the finish reason is `TOOL_CALLS`. A reply cut
   short by `max_tokens` or by a cancel reports `LENGTH`/`CANCELLED` and no calls.
-- Arguments are always a complete, valid JSON object; an argument-free call carries
-  `{}`. An incomplete call or non-object arguments suppress the entire call list
-  while preserving identified visible content and withholding recognized markup.
-- The daemon assigns call IDs, ignoring IDs in model output. IDs differ within the
-  response and from prior call IDs and tool-result references in the supplied
-  history. Resend that history to keep tool results unambiguous across rounds.
+- Arguments are always a complete JSON object, `{}` for an argument-free call. A
+  grammar built from the schema constrains them, and the daemon drops a call whose
+  arguments are not one.
+- A call's `id` is the model's own when the chat format carries one, otherwise 32
+  random alphanumeric characters, so it does not realistically repeat across rounds.
 
 The message sequence for one tool round is:
 

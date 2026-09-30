@@ -60,8 +60,8 @@ struct Tool {
 
 /// One complete model-requested function call, identified for a matching tool reply.
 struct ToolCall {
-    /// Daemon-assigned ID, unique within this response and against supplied history call IDs
-    /// and tool-result references; echo it in the corresponding tool reply.
+    /// Echo it in the corresponding tool reply. The model's own ID when the chat format carries
+    /// one, otherwise 32 random alphanumeric characters that do not realistically repeat.
     std::string id;
     std::string name;            ///< Tool function name.
     std::string arguments_json;  ///< Complete, valid JSON object; an argument-free call carries {}.
