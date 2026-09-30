@@ -82,7 +82,9 @@ message Tool {
 
 /// One complete function call whose ID links its result to the assistant turn.
 message ToolCall {
-  string id = 1;               ///< assigned by the daemon; echo it back in the "tool" message's tool_call_id
+  // Assigned by the daemon, unique within this response and against call IDs and
+  // tool-result references in the supplied history. Echo it in the tool reply's tool_call_id.
+  string id = 1;
   string name = 2;  ///< Tool function name.
   string arguments_json = 3;   ///< complete, valid JSON object
 }

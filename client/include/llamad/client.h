@@ -60,9 +60,11 @@ struct Tool {
 
 /// One complete model-requested function call, identified for a matching tool reply.
 struct ToolCall {
-    std::string id;              ///< Call identifier; echo it in the corresponding tool reply.
+    /// Daemon-assigned ID, unique within this response and against supplied history call IDs
+    /// and tool-result references; echo it in the corresponding tool reply.
+    std::string id;
     std::string name;            ///< Tool function name.
-    std::string arguments_json;  ///< Complete JSON arguments; an argument-free call carries an empty object.
+    std::string arguments_json;  ///< Complete, valid JSON object; an argument-free call carries {}.
 };
 
 /// Implementation details of the reflected function adapter.

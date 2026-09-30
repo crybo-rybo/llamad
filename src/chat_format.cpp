@@ -5,10 +5,12 @@
 #include "chat_format.h"
 
 #include "chat.h"
+#include "chat-peg-parser.h"
 #include "log.h"
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <map>
 #include <mutex>
@@ -37,15 +39,14 @@ void init_common_log_once() {
 // Tool call ids
 // ---------------------------------------------------------------------------
 
-/// Same shape as llama-server's: 32 random alphanumeric characters. Ids only have to be
-/// unique within one response, so a per-call thread-local generator is plenty.
-std::string gen_tool_call_id() {
+/// Random alphanumeric IDs; the stream checks candidates against the history and its own IDs.
+std::string gen_tool_call_id(size_t length) {
     static const char alnum[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
     static thread_local std::mt19937 rng{std::random_device{}()};
     std::uniform_int_distribution<size_t> pick(0, sizeof(alnum) - 2);
 
-    std::string id(32, ' ');
+    std::string id(length, ' ');
     for (char & c : id) {
         c = alnum[pick(rng)];
     }
@@ -103,9 +104,45 @@ ToolCall from_common(const common_chat_tool_call & call) {
 
 /// The PEG parsers are lenient, so text cut off inside a tool call still parses: the call comes back
 /// with a half-finished name or a fragment of its arguments ("{"). Complete calls are the only ones
-/// worth handing to a client, and valid JSON arguments are the test for that.
+/// worth handing to a client, and a complete JSON object is the argument contract.
 bool is_complete(const common_chat_tool_call & call) {
-    return !call.name.empty() && (call.arguments.empty() || nlohmann::json::accept(call.arguments));
+    if (call.name.empty()) {
+        return false;
+    }
+    return call.arguments.empty() ||
+           nlohmann::json::parse(call.arguments, /*cb*/ nullptr, /*allow_exceptions*/ false).is_object();
+}
+
+/// common's mapper replaces non-object JSON arguments with {} and closes unfinished objects.
+/// Preserve the original JSON documents before checking them; constructed/tagged args keep the
+/// mapper's conversion because their source text is not itself a JSON document.
+void restore_json_arguments(common_chat_msg & message, const std::string & input,
+                            const common_chat_parser_params & params) {
+    if (params.parser.empty() || message.tool_calls.empty()) {
+        return;
+    }
+    common_peg_parse_context context(params.generation_prompt + input, COMMON_PEG_PARSE_FLAG_LENIENT);
+    const auto result = params.parser.parse(context);
+    size_t call_index = 0;
+    context.ast.visit(result, [&](const common_peg_ast_node & node) {
+        if (node.tag != common_chat_peg_builder::TOOL ||
+            context.ast.find_by_tag(node, common_chat_peg_builder::TOOL_NAME) == COMMON_PEG_INVALID_AST_ID) {
+            return;
+        }
+        if (call_index >= message.tool_calls.size()) {
+            return;
+        }
+        auto & call = message.tool_calls[call_index++];
+        const auto args_id = context.ast.find_by_tag(node, common_chat_peg_builder::TOOL_ARGS);
+        if (args_id == COMMON_PEG_INVALID_AST_ID) {
+            return;
+        }
+        const auto & args = context.ast.get(args_id);
+        const auto json_id = context.ast.find_by_rule(args, "json-value");
+        if (json_id != COMMON_PEG_INVALID_AST_ID && context.ast.get(json_id).text == args.text) {
+            call.arguments = std::string(args.text);
+        }
+    });
 }
 
 /// The engine resolves trigger words against the vocab, so words stay raw here and only regexes
@@ -149,6 +186,8 @@ void split_triggers(const std::vector<common_grammar_trigger> & triggers, Gramma
 /// Everything common_chat_parse needs, built once per render and shared by every Stream.
 struct ParseState {
     common_chat_parser_params params;  ///< Format identifier, parser and generation prefix fixed by a render.
+    std::vector<std::string> history_call_ids;  ///< Prior calls and tool-result references reserved by this request.
+    size_t tool_call_id_length = 32;  ///< Mistral templates require nine characters when replaying history.
 };
 
 // ---------------------------------------------------------------------------
@@ -159,6 +198,7 @@ struct ParseState {
 struct ChatFormat::Impl {
     common_chat_templates_ptr templates;                    ///< Owned compiled model templates.
     bool                      parallel_tool_calls = false;  ///< Whether the template supports more than one call in a turn.
+    size_t                    tool_call_id_length = 32;
 };
 
 ChatFormat::ChatFormat(const std::string & template_source,
@@ -184,6 +224,11 @@ ChatFormat::ChatFormat(const std::string & template_source,
     const std::map<std::string, bool> caps = common_chat_templates_get_caps(impl_->templates.get());
     const auto                        it   = caps.find("supports_parallel_tool_calls");
     impl_->parallel_tool_calls             = it != caps.end() && it->second;
+    // common exposes no ID-length capability. The pinned Mistral templates enforce this exact
+    // constraint during history rendering, so assigned IDs must fit it before clients replay them.
+    if (template_source.find("Tool call IDs should be alphanumeric strings with length 9!") != std::string::npos) {
+        impl_->tool_call_id_length = 9;
+    }
 }
 
 ChatFormat::~ChatFormat() = default;
@@ -280,6 +325,17 @@ RenderedChat ChatFormat::render(const std::vector<ChatMessage> & messages, const
     state->params.generation_prompt  = params.generation_prompt;
     state->params.reasoning_format   = reasoning;   // the parser must match what the grammar was built from
     state->params.parse_tool_calls   = true;
+    state->tool_call_id_length       = impl_->tool_call_id_length;
+    for (const ChatMessage & message : messages) {
+        for (const ToolCall & call : message.tool_calls) {
+            if (!call.id.empty()) {
+                state->history_call_ids.push_back(call.id);
+            }
+        }
+        if (!message.tool_call_id.empty()) {
+            state->history_call_ids.push_back(message.tool_call_id);
+        }
+    }
     if (!params.parser.empty()) {
         // The serialized PEG parser: without it common_chat_parse falls back to "everything is
         // content" and tool-call markup would be streamed straight to the client.
@@ -331,7 +387,20 @@ struct ChatFormat::Stream::Impl {
             return result;
         }
 
-        next.set_tool_call_ids(call_ids, gen_tool_call_id);
+        // The parser can supply model-written IDs. Only daemon-owned IDs identify output calls,
+        // and caching by call index keeps each one stable across partial and final reparses.
+        for (size_t i = 0; i < next.tool_calls.size(); ++i) {
+            if (i == call_ids.size()) {
+                std::string id;
+                do {
+                    id = gen_tool_call_id(state->tool_call_id_length);
+                } while (std::find(state->history_call_ids.begin(), state->history_call_ids.end(), id) !=
+                             state->history_call_ids.end() ||
+                         std::find(call_ids.begin(), call_ids.end(), id) != call_ids.end());
+                call_ids.push_back(std::move(id));
+            }
+            next.tool_calls[i].id = call_ids[i];
+        }
         parsed = std::move(next);
 
         // Diff against what push() actually returned, not against the previous parse: the parser is
@@ -403,13 +472,12 @@ ChatFormat::Stream::Final ChatFormat::Stream::finish() {
         return final;
     }
 
+    restore_json_arguments(impl_->parsed, impl_->accumulated, impl_->state->params);
     for (const common_chat_tool_call & call : impl_->parsed.tool_calls) {
         if (!is_complete(call)) {
-            // Generation ended inside the markup of a call (a length limit or a cancellation): the
-            // name or the arguments are a fragment. All or nothing — a half-parsed call is worth
-            // less to a client than no call at all, and the finish reason already says the response
-            // was cut short. The content parsed so far still streams; the markup never does.
-            final.tool_calls.clear();
+            // A fragment or non-object arguments cannot form an executable call. All or nothing:
+            // one invalid call suppresses the list, but identified visible content still streams
+            // and recognized tool markup stays withheld.
             return final;
         }
     }

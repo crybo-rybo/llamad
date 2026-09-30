@@ -26,9 +26,11 @@ struct Tool {
 
 /// One complete model-requested function call, identified for a matching tool reply.
 struct ToolCall {
-    std::string id;              ///< Call identifier; echo it in the corresponding tool reply.
+    /// Daemon-assigned ID, unique within this response and against supplied history call IDs
+    /// and tool-result references; echo it in the corresponding tool reply.
+    std::string id;
     std::string name;            ///< Tool function name.
-    std::string arguments_json;  ///< Complete JSON arguments; an argument-free call carries an empty object.
+    std::string arguments_json;  ///< Complete, valid JSON object; an argument-free call carries {}.
 };
 
 /// One history turn; the full ordered history travels with every chat request.
@@ -111,13 +113,13 @@ public:
         /// Final visible tail and complete calls from the accumulated output.
         struct Final {
             std::string           content_tail;  ///< Visible text not returned by push().
-            std::vector<ToolCall> tool_calls;    ///< Complete calls; empty if any parsed call is incomplete.
+            std::vector<ToolCall> tool_calls;    ///< Complete calls; empty if any name or argument object is invalid.
         };
 
         /// Generation ended: final (non-partial) parse. content_tail = visible content not yet
-        /// returned by push(). Parser errors are contained. An incomplete call suppresses all
-        /// calls while preserving visible content. A rejected final parse falls back to the
-        /// un-emitted raw suffix if it can be located; that fallback can include markup.
+        /// returned by push(). Parser errors are contained. An incomplete call or non-object
+        /// arguments suppress all calls while preserving visible content. A rejected final parse
+        /// falls back to the un-emitted raw suffix if it can be located; that fallback can include markup.
         /// Call once after generation. The service discards calls on LENGTH or CANCELLED.
         Final finish();
 
