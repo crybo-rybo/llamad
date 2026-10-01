@@ -1,9 +1,9 @@
 /** @file
  * @brief gRPC adapter for the engine and chat layer.
  *
- * gRPC service implementation: translates llamad.v1 messages to and from the
- * engine's plain-C++ types. All the gRPC/protobuf knowledge of the daemon lives
- * here and in main.cpp; the engine stays free of both.
+ * The llamad.v1.Llama service over the engine and the chat layer. All of the daemon's gRPC and
+ * protobuf knowledge lives here, in wire.{h,cpp} and in main.cpp; the engine and the chat layer
+ * stay free of both.
  */
 
 #pragma once
@@ -63,8 +63,8 @@ public:
                        v1::EmbedResponse * response) override;
 
 private:
-    /// Shared body of Generate and Chat: run the engine, stream text chunks, then
-    /// write the single final chunk carrying finish_reason, stats and any tool calls.
+    /// Shared body of Generate and Chat: run the engine, stream text chunks, then write the one
+    /// `finish` chunk carrying the finish reason, stats and any tool calls.
     /// `stream` is Chat's parser, which decides what text the client sees and parses the tool
     /// calls once generation is over; Generate passes null. What the engine throws propagates.
     grpc::Status stream_generation(const char * rpc_name,

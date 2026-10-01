@@ -18,6 +18,7 @@
 #include <mutex>
 #include <ranges>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <unordered_set>
@@ -240,7 +241,7 @@ void report_offload_devices(const EngineConfig & config, const std::vector<ggml_
 /// Number of trailing bytes of `s` that form an incomplete UTF-8 sequence.
 /// Returns 0 when the buffer ends on a complete (or simply invalid) sequence,
 /// in which case nothing needs to be held back.
-size_t incomplete_utf8_tail(const std::string & s) {
+size_t incomplete_utf8_tail(std::string_view s) {
     const size_t n        = s.size();
     const size_t max_look = std::min<size_t>(n, 4);
 
@@ -322,10 +323,11 @@ public:
         }
 
         if (match != std::string::npos) {
-            std::string head = pending_.substr(0, match);
-            head.resize(head.size() - incomplete_utf8_tail(head));
+            std::string_view head(pending_.data(), match);
+            head.remove_suffix(incomplete_utf8_tail(head));
+            const std::string out(head);
             pending_.clear();
-            if (!deliver(head)) {
+            if (!deliver(out)) {
                 return Status::Cancelled;
             }
             return Status::Stopped;
@@ -354,9 +356,10 @@ public:
         if (pending_.empty()) {
             return;
         }
-        std::string out;
-        out.swap(pending_);
-        out.resize(out.size() - incomplete_utf8_tail(out));
+        std::string_view text = pending_;
+        text.remove_suffix(incomplete_utf8_tail(text));
+        const std::string out(text);
+        pending_.clear();
         deliver(out);
     }
 

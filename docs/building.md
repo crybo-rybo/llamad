@@ -2,18 +2,22 @@
 
 ## Compiler and platforms
 
-llamad is written in C++26 and uses static reflection, so it needs GCC 16 or later. Clang and
-Apple Clang do not implement reflection. Linux and macOS on Apple silicon are the supported
-platforms; on both, GCC compiles every C++ source, including your own if you link the client.
+llamad is C++23 and builds with the platform's own compiler: GCC 13 or Clang 18 on Linux, Apple
+Clang 16 (Xcode 16) or later on macOS. Linux and macOS on Apple silicon are the supported
+platforms. gRPC and Protobuf come from the system package manager; CMake finds Protobuf through its
+CMake config where the package ships one, and through CMake's own module where it does not
+(Debian and Ubuntu).
 
 ## Linux
 
 ```sh
 pacman -S gcc grpc protobuf cmake ninja     # Arch Linux
+apt install g++ cmake ninja-build libgrpc++-dev libprotobuf-dev \
+    protobuf-compiler protobuf-compiler-grpc  # Debian and Ubuntu
 git clone --recurse-submodules git@github.com:crybo-rybo/llamad.git
 cd llamad
 ./scripts/build.sh cpu                      # builds into build-cpu/
-./scripts/test.sh cpu                       # chat template, flags, wire contract, JSON and tool set tests
+./scripts/test.sh cpu                       # chat template, flags, engine and wire tests
 ```
 
 If you already cloned without submodules: `git submodule update --init --recursive`.
@@ -21,28 +25,16 @@ If you already cloned without submodules: `git submodule update --init --recursi
 ## macOS
 
 ```sh
-brew install gcc cmake ninja openssl@3
+xcode-select --install                      # Apple Clang, if Xcode is not installed
+brew install grpc protobuf cmake ninja
 git clone --recurse-submodules git@github.com:crybo-rybo/llamad.git
 cd llamad
-./scripts/build-deps-macos.sh               # once: builds gRPC into build-deps/
 ./scripts/build.sh cpu
 ./scripts/test.sh cpu
 ```
 
-Homebrew's gRPC, Protobuf and Abseil are built against libc++, and `std::string` and its
-relatives cross their APIs, so GCC's libstdc++ cannot link against them.
-`./scripts/build-deps-macos.sh` builds gRPC from source instead, with the same compilers the
-project uses, and installs it under `build-deps/`. It takes about fifteen minutes and a gigabyte.
-
-`./scripts/build.sh` then compiles llama.cpp's C and Objective-C Metal sources with Apple clang,
-which GCC cannot parse, and every C++ source with `g++-16`. Accelerate's umbrella header does not
-compile with GCC, so ggml's Accelerate paths are off; its BLAS backend still reaches
-Accelerate's BLAS through vecLib's plain `cblas.h`, which cuts CPU prompt-processing time for
-K-quant models by about 40%.
-
-`build.sh` also names the CPU's features for ggml (`-march=armv8.2-a+fp16+dotprod+...`, from `sysctl
-hw.optional.arm`) instead of relying on `-mcpu=native`: GCC's native CPU for Apple silicon lacks
-FP16 vector arithmetic, which ggml's attention over the F16 KV cache runs on.
+llama.cpp builds with its usual Apple settings: Accelerate for BLAS, the CPU's native features,
+and Metal in a `gpu` build.
 
 ## What the build contains
 
@@ -53,7 +45,8 @@ The tests need no model file and no daemon: the chat-template ones render and pa
 template checked into the submodule, the rest need nothing but the build.
 `./scripts/build-test.sh [cpu|gpu]` builds and then runs them in one step. Extra arguments to
 `build.sh` are passed to CMake configure, and `CMAKE_BUILD_PARALLEL_LEVEL` sets the job count
-(default 4).
+(default 4). `-DLLAMAD_WARNINGS_AS_ERRORS=ON`, which CI uses, fails the build on a warning in
+llamad's own sources.
 
 ## GPU
 

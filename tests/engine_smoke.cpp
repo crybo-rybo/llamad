@@ -30,61 +30,89 @@
 
 namespace {
 
-using llamad::cli::help;
-
-/// Options specific to this executable; shared flags are composed separately.
+/// Options specific to this executable; the context and offload flags are EngineFlags.
 struct Options {
-    [[=help{"wrap the prompt as a single user message via the chat template"}]]
-    bool chat = false;  ///< Wrap the prompt as a single user message via the chat template.
-
-    [[=help{"with --chat: offer the model one get_current_time tool"}]]
-    bool demo_tool = false;  ///< With --chat: offer the model one get_current_time tool.
-
-    [[=help{"PATH", "constrain generation with this GBNF file\n"
-                    "(not lazy; overrides --chat's grammar)"}]]
-    std::string grammar_file;  ///< Constrain generation with this GBNF file  (not lazy; overrides --chat's grammar).
-
-    [[=help{"sampling temperature (<= 0 means greedy)"}]]
-    std::optional<float> temp;  ///< Sampling temperature (<= 0 means greedy).
-
-    [[=help{"sampling seed"}]]
-    std::optional<uint32_t> seed;  ///< Sampling seed.
-
-    [[=help{"top-k"}]]
-    std::optional<int32_t> top_k;  ///< Top-k.
-
-    [[=help{"top-p"}]]
-    std::optional<float> top_p;  ///< Top-p.
-
-    [[=help{"min-p"}]]
-    std::optional<float> min_p;  ///< Min-p.
-
-    [[=help{"stop after N generated tokens (< 0 = until the context is full)"}]]
-    std::optional<int32_t> max_tokens;  ///< Stop after N generated tokens (< 0 = until the context is full).
-
-    [[=help{"STR", "stop string (repeatable)"}]]
-    std::vector<std::string> stop;  ///< Stop string (repeatable).
-
-    [[=help{"return false from the chunk callback after N chunks"}]]
-    long cancel_after = -1;  ///< Return false from the chunk callback after N chunks.
-
-    [[=help{"run generate() N times in the same process"}]]
-    long repeat = 1;  ///< Run generate() N times in the same process.
-
-    [[=help{"TEXT", "embed TEXT with an embedding model instead of generating (repeatable);\n"
-                    "prints each vector's first values and its cosine with the first TEXT"}]]
-    std::vector<std::string> embed;  ///< Texts to embed in one embed() call instead of generating.
+    bool                     chat      = false;  ///< Wrap the prompt as a single user message via the chat template.
+    bool                     demo_tool = false;  ///< With --chat: offer the model one get_current_time tool.
+    std::string              grammar_file;       ///< Constrain generation with this GBNF file.
+    std::optional<float>     temp;               ///< Sampling temperature.
+    std::optional<uint32_t>  seed;               ///< Sampling seed.
+    std::optional<int32_t>   top_k;              ///< Top-k.
+    std::optional<float>     top_p;              ///< Top-p.
+    std::optional<float>     min_p;              ///< Min-p.
+    std::optional<int32_t>   max_tokens;         ///< Stop after N generated tokens.
+    std::vector<std::string> stop;               ///< Stop strings.
+    long                     cancel_after = -1;  ///< Return false from the chunk callback after N chunks.
+    long                     repeat       = 1;   ///< Run generate() N times in the same process.
+    std::vector<std::string> embed;              ///< Texts to embed in one embed() call instead of generating.
+    bool                     help = false;       ///< Print usage and exit.
+    std::vector<std::string> positional;         ///< The model, then the prompt.
 };
 
-/// Print usage and reflected flag descriptions to stderr.
+/// Print usage and every flag to stderr.
 void print_usage(const char * argv0) {
     std::fprintf(stderr,
                  "usage: %s <model.gguf> [options] <prompt>\n"
                  "       %s <model.gguf> [options] --embed TEXT [--embed TEXT ...]\n"
                  "       %s --list-devices\n"
-                 "\n",
-                 argv0, argv0, argv0);
-    llamad::cli::print_flags(stderr, Options{}, llamad::EngineFlags{}, llamad::cli::HelpFlag{});
+                 "\n"
+                 "  --chat              wrap the prompt as a single user message via the chat template\n"
+                 "  --demo-tool         with --chat: offer the model one get_current_time tool\n"
+                 "  --grammar-file PATH constrain generation with this GBNF file\n"
+                 "                      (not lazy; overrides --chat's grammar)\n"
+                 "  --temp F            sampling temperature (<= 0 means greedy)\n"
+                 "  --seed N            sampling seed\n"
+                 "  --top-k N           top-k\n"
+                 "  --top-p F           top-p\n"
+                 "  --min-p F           min-p\n"
+                 "  --max-tokens N      stop after N generated tokens (< 0 = until the context is full)\n"
+                 "  --stop STR          stop string (repeatable)\n"
+                 "  --cancel-after N    return false from the chunk callback after N chunks\n"
+                 "  --repeat N          run generate() N times in the same process\n"
+                 "  --embed TEXT        embed TEXT with an embedding model instead of generating (repeatable);\n"
+                 "                      prints each vector's first values and its cosine with the first TEXT\n"
+                 "%s"
+                 "  --help              show this message\n",
+                 argv0, argv0, argv0, llamad::kEngineFlagsHelp);
+}
+
+/// Fill `options` and `engine_flags` from the command line. Throws cli::FlagError.
+void parse_command_line(int argc, char ** argv, Options & options, llamad::EngineFlags & engine_flags) {
+    for (llamad::cli::Args args(argc, argv); args.next();) {
+        if (!args.is_flag()) {
+            options.positional.push_back(args.current());
+        } else if (args.is("--chat")) {
+            options.chat = true;
+        } else if (args.is("--demo-tool")) {
+            options.demo_tool = true;
+        } else if (args.is("--grammar-file")) {
+            options.grammar_file = args.value();
+        } else if (args.is("--temp")) {
+            options.temp = args.number<float>();
+        } else if (args.is("--seed")) {
+            options.seed = args.number<uint32_t>();
+        } else if (args.is("--top-k")) {
+            options.top_k = args.number<int32_t>();
+        } else if (args.is("--top-p")) {
+            options.top_p = args.number<float>();
+        } else if (args.is("--min-p")) {
+            options.min_p = args.number<float>();
+        } else if (args.is("--max-tokens")) {
+            options.max_tokens = args.number<int32_t>();
+        } else if (args.is("--stop")) {
+            options.stop.push_back(args.value());
+        } else if (args.is("--cancel-after")) {
+            options.cancel_after = args.number<long>();
+        } else if (args.is("--repeat")) {
+            options.repeat = args.number<long>();
+        } else if (args.is("--embed")) {
+            options.embed.push_back(args.value());
+        } else if (args.is("--help")) {
+            options.help = true;
+        } else if (!llamad::parse_engine_flag(args, engine_flags)) {
+            throw args.unknown();
+        }
+    }
 }
 
 /// Reads a whole file. Throws if it cannot be opened.
@@ -109,7 +137,7 @@ llamad::Tool demo_tool() {
 
 /// A sampling flag that was not given leaves the engine's own default in place.
 template <typename T>
-void apply(const std::optional<T> & flag, T & field) {
+void set_if_given(const std::optional<T> & flag, T & field) {
     if (flag) {
         field = *flag;
     }
@@ -151,16 +179,14 @@ void print_embeddings(const llamad::EmbedResult & result) {
 /// Run the executable.
 /// @return Zero on success, two for invalid command-line usage, or one for a runtime failure.
 int main(int argc, char ** argv) {
-    Options                  options;
-    llamad::EngineFlags      engine_flags;
-    llamad::cli::HelpFlag    help_flag;
-    llamad::EngineConfig     config;
-    llamad::SamplingParams   params;
-    std::vector<std::string> positional;
+    Options                options;
+    llamad::EngineFlags    engine_flags;
+    llamad::EngineConfig   config;
+    llamad::SamplingParams params;
 
     try {
-        positional = llamad::cli::parse_flags(argc, argv, options, engine_flags, help_flag);
-        if (help_flag.help) {
+        parse_command_line(argc, argv, options, engine_flags);
+        if (options.help) {
             print_usage(argv[0]);
             return 0;
         }
@@ -181,6 +207,7 @@ int main(int argc, char ** argv) {
     }
 
     const size_t n_positional = options.embed.empty() ? 2 : 1;
+    const std::vector<std::string> & positional = options.positional;
     if (positional.size() != n_positional) {
         print_usage(argv[0]);
         return 2;
@@ -189,11 +216,11 @@ int main(int argc, char ** argv) {
     config.model_path        = positional[0];
     const std::string prompt = options.embed.empty() ? positional[1] : std::string();
 
-    apply(options.temp, params.temperature);
-    apply(options.top_k, params.top_k);
-    apply(options.top_p, params.top_p);
-    apply(options.min_p, params.min_p);
-    apply(options.max_tokens, params.max_tokens);
+    set_if_given(options.temp, params.temperature);
+    set_if_given(options.top_k, params.top_k);
+    set_if_given(options.top_p, params.top_p);
+    set_if_given(options.min_p, params.min_p);
+    set_if_given(options.max_tokens, params.max_tokens);
     params.seed = options.seed;
     params.stop = options.stop;
 

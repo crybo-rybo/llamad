@@ -1,7 +1,7 @@
 # Plain executables, no test framework: a CHECK macro and a non-zero exit code are enough.
 
 add_executable(chat_format_test chat_format_test.cpp)
-target_link_libraries(chat_format_test PRIVATE llamad_chat)
+target_link_libraries(chat_format_test PRIVATE llamad_chat llamad_options)
 
 # The parser tests need a real Jinja template but no GGUF: ChatFormat takes the template source.
 # Qwen3.5 is the thinking template: its generation prompt opens a <think> block, which is what
@@ -14,49 +14,24 @@ add_test(NAME chat_format COMMAND chat_format_test)
 
 # The engine's prompt-cache bookkeeping, reached without loading a model.
 add_executable(engine_test engine_test.cpp)
-target_link_libraries(engine_test PRIVATE llamad_engine)
-
+target_link_libraries(engine_test PRIVATE llamad_engine llamad_options)
 add_test(NAME engine COMMAND engine_test)
 
-# The flag parser is header-only and needs neither gRPC nor a model.
+# The flag reader and the shared engine flags; no model.
 add_executable(flags_test flags_test.cpp)
-target_link_libraries(flags_test PRIVATE llamad_flags)
-
+target_link_libraries(flags_test PRIVATE llamad_engine llamad_options)
 add_test(NAME flags COMMAND flags_test)
 
-# The one place the proto, the engine, the chat layer and the client are visible at once, which
-# is what lets it check that every struct mirroring a message still matches it.
-if(TARGET llamad_proto)
-    add_executable(contract_test contract_test.cpp)
-    target_link_libraries(contract_test PRIVATE llamad_proto llamad_engine llamad_chat llamad_client)
-
-    add_test(NAME contract COMMAND contract_test)
-endif()
-
-# Reflected JSON conversion and tool dispatch: no daemon or model.
-if(TARGET llamad_client)
-    add_executable(json_test json_test.cpp)
-    target_link_libraries(json_test PRIVATE llamad_client)
-    add_test(NAME json COMMAND json_test)
-
-    add_executable(client_tools_test client_tools_test.cpp)
-    target_link_libraries(client_tools_test PRIVATE llamad_client)
-    add_test(NAME client_tools COMMAND client_tools_test)
-
-    # The tool loop against a scripted fake daemon, which is why this one also links llamad_proto:
-    # the fake implements the generated service base class.
-    add_executable(client_chat_test client_chat_test.cpp)
-    target_link_libraries(client_chat_test PRIVATE llamad_client llamad_proto)
-    add_test(NAME client_chat COMMAND client_chat_test)
-    # A stop or deadline that fails to cancel a call leaves it waiting on the fake forever.
-    set_tests_properties(client_chat PROPERTIES TIMEOUT 60)
-endif()
+# Conversion between wire messages and engine types, checked against the messages' descriptors.
+add_executable(wire_test wire_test.cpp)
+target_link_libraries(wire_test PRIVATE llamad_service llamad_options)
+add_test(NAME wire COMMAND wire_test)
 
 # The engine and the chat layer in-process, without the daemon. It needs a model file, so it is
-# a CLI to run by hand and not a CTest test; it needs no gRPC, so it builds on every path.
+# a CLI to run by hand and not a CTest test.
 add_executable(engine_smoke engine_smoke.cpp)
-target_link_libraries(engine_smoke PRIVATE llamad_engine llamad_chat llamad_flags)
+target_link_libraries(engine_smoke PRIVATE llamad_chat llamad_options)
 
 # Prefill and decode throughput, for scripts/bench.sh. Like engine_smoke it needs a model file.
 add_executable(engine_bench engine_bench.cpp)
-target_link_libraries(engine_bench PRIVATE llamad_engine llamad_chat llamad_flags)
+target_link_libraries(engine_bench PRIVATE llamad_chat llamad_options)

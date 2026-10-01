@@ -1,14 +1,13 @@
 /** @file
- * @brief Reflected flag values, errors, positional arguments and help formatting.
+ * @brief The flag reader's values and errors, and the shared engine flags.
  *
- * Tests for src/cli/flags.h: what each member type takes from the command line, what `--help`
- * prints for it, and what is rejected. No daemon, no model, no gRPC.
+ * Tests for src/flags.h and src/engine_flags.h. No daemon, no model, no gRPC.
  */
 
 #include "check.h"
+#include "engine_flags.h"
 #include "flags.h"
 
-#include <cstdio>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -16,47 +15,12 @@
 
 namespace {
 
-using llamad::cli::help;
-
-struct Options {
-    [[=help{"PATH", "GGUF model to load"}]]
-    std::string model;
-
-    [[=help{"context size"}]]
-    int32_t ctx = 4096;
-
-    [[=help{"sampling temperature"}]]
-    std::optional<float> temp;
-
-    [[=help{"sampling seed"}]]
-    std::optional<uint32_t> seed;
-
-    [[=help{"TEXT", "system prompt"}]]
-    std::optional<std::string> system;
-
-    [[=help{"STR", "stop string (repeatable)"}]]
-    std::vector<std::string> stop;
-
-    [[=help{"list the devices and exit"}]]
-    bool list_devices = false;
-
-    [[=help{"run a single non-interactive turn\n"
-            "and exit"}]]
-    bool once = false;
-
-    // No help annotation: a hidden flag, parsed but left out of --help.
-    std::optional<long> cancel_after;
-};
-
-struct Extra {
-    [[=help{"N", "rounds"}]]
-    int rounds = 1;
-};
+namespace cli = llamad::cli;
 
 // argv as main() gets it: the program name, then the arguments.
 struct CommandLine {
     explicit CommandLine(std::vector<std::string> arguments) : storage(std::move(arguments)) {
-        pointers.push_back(const_cast<char *>("test"));
+        pointers.push_back(program.data());
         for (std::string & argument : storage) {
             pointers.push_back(argument.data());
         }
@@ -65,147 +29,157 @@ struct CommandLine {
     int     argc() const { return static_cast<int>(pointers.size()); }
     char ** argv() { return pointers.data(); }
 
+    std::string              program = "test";
     std::vector<std::string> storage;
     std::vector<char *>      pointers;
 };
 
-template <typename... Structs>
-std::vector<std::string> parse(std::vector<std::string> arguments, Structs &... options) {
+// What a binary's own flags look like, read the way every binary reads them.
+struct Options {
+    std::string              model;
+    std::optional<float>     temp;
+    std::optional<uint32_t>  seed;
+    std::vector<std::string> stop;
+    bool                     help = false;
+    std::vector<std::string> positional;
+};
+
+Options parse(std::vector<std::string> arguments, llamad::EngineFlags & engine_flags) {
     CommandLine line(std::move(arguments));
-    return llamad::cli::parse_flags(line.argc(), line.argv(), options...);
+    Options     options;
+    for (cli::Args args(line.argc(), line.argv()); args.next();) {
+        if (!args.is_flag()) {
+            options.positional.push_back(args.current());
+        } else if (args.is("--model")) {
+            options.model = args.value();
+        } else if (args.is("--temp")) {
+            options.temp = args.number<float>();
+        } else if (args.is("--seed")) {
+            options.seed = args.number<uint32_t>();
+        } else if (args.is("--stop")) {
+            options.stop.push_back(args.value());
+        } else if (args.is("--help")) {
+            options.help = true;
+        } else if (!llamad::parse_engine_flag(args, engine_flags)) {
+            throw args.unknown();
+        }
+    }
+    return options;
 }
 
-// The message of the FlagError `arguments` provokes, or "" when they parse.
-template <typename... Structs>
-std::string error_of(std::vector<std::string> arguments, Structs &... options) {
+Options parse(std::vector<std::string> arguments) {
+    llamad::EngineFlags engine_flags;
+    return parse(std::move(arguments), engine_flags);
+}
+
+// The message of the FlagError `arguments` provoke, or "" when they parse.
+std::string error_of(std::vector<std::string> arguments) {
     try {
-        parse(std::move(arguments), options...);
-    } catch (const llamad::cli::FlagError & e) {
+        parse(std::move(arguments));
+    } catch (const cli::FlagError & e) {
         return e.what();
     }
     return "";
 }
 
-std::string capture_help() {
-    std::FILE * out = std::tmpfile();
-    if (out == nullptr) {
-        std::fprintf(stderr, "cannot open a temporary file\n");
-        std::exit(1);
+// The message of the FlagError to_config raises for these engine flags, or "".
+std::string config_error_of(std::vector<std::string> arguments) {
+    try {
+        llamad::EngineFlags engine_flags;
+        parse(std::move(arguments), engine_flags);
+        llamad::to_config(engine_flags);
+    } catch (const cli::FlagError & e) {
+        return e.what();
     }
-    llamad::cli::print_flags(out, Options{}, llamad::cli::HelpFlag{});
-
-    std::string text;
-    std::rewind(out);
-    for (int c = std::fgetc(out); c != EOF; c = std::fgetc(out)) {
-        text += static_cast<char>(c);
-    }
-    std::fclose(out);
-    return text;
-}
-
-bool contains(const std::string & haystack, const std::string & needle) {
-    return haystack.find(needle) != std::string::npos;
+    return "";
 }
 
 void test_values() {
-    Options options;
-    const std::vector<std::string> positional =
-        parse({"--model", "m.gguf", "--ctx", "2048", "--temp", "0.5", "--seed", "7", "--system",
-               "be brief", "--stop", "</s>", "--stop", "a,b", "--list-devices", "--cancel-after", "3"},
-              options);
+    llamad::EngineFlags engine_flags;
+    const Options       options =
+        parse({"--model", "m.gguf", "--temp", "0.5", "--seed", "7", "--stop", "</s>", "--stop", "a,b", "--ctx", "2048",
+               "--threads", "3", "--list-devices"},
+              engine_flags);
 
-    CHECK(positional.empty());
-    CHECK_EQ(options.model, std::string("m.gguf"));
-    CHECK(options.ctx == 2048);
+    CHECK(options.positional.empty());
+    CHECK_EQ(options.model, "m.gguf");
     CHECK(options.temp && *options.temp == 0.5f);
     CHECK(options.seed && *options.seed == 7u);
-    CHECK(options.system && *options.system == "be brief");
-    CHECK(options.list_devices);
-    CHECK(options.cancel_after && *options.cancel_after == 3);
+    CHECK(engine_flags.ctx == 2048);
+    CHECK(engine_flags.threads == 3);
+    CHECK(engine_flags.list_devices);
 
     // A repeated flag appends, and a comma is part of the value: splitting one is the owner's job.
     CHECK_EQ(options.stop.size(), size_t(2));
-    CHECK_EQ(options.stop[0], std::string("</s>"));
-    CHECK_EQ(options.stop[1], std::string("a,b"));
+    CHECK_EQ(options.stop[0], "</s>");
+    CHECK_EQ(options.stop[1], "a,b");
 }
 
 void test_defaults() {
-    Options options;
-    parse({}, options);
+    llamad::EngineFlags engine_flags;
+    const Options       options = parse({}, engine_flags);
 
     CHECK(options.model.empty());
-    CHECK(options.ctx == 4096);
     CHECK(!options.temp);
     CHECK(!options.seed);
-    CHECK(!options.system);
     CHECK(options.stop.empty());
-    CHECK(!options.list_devices);
-    CHECK(!options.cancel_after);
+    CHECK(!options.help);
+    CHECK(engine_flags.ctx == 4096);
+    CHECK(engine_flags.ngl == 99);
+    CHECK(!engine_flags.devices);
+    CHECK(!engine_flags.list_devices);
 }
 
 void test_positionals() {
-    Options options;
-    const std::vector<std::string> positional =
-        parse({"first", "--ctx", "8", "second", "--list-devices", "-dash", "third"}, options);
+    const Options options = parse({"first", "--temp", "1", "second", "-dash", "third"});
 
-    CHECK(options.ctx == 8);
-    CHECK(options.list_devices);
-    CHECK_EQ(positional.size(), size_t(4));
-    CHECK_EQ(positional[0], std::string("first"));
-    CHECK_EQ(positional[1], std::string("second"));
-    CHECK_EQ(positional[2], std::string("-dash"));
-    CHECK_EQ(positional[3], std::string("third"));
+    // Only a long option is a flag, so a prompt or a path that starts with one dash is not.
+    CHECK_EQ(options.positional.size(), size_t(4));
+    CHECK_EQ(options.positional[0], "first");
+    CHECK_EQ(options.positional[1], "second");
+    CHECK_EQ(options.positional[2], "-dash");
+    CHECK_EQ(options.positional[3], "third");
 }
 
-void test_several_structs() {
-    Options options;
-    Extra   extra;
-    llamad::cli::HelpFlag help_flag;
-    parse({"--rounds", "4", "--ctx", "512", "-h"}, options, extra, help_flag);
-
-    CHECK(extra.rounds == 4);
-    CHECK(options.ctx == 512);
-    CHECK(help_flag.help);
-
-    llamad::cli::HelpFlag spelled_out;
-    parse({"--help"}, spelled_out);
-    CHECK(spelled_out.help);
+void test_help() {
+    CHECK(parse({"-h"}).help);
+    CHECK(parse({"--help"}).help);
 }
 
 void test_errors() {
-    Options options;
-    CHECK_EQ(error_of({"--nope"}, options), std::string("unknown argument '--nope'"));
-    CHECK_EQ(error_of({"--ctx"}, options), std::string("--ctx needs a value"));
-    CHECK_EQ(error_of({"--ctx", "many"}, options), std::string("--ctx needs an integer"));
-    CHECK_EQ(error_of({"--ctx", "12x"}, options), std::string("--ctx needs an integer"));
-    CHECK_EQ(error_of({"--ctx", "9999999999"}, options), std::string("--ctx is out of range"));
-    CHECK_EQ(error_of({"--temp", "warm"}, options), std::string("--temp needs a number"));
-    CHECK_EQ(error_of({"--seed", "-1"}, options), std::string("--seed needs a non-negative integer"));
-
-    // -h is the only short option; anything else starting with one dash is an argument.
-    llamad::cli::HelpFlag help_flag;
-    CHECK_EQ(error_of({"-h"}, help_flag), std::string(""));
+    CHECK_EQ(error_of({"--nope"}), "unknown argument '--nope'");
+    CHECK_EQ(error_of({"--ctx"}), "--ctx needs a value");
+    CHECK_EQ(error_of({"--ctx", "many"}), "--ctx needs an integer");
+    CHECK_EQ(error_of({"--ctx", "12x"}), "--ctx needs an integer");
+    CHECK_EQ(error_of({"--ctx", "9999999999"}), "--ctx is out of range");
+    CHECK_EQ(error_of({"--temp", "warm"}), "--temp needs a number");
+    CHECK_EQ(error_of({"--temp", ""}), "--temp needs a number");
+    CHECK_EQ(error_of({"--temp", " 1"}), "--temp needs a number");
+    CHECK_EQ(error_of({"--temp", "nan"}), "--temp needs a number");
+    CHECK_EQ(error_of({"--temp", "1e99"}), "--temp is out of range");
+    CHECK_EQ(error_of({"--seed", "-1"}), "--seed needs a non-negative integer");
 }
 
-void test_help_text() {
-    const std::string text = capture_help();
+void test_engine_config() {
+    llamad::EngineFlags engine_flags;
+    parse({"--ctx", "512", "--ngl", "0", "--devices", "Vulkan0,Vulkan1", "--tensor-split", "3,1.5"}, engine_flags);
+    const llamad::EngineConfig config = llamad::to_config(engine_flags);
 
-    // The placeholder comes from the annotation, or from the member's type where it gives none,
-    // and the columns line up across every struct printed.
-    CHECK(contains(text, "  --model PATH   GGUF model to load\n"));
-    CHECK(contains(text, "  --ctx N        context size\n"));
-    CHECK(contains(text, "  --temp F       sampling temperature\n"));
-    CHECK(contains(text, "  --system TEXT  system prompt\n"));
-    CHECK(contains(text, "  --stop STR     stop string (repeatable)\n"));
-    CHECK(contains(text, "  --list-devices list the devices and exit\n"));
-    CHECK(contains(text, "  --help         show this message\n"));
+    CHECK(config.n_ctx == 512);
+    CHECK(config.n_gpu_layers == 0);
+    CHECK_EQ(config.devices.size(), size_t(2));
+    CHECK_EQ(config.devices[1], "Vulkan1");
+    CHECK_EQ(config.tensor_split.size(), size_t(2));
+    CHECK(config.tensor_split[1] == 1.5f);
 
-    // A newline in the text starts a continuation line, indented to the text column.
-    CHECK(contains(text, "  --once         run a single non-interactive turn\n"
-                         "                 and exit\n"));
-
-    // A member with no help annotation is a hidden flag.
-    CHECK(!contains(text, "cancel-after"));
+    const std::string split_error = "--tensor-split needs a comma-separated list of non-negative numbers, e.g. 3,1";
+    CHECK_EQ(config_error_of({"--ctx", "0"}), "--ctx needs a positive integer");
+    CHECK_EQ(config_error_of({"--threads", "-1"}), "--threads needs a non-negative integer");
+    CHECK_EQ(config_error_of({"--devices", "a,,b"}),
+             "--devices needs a comma-separated list of device names (see --list-devices)");
+    CHECK_EQ(config_error_of({"--tensor-split", "3,-1"}), split_error);
+    CHECK_EQ(config_error_of({"--tensor-split", "3,x"}), split_error);
+    CHECK_EQ(config_error_of({"--tensor-split", ""}), split_error);
 }
 
 }  // namespace
@@ -214,9 +188,9 @@ int main() {
     test_values();
     test_defaults();
     test_positionals();
-    test_several_structs();
+    test_help();
     test_errors();
-    test_help_text();
+    test_engine_config();
 
     return tests::report();
 }

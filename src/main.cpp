@@ -37,22 +37,39 @@
 
 namespace {
 
-using llamad::cli::help;
-
-/// Options specific to this executable; shared flags are composed separately.
+/// Options specific to this executable; the context and offload flags are EngineFlags.
 struct Options {
-    [[=help{"PATH", "GGUF model to load (required)"}]]
-    std::string model;  ///< GGUF model to load (required).
-
-    [[=help{"PATH", "unix socket to listen on\n"
-                    "(default: $XDG_RUNTIME_DIR/llamad.sock, else /tmp/llamad-<uid>.sock)"}]]
-    std::optional<std::string> socket;  ///< Unix socket path; empty uses the per-user default.
+    std::string                model;   ///< GGUF model to load (required).
+    std::optional<std::string> socket;  ///< Unix socket path; unset uses the per-user default.
+    bool                       help = false;  ///< Print usage and exit.
 };
 
-/// Print usage and reflected flag descriptions to stderr.
+/// Print usage and every flag to stderr.
 void print_usage(const char * argv0) {
-    std::fprintf(stderr, "usage: %s --model PATH [options]\n\n", argv0);
-    llamad::cli::print_flags(stderr, Options{}, llamad::EngineFlags{}, llamad::cli::HelpFlag{});
+    std::fprintf(stderr,
+                 "usage: %s --model PATH [options]\n"
+                 "\n"
+                 "  --model PATH        GGUF model to load (required)\n"
+                 "  --socket PATH       unix socket to listen on\n"
+                 "                      (default: $XDG_RUNTIME_DIR/llamad.sock, else /tmp/llamad-<uid>.sock)\n"
+                 "%s"
+                 "  --help              show this message\n",
+                 argv0, llamad::kEngineFlagsHelp);
+}
+
+/// Fill `options` and `engine_flags` from the command line. Throws cli::FlagError.
+void parse_command_line(int argc, char ** argv, Options & options, llamad::EngineFlags & engine_flags) {
+    for (llamad::cli::Args args(argc, argv); args.next();) {
+        if (args.is("--model")) {
+            options.model = args.value();
+        } else if (args.is("--socket")) {
+            options.socket = args.value();
+        } else if (args.is("--help")) {
+            options.help = true;
+        } else if (!llamad::parse_engine_flag(args, engine_flags)) {
+            throw args.unknown();
+        }
+    }
 }
 
 /// Select the per-user runtime socket path with a UID-based temporary fallback.
@@ -125,18 +142,13 @@ bool prepare_socket_path(const std::string & path) {
 /// Run the executable.
 /// @return Zero on success, two for invalid command-line usage, or one for a runtime failure.
 int main(int argc, char ** argv) {
-    Options               options;
-    llamad::EngineFlags   engine_flags;
-    llamad::cli::HelpFlag help_flag;
-    llamad::EngineConfig  config;
+    Options              options;
+    llamad::EngineFlags  engine_flags;
+    llamad::EngineConfig config;
 
     try {
-        const std::vector<std::string> positional =
-            llamad::cli::parse_flags(argc, argv, options, engine_flags, help_flag);
-        if (!positional.empty()) {
-            throw llamad::cli::FlagError("unknown argument '" + positional.front() + "'");
-        }
-        if (help_flag.help) {
+        parse_command_line(argc, argv, options, engine_flags);
+        if (options.help) {
             print_usage(argv[0]);
             return 0;
         }

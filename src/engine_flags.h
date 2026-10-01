@@ -1,9 +1,9 @@
 /** @file
- * @brief Shared context and offload options for the daemon and engine smoke CLI.
+ * @brief Shared context and offload options for the daemon and the engine CLIs.
  *
- * The context and offload flags the daemon and engine_smoke both take, the EngineConfig they
- * describe, and the device table --list-devices prints. The comma-separated lists arrive as text
- * and are split here, so both binaries accept the same spelling and report the same errors.
+ * The context and offload flags llamad, engine_smoke and engine_bench all take, the EngineConfig
+ * they describe, and the device table --list-devices prints. The comma-separated lists arrive as
+ * text and are split here, so every binary accepts the same spelling and reports the same errors.
  */
 
 #pragma once
@@ -12,42 +12,58 @@
 #include "flags.h"
 
 #include <algorithm>
-#include <charconv>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <optional>
 #include <string>
-#include <system_error>
 #include <vector>
 
 namespace llamad {
 
-/// Shared CLI spelling of model context and offload configuration.
+/// The --help lines for EngineFlags, aligned with a binary's own at column 22.
+inline constexpr const char * kEngineFlagsHelp =
+    "  --ctx N             context size (default 4096)\n"
+    "  --ngl N             layers to offload to the GPU (default 99)\n"
+    "  --threads N         threads for inference, 0 = auto: half the hardware threads\n"
+    "                      to generate, all of them for prompts (default 0)\n"
+    "  --devices NAMES     comma-separated devices to offload to (default: every discrete GPU)\n"
+    "  --tensor-split S    comma-separated share per device, e.g. 3,1 (default: by free memory)\n"
+    "  --list-devices      list the devices this build can offload to, and exit\n";
+
+/// The context and offload flags as given on the command line.
 struct EngineFlags {
-    [[=cli::help{"N", "context size (default 4096)"}]]
-    int32_t ctx = 4096;  ///< Positive context length in tokens.
-
-    [[=cli::help{"N", "layers to offload to the GPU (default 99)"}]]
-    int32_t ngl = 99;  ///< Number of model layers to offload; zero disables offload.
-
-    [[=cli::help{"N", "threads for inference, 0 = auto: half the hardware threads\n"
-                        "to generate, all of them for prompts (default 0)"}]]
-    int32_t threads = 0;  ///< Non-negative thread count; zero selects the engine default.
-
-    [[=cli::help{"NAMES", "comma-separated devices to offload to (default: every discrete GPU)"}]]
-    std::optional<std::string> devices;  ///< Comma-separated backend device names, unset for automatic selection.
-
-    [[=cli::help{"S", "comma-separated share per device, e.g. 3,1 (default: by free memory)"}]]
-    std::optional<std::string> tensor_split;  ///< Comma-separated non-negative device shares, unset for free-memory weighting.
-
-    [[=cli::help{"list the devices this build can offload to, and exit"}]]
-    bool list_devices = false;  ///< Print available backend devices and exit without loading a model.
+    int32_t                    ctx     = 4096;  ///< Context length in tokens.
+    int32_t                    ngl     = 99;    ///< Model layers to offload; zero disables offload.
+    int32_t                    threads = 0;     ///< Thread count; zero selects the engine default.
+    std::optional<std::string> devices;         ///< Comma-separated device names, unset for the default.
+    std::optional<std::string> tensor_split;    ///< Comma-separated device shares, unset for free-memory weighting.
+    bool                       list_devices = false;  ///< Print the devices and exit without loading a model.
 };
+
+/// Reads the current argument into `flags` if it is one of theirs; false if it is not.
+inline bool parse_engine_flag(cli::Args & args, EngineFlags & flags) {
+    if (args.is("--ctx")) {
+        flags.ctx = args.number<int32_t>();
+    } else if (args.is("--ngl")) {
+        flags.ngl = args.number<int32_t>();
+    } else if (args.is("--threads")) {
+        flags.threads = args.number<int32_t>();
+    } else if (args.is("--devices")) {
+        flags.devices = args.value();
+    } else if (args.is("--tensor-split")) {
+        flags.tensor_split = args.value();
+    } else if (args.is("--list-devices")) {
+        flags.list_devices = true;
+    } else {
+        return false;
+    }
+    return true;
+}
 
 namespace detail {
 
-/// Splits "a,b,c" on commas, or nothing at all when an element is empty, so "a,,b" and "" are
+/// Splits "a,b,c" on commas, or returns nothing when an element is empty, so "a,,b" and "" are
 /// rejected rather than turned into a list with a hole in it.
 inline std::optional<std::vector<std::string>> split_list(const std::string & text) {
     std::vector<std::string> parts;
@@ -65,11 +81,6 @@ inline std::optional<std::vector<std::string>> split_list(const std::string & te
         start = comma + 1;
     }
 }
-
-/// The same message whichever part of the value is wrong: the shape of the whole is what the
-/// reader needs to see.
-constexpr const char * tensor_split_error =
-    "--tensor-split needs a comma-separated list of non-negative numbers, e.g. 3,1";
 
 }  // namespace detail
 
@@ -92,23 +103,29 @@ inline EngineConfig to_config(const EngineFlags & flags) {
     if (flags.devices) {
         const std::optional<std::vector<std::string>> names = detail::split_list(*flags.devices);
         if (!names) {
-            throw cli::FlagError("--devices needs a comma-separated list of device names"
-                                 " (see --list-devices)");
+            throw cli::FlagError("--devices needs a comma-separated list of device names (see --list-devices)");
         }
         config.devices = *names;
     }
 
     if (flags.tensor_split) {
+        // The same message whichever part of the value is wrong: the shape of the whole is what
+        // the reader needs to see.
+        const char * const error = "--tensor-split needs a comma-separated list of non-negative numbers, e.g. 3,1";
+
         const std::optional<std::vector<std::string>> parts = detail::split_list(*flags.tensor_split);
         if (!parts) {
-            throw cli::FlagError(detail::tensor_split_error);
+            throw cli::FlagError(error);
         }
         for (const std::string & part : *parts) {
-            const char * end   = part.data() + part.size();
-            float        value = 0;
-            const std::from_chars_result parsed = std::from_chars(part.data(), end, value);
-            if (parsed.ec != std::errc{} || parsed.ptr != end || !(value >= 0.0f)) {
-                throw cli::FlagError(detail::tensor_split_error);
+            float value = 0;
+            try {
+                value = cli::parse_number<float>("--tensor-split", part);
+            } catch (const cli::FlagError &) {
+                throw cli::FlagError(error);
+            }
+            if (!(value >= 0.0f)) {
+                throw cli::FlagError(error);
             }
             config.tensor_split.push_back(value);
         }
