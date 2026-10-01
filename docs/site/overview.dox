@@ -1,0 +1,96 @@
+/**
+@mainpage Overview
+
+<div class="hero">
+<span class="hero-title">llamad</span>
+<span class="hero-tagline">One llama.cpp model, loaded once and served to every local application over gRPC on a
+Unix domain socket. Generate stubs from one proto file, in any language, and get streaming chat, tool
+calling, schema-constrained replies and embeddings.</span>
+<span class="hero-links">@ref wire_protocol "Wire protocol" @ref md_docs_2protocol "Integration guide"
+@ref architecture "Architecture"</span>
+</div>
+
+@section overview_quickstart Quick start
+
+Start the daemon with any GGUF model, then call it. The daemon answers gRPC reflection, so grpcurl
+needs no copy of the proto:
+
+```sh
+./build-cpu/llamad --model /absolute/path/to/model.gguf
+# [llamad] listening on unix:/run/user/1000/llamad.sock
+
+grpcurl -plaintext -d '{"messages": [{"role": "user", "content": "Name three primes."}]}' \
+    unix:///run/user/1000/llamad.sock llamad.v1.Llama/Chat
+```
+
+From an application, through stubs generated from `llamad.proto`:
+
+```py
+import grpc
+from llamad.v1 import llamad_pb2 as pb, llamad_pb2_grpc as rpc   # generated from llamad.proto
+
+stub = rpc.LlamaStub(grpc.insecure_channel("unix:/run/user/1000/llamad.sock"))
+for chunk in stub.Chat(pb.ChatRequest(messages=[pb.ChatMessage(role="user", content="Hi")])):
+    if chunk.WhichOneof("chunk") == "text":
+        print(chunk.text, end="")
+```
+
+<a href="https://github.com/crybo-rybo/llamad/blob/main/docs/building.md">Building</a> covers
+dependencies and GPU builds, and
+<a href="https://github.com/crybo-rybo/llamad/blob/main/docs/daemon.md">running the daemon</a> covers
+its flags, socket and signals.
+
+@section overview_rpcs The service
+
+| RPC | Request | Response | What it does |
+|---|---|---|---|
+| @ref wire_rpc_GetModelInfo "GetModelInfo" | @ref wire_GetModelInfoRequest "GetModelInfoRequest" | @ref wire_ModelInfo "ModelInfo" | Model metadata, without running it |
+| @ref wire_rpc_Tokenize "Tokenize" | @ref wire_TokenizeRequest "TokenizeRequest" | @ref wire_TokenizeResponse "TokenizeResponse" | Text to token IDs |
+| @ref wire_rpc_Generate "Generate" | @ref wire_GenerateRequest "GenerateRequest" | @ref wire_GenerateChunk "GenerateChunk" <span class="badge badge-stream">stream</span> | Completes a raw prompt |
+| @ref wire_rpc_Chat "Chat" | @ref wire_ChatRequest "ChatRequest" | @ref wire_GenerateChunk "GenerateChunk" <span class="badge badge-stream">stream</span> | Chat through the model's template, with tools or a response schema |
+| @ref wire_rpc_Embed "Embed" | @ref wire_EmbedRequest "EmbedRequest" | @ref wire_EmbedResponse "EmbedResponse" | One L2-normalised vector per input |
+
+@section overview_contract The contract
+
+<div class="cards">
+<div class="card"><span class="card-title">A strict stream shape</span>
+Zero or more `text` chunks, then exactly one `finish`, as a protobuf `oneof`. Text is user-visible
+output only: never tool-call markup, never part of a stop string, never partial UTF-8.
+</div>
+<div class="card"><span class="card-title">Whole tool calls</span>
+Calls arrive complete on `finish`, with JSON arguments constrained to the tool's schema, and only
+when the finish reason is `TOOL_CALLS`.
+</div>
+<div class="card"><span class="card-title">Stateless requests</span>
+Each request carries its whole conversation and its tools. The daemon never runs a tool and keeps
+no sessions; the KV cache only makes a resent prefix cheaper.
+</div>
+<div class="card"><span class="card-title">Local only</span>
+A Unix socket created 0600 and no TCP listener. Access control is the socket's file permissions.
+</div>
+</div>
+
+@ref wire_guarantees "The guarantees in full" are written at the top of the proto.
+
+@section overview_cpp The C++ API
+
+Applications never link against these: the proto is the whole integration surface. The reference
+is for working on the daemon itself.
+
+<div class="cards">
+<div class="card"><span class="card-title">@ref llamad::Engine "Engine"</span>
+Loads the model and runs it over the public libllama API: tokenizing, sampling, streaming
+generation and embeddings.
+</div>
+<div class="card"><span class="card-title">@ref llamad::ChatFormat "ChatFormat"</span>
+Renders conversations and tools through the model's own Jinja template and parses tool calls out of
+the generated text.
+</div>
+<div class="card"><span class="card-title">@ref llamad::LlamaService "LlamaService"</span>
+The gRPC service: maps each RPC onto the engine and chat layer, and errors onto status codes.
+</div>
+<div class="card"><span class="card-title">@ref wire.h "llamad::wire"</span>
+Field-by-field conversion between wire messages and plain engine types, and the `finish` chunk.
+</div>
+</div>
+*/

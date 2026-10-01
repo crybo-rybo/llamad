@@ -84,12 +84,17 @@ over unified memory. The daemon prints one line per offload device at startup.
 ./build-gpu/llamad --model M --tensor-split 3,1      # 3:1 share, in device order
 ```
 
-## API reference
+## Documentation site
 
-Only CMake and Doxygen (1.17 or later) are needed to generate HTML; no compiler, submodule
-checkout, Graphviz, model or gRPC installation is required:
+The site (an overview, the wire protocol reference, the integration guide, the architecture
+notes and the C++ reference) needs only CMake, Doxygen 1.17 or later and Python 3; no compiler,
+submodule checkout, Graphviz, model or gRPC installation is required:
 
 ```sh
-pacman -S cmake doxygen
+pacman -S cmake doxygen python
 ./scripts/docs.sh                       # open build-docs/html/index.html
 ```
+
+`docs/proto_reference.py` generates the wire protocol page from `llamad.proto` on every build,
+and stops the build on any proto construct it does not know how to document. The theme, layout,
+overview page and diagrams live in `docs/site/`.

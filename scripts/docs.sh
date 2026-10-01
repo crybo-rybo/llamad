@@ -3,7 +3,7 @@ set -euo pipefail
 
 if [[ ${1:-} == --help ]]; then
     echo "Usage: $0 [CMake configure arguments...]"
-    echo "Builds Doxygen HTML in build-docs/html; needs CMake and Doxygen only."
+    echo "Builds the documentation site in build-docs/html; needs CMake, Doxygen and Python 3 only."
     exit 0
 fi
 

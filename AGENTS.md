@@ -31,6 +31,7 @@ make a meaningful improvement to the project; explain the benefit and the impact
 | `src/engine_flags.h` | The context and offload flags `llamad`, `engine_smoke` and `engine_bench` share, the `EngineConfig` they describe, their `--help` lines, and `print_device_table` for `--list-devices`. |
 | `tests/` | Plain-executable tests registered with CTest, needing no model file and sharing the `CHECK` macros in `check.h`. Two CLIs that need a model drive the engine and chat layer in-process, with no daemon and no gRPC: `engine_smoke.cpp` for behaviour, and `engine_bench.cpp` for prefill and decode speed (`scripts/bench.sh`, docs/performance.md). |
 | `third_party/llama.cpp` | Pinned, unmodified submodule. |
+| `docs/site/`, `docs/proto_reference.py` | The GitHub Pages site, built by Doxygen with `./scripts/docs.sh`: theme, layout, overview and architecture pages, and inline SVG diagrams whose links name generated pages. The wire protocol page is generated from the proto by `proto_reference.py` (Python 3, standard library), which stops the build on any construct it cannot document. |
 | `models/` | Local GGUF files. Gitignored; not available in CI. |
 
 ## Build, test, run

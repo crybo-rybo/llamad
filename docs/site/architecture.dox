@@ -1,0 +1,26 @@
+/**
+@page architecture Architecture
+
+@tableofcontents
+
+@section architecture_layers Layers
+
+A request enters through the generated gRPC service and is translated, rendered and run by layers
+that each know as little as possible about the others. Only the service, @ref wire.h "llamad::wire" and the
+daemon's `main.cpp` see gRPC and protobuf. Only llamad::ChatFormat touches llama.cpp's unstable
+`common` library, and llamad::Engine uses nothing but the public `llama.h` API, so a llama.cpp
+upgrade can break at most one file and both layers are tested without a daemon.
+
+@htmlinclude[block] docs/site/layers.html
+
+@include{doc} docs/design.md
+
+@section architecture_tests Tests
+
+CTest runs plain executables that need no model: `chat_format_test.cpp` renders real templates
+and parses canned model output, `engine_test.cpp` checks the prompt-cache bookkeeping,
+`flags_test.cpp` the command-line reader, and `wire_test.cpp` the conversion in both directions,
+failing when a field added to the proto is not carried by @ref wire.h "llamad::wire". `engine_smoke.cpp` and
+`engine_bench.cpp` drive the engine and chat layer in-process against a local GGUF model, for
+behaviour and for speed.
+*/
