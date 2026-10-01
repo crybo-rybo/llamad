@@ -15,7 +15,8 @@ It is deliberately small: a few thousand lines across a dozen or so files, no fr
 dependencies. That smallness is a feature. Every change should leave it as easy to read as it was.
 
 The project is pre-release. Nothing has compatibility obligations yet, and the source is the
-single source of truth for how things work.
+single source of truth for how things work. Deliberate breaking changes are welcome when they
+make a meaningful improvement to the project; explain the benefit and the impact on callers.
 
 ## Layout
 
@@ -50,10 +51,13 @@ has the details.
 `build*/` directories are gitignored. When you start a daemon for testing, give it a private
 `--socket` path and stop it when you are done.
 
-## Boundaries that must hold
+## Design principles
 
-These are the load-bearing design decisions. A change that breaks one of them needs the user's
-agreement first, not a clever workaround.
+These principles describe the current architecture and why it works. Use them as a starting
+point, and evolve them when a better design materially improves correctness, usability, clarity
+or maintainability. Explain the tradeoffs and keep the implementation, tests and documentation
+consistent. Work within the user's intended scope and use approval already given in the task;
+ask when a proposed change would expand that scope.
 
 1. **Layering.** `engine.{h,cpp}` use only the public `llama.h` / `ggml-backend.h` C API and
    contain no gRPC or protobuf types. `chat_format.cpp` is the only file that touches llama.cpp's
@@ -61,13 +65,15 @@ agreement first, not a clever workaround.
    types. All gRPC and protobuf knowledge lives in `service.*`, `wire.*` and `main.cpp`.
    `flags.h` includes only the standard library. The point: a submodule bump can break at most
    one file, and the engine and chat layer can be tested without a daemon.
-2. **llama.cpp is never patched.** It is a pinned submodule. If something is missing, solve it on
-   this side of the boundary or raise it.
+2. **Keep dependency changes maintainable.** llama.cpp is an unmodified, pinned submodule.
+   Prefer changes in llamad or fixes upstream so dependency upgrades stay straightforward.
 3. **The two contracts change deliberately.** `llamad.proto` and `engine.h` are the seams the
-   rest is built against, and the proto is the one applications see. Proto changes are additive:
-   never renumber or repurpose a field. When the proto changes, update `wire.cpp`, the guarantees
-   at the top of the proto and docs/protocol.md in the same change. `tests/wire_test.cpp` names
-   any field of a converted message that `wire.cpp` does not carry.
+   rest is built against, and the proto is the one applications see. During pre-release, these
+   contracts may change incompatibly when the result is meaningfully better. Weigh the benefit
+   against the work callers need to update, and describe both in the PR. Keep definitions,
+   conversions, tests, documentation and examples in sync. When the proto changes, update
+   `wire.cpp`, the guarantees at the top of the proto and docs/protocol.md in the same change.
+   `tests/wire_test.cpp` names any field of a converted message that `wire.cpp` does not carry.
 4. **No client library.** The proto is the integration surface, in every language. What only an
    application can know (which tools exist and what they do, the tool-call loop, what a reply
    means as a type) stays out of this repository.
@@ -89,9 +95,16 @@ agreement first, not a clever workaround.
 
 ## How to make changes
 
-**Solve the problem that was asked, at the size it actually is.** Before writing code, state the
-change to yourself in one or two sentences. If the diff you are producing is much larger than that
-sentence suggests, stop and reconsider — you have probably started solving a different problem.
+**Aim for an excellent result.** Strive for correctness, a useful and coherent interface, clear
+code and a design that is easy to maintain. Evaluate whether the current infrastructure serves
+the problem well. Simplify, replace or remove it when doing so makes the project materially better.
+Carry justified improvements through to a complete result, and support claims with appropriate
+tests or measurements.
+
+**Keep scope purposeful.** Before writing code, state the intended outcome in one or two
+sentences. Choose the smallest coherent change that fully achieves it. A substantial refactor
+is appropriate when it resolves a root cause or produces a clear improvement. If the diff grows,
+check that each part contributes to that outcome and explain why the scope is necessary.
 
 **Prefer the boring solution.** A function over a class. A class over a hierarchy. A few clear
 lines repeated twice over an abstraction with one and a half users. A `std::vector` and a loop
@@ -108,10 +121,11 @@ handling; hypothetical ones deserve, at most, one line in your report. If you no
 problem while working, mention it — do not fix it in the same change. If you have spent more
 effort on a side issue than on the task itself, step back.
 
-**Reuse before adding.** Read the surrounding code first. This codebase already has a streaming
-holdback filter, RAII wrappers for llama.cpp handles, proto conversion in `wire.cpp`, a flag
-reader and error types. Extend what exists before introducing a parallel
-mechanism.
+**Understand before changing.** Read the surrounding code first. This codebase already has a
+streaming holdback filter, RAII wrappers for llama.cpp handles, proto conversion in `wire.cpp`,
+a flag reader and error types. Reuse mechanisms that fit the task well. Replace or simplify them
+when a different design makes the project meaningfully better, and remove superseded code so
+the result stays coherent.
 
 **No new dependencies without asking.** The dependency list is llama.cpp, gRPC and Protobuf
 (nlohmann/json comes with llama.cpp's `common`, for the chat layer). Tests are plain executables
@@ -168,7 +182,7 @@ Match the effort to the risk, and report what you actually ran.
   (`--stop`, `--cancel-after`, `--grammar-file`, `--chat --demo-tool`); a running daemon covers
   the full stack, through grpcurl or stubs generated from the proto in any language (a tool
   round, a `response_json_schema` reply, a cancelled stream). Use `--temp 0` for repeatable output; only a cold KV cache repeats exactly
-  (boundary 5), so compare first requests to freshly started processes. The prompt-cache
+  (design principle 5), so compare first requests to freshly started processes. The prompt-cache
   bookkeeping that needs no model is checked in `tests/engine_test.cpp`. The preferred local
   smoke-test model is `models/qwen2.5-0.5b-instruct-q4_k_m.gguf`, unless the behaviour needs a
   stronger one. Pass its path explicitly to `./scripts/smoke-test.sh cpu` or

@@ -22,7 +22,8 @@
 //   for something the loaded model cannot do (Chat without a usable template, Embed on a
 //   generative model, Generate or Chat on an embedding model), INTERNAL for anything else.
 //
-// The contract evolves additively: fields are added, never renumbered or repurposed.
+// During pre-release, meaningful improvements may include incompatible contract changes.
+// Breaking changes require callers to update their generated stubs and request/response handling.
 
 syntax = "proto3";
 
