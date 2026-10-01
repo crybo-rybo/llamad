@@ -14,19 +14,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-test:
-    name: Linux CPU build and tests
+  linux:
+    name: Linux ${{ matrix.compiler }}
     runs-on: ubuntu-24.04
     # Match the dependencies documented in README.md, including Protobuf's CMake config.
     container: archlinux:base-devel
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: GCC
+            packages: gcc
+            cc: gcc
+            cxx: g++
+          - compiler: Clang
+            packages: clang
+            cc: clang
+            cxx: clang++
     defaults:
       run:
         shell: bash
     steps:
       # Git must be available before checkout to fetch the llama.cpp submodule.
       - name: Install dependencies
-        run: pacman -Syu --noconfirm --needed git cmake ninja grpc protobuf
+        run: pacman -Syu --noconfirm --needed git cmake ninja grpc protobuf ${{ matrix.packages }}
 
       - name: Check out source and submodules
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -37,56 +49,44 @@ jobs:
       - name: Configure
         run: >-
           cmake -S . -B build -G Ninja
+          -DCMAKE_C_COMPILER=${{ matrix.cc }}
+          -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
           -DCMAKE_BUILD_TYPE=Release
+          -DLLAMAD_WARNINGS_AS_ERRORS=ON
           -DGGML_NATIVE=OFF
           -DGGML_VULKAN=OFF
           -DGGML_CUDA=OFF
 
-      # Build every test; explicit daemon/client targets also catch missing gRPC/Protobuf
-      # dependencies instead of accepting CMake's engine-only fallback.
-      - name: Build daemon, client, and tests
-        run: >-
-          cmake --build build --parallel 2
-          --target all llamad llamad-chat
+      - name: Build
+        run: cmake --build build --parallel 4
 
       - name: Run tests
         run: ctest --test-dir build --output-on-failure --no-tests=error
 
-  client-consumer:
-    name: Client from another CMake project
-    runs-on: ubuntu-24.04
-    container: archlinux:base-devel
-    timeout-minutes: 30
-    defaults:
-      run:
-        shell: bash
+  macos:
+    name: macOS Apple Clang
+    runs-on: macos-15
+    timeout-minutes: 45
     steps:
-      # nlohmann-json stands in for the copy an application brings: without llama.cpp there is no
-      # vendored one.
       - name: Install dependencies
-        run: pacman -Syu --noconfirm --needed git cmake ninja grpc protobuf nlohmann-json
+        run: brew install grpc protobuf ninja
 
-      - name: Check out source
+      - name: Check out source and submodules
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          submodules: recursive
           persist-credentials: false
 
-      # tests/consumer fetches llamad the way an application does, with no submodules; here it
-      # fetches this checkout's commit. The container runs as root over a workspace it does not
-      # own, which git refuses to clone from unless told the directory is safe.
-      - name: Configure consumer
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          cmake -S tests/consumer -B build-consumer -G Ninja \
-            -DLLAMAD_GIT_REPOSITORY="$GITHUB_WORKSPACE" \
-            -DLLAMAD_GIT_TAG="$(git rev-parse HEAD)"
+      # The platform's own compiler and Homebrew's gRPC, as docs/building.md describes. Metal is
+      # compiled but not run: the runner has no GPU worth testing on.
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DLLAMAD_WARNINGS_AS_ERRORS=ON
 
-      - name: Build consumer
-        run: cmake --build build-consumer --parallel 2
+      - name: Build
+        run: cmake --build build --parallel 3
 
-      # Only the consumer's own test: llamad registers none in a project that includes it.
-      - name: Run consumer test
-        run: |
-          ctest --test-dir build-consumer -N | tee ctest-list.txt
-          grep -q "Total Tests: 1$" ctest-list.txt
-          ctest --test-dir build-consumer --output-on-failure --no-tests=error
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure --no-tests=error

@@ -1,24 +1,33 @@
 # llamad
 
-A small daemon that loads one llama.cpp model once and serves it to local C++
-applications over gRPC on a Unix domain socket. Applications link a tiny client
-library and get streaming completions, chat and tool calling, or embedding vectors
-from an embedding model, without embedding llama.cpp, and without paying the model
-load time in every process.
+A small daemon that loads one llama.cpp model once and serves it to local applications over gRPC
+on a Unix domain socket. The integration surface is one file,
+[`proto/llamad/v1/llamad.proto`](proto/llamad/v1/llamad.proto): generate stubs for any language
+and get streaming completions, chat with tool calling, schema-constrained replies, or embedding
+vectors, without embedding llama.cpp and without paying the model load time in every process.
 
-- Local only: a Unix socket created 0600, no TCP listener.
-- Stateless: clients resend history; tools travel with each request and are never executed by the daemon.
-  The KV cache keeps the prefix a resent history shares with the previous request, so a turn decodes only its new tokens.
-- llama.cpp is an unmodified, pinned submodule. CPU, Vulkan (Linux) and Metal (macOS) backends.
+What the contract promises, in every language:
+
+- **A strict stream shape.** Text chunks, then exactly one `finish` chunk, as a protobuf `oneof`.
+  Text is user-visible output only: never tool-call markup, never part of a stop string, never
+  partial UTF-8.
+- **Whole tool calls.** Calls arrive complete on `finish`, with JSON arguments constrained to the
+  tool's schema, and only when the finish reason says so.
+- **Stateless requests.** Each request carries its whole conversation and its tools; the daemon
+  never runs a tool and keeps no sessions. The KV cache keeps the prefix a resent conversation
+  shares with the previous request, so a turn decodes only its new tokens.
+- **Local only.** A Unix socket created 0600 and no TCP listener.
+
+llama.cpp is an unmodified, pinned submodule, with CPU, Vulkan (Linux) and Metal (macOS) backends.
 
 ## Requirements
 
-C++26 with static reflection, so GCC 16 or later; Clang does not implement reflection.
-Linux and macOS on Apple silicon are the supported platforms.
+A C++23 compiler (GCC 13, Clang 18, Apple Clang 16, or later), CMake 3.25, Ninja, gRPC and
+Protobuf. Linux and macOS on Apple silicon are the supported platforms.
 
 ```sh
-pacman -S gcc grpc protobuf cmake ninja        # Arch Linux
-brew install gcc cmake ninja openssl@3         # macOS; gRPC is built from source, see below
+pacman -S gcc grpc protobuf cmake ninja     # Arch Linux
+brew install grpc protobuf cmake ninja      # macOS, with Xcode's command line tools
 ```
 
 ## Build
@@ -26,13 +35,12 @@ brew install gcc cmake ninja openssl@3         # macOS; gRPC is built from sourc
 ```sh
 git clone --recurse-submodules git@github.com:crybo-rybo/llamad.git
 cd llamad
-./scripts/build-deps-macos.sh               # macOS only, once: builds gRPC into build-deps/
 ./scripts/build.sh cpu                      # builds into build-cpu/; `gpu` for Vulkan or Metal
 ./scripts/test.sh cpu                       # no model needed
 ```
 
-[docs/building.md](docs/building.md) covers the compiler and dependency choices, GPU
-builds, multi-GPU selection and the smoke test that needs a model.
+[docs/building.md](docs/building.md) covers GPU builds, multi-GPU selection and the smoke test
+that needs a model.
 
 ## Run
 
@@ -40,73 +48,41 @@ builds, multi-GPU selection and the smoke test that needs a model.
 ./build-cpu/llamad --model /absolute/path/to/model.gguf
 # [llamad] listening on unix:/run/user/1000/llamad.sock
 
-./build-cpu/client/llamad-chat                          # interactive REPL
-./build-cpu/client/llamad-chat --once "Hello" --temp 0
-./build-cpu/client/llamad-chat --demo-tools             # tool calling, end to end
-./build-cpu/client/llamad-chat --demo-json              # a reply parsed into a struct
+grpcurl -plaintext -d '{"messages": [{"role": "user", "content": "Name three primes."}]}' \
+    unix:///run/user/1000/llamad.sock llamad.v1.Llama/Chat
 ```
 
 An embedding model (one whose GGUF declares a pooling type, such as bge-small-en-v1.5 or
-Qwen3-Embedding) is served the same way and answers `Embed` instead of `Generate` and `Chat`:
-
-```sh
-./build-cpu/llamad --model /absolute/path/to/bge-small-en-v1.5-q8_0.gguf --socket /tmp/embed.sock
-./build-cpu/client/llamad-chat --socket /tmp/embed.sock --embed "a cat" --embed "a kitten"
-```
+Qwen3-Embedding) is served the same way and answers `Embed` instead of `Generate` and `Chat`.
 
 The project ships no model. Any GGUF works; the daemon takes `--socket`, `--ctx`, `--ngl`,
 `--threads`, `--devices` and `--tensor-split`, described in [docs/daemon.md](docs/daemon.md).
 
-## Use it from your own project
+## Use it from your application
 
-```cmake
-include(FetchContent)
-FetchContent_Declare(llamad
-    GIT_REPOSITORY https://github.com/crybo-rybo/llamad.git
-    GIT_TAG        main                    # better, a commit
-    GIT_SUBMODULES "")                     # the client needs nothing from llama.cpp
-FetchContent_MakeAvailable(llamad)
+```python
+import grpc
+from llamad.v1 import llamad_pb2 as pb, llamad_pb2_grpc as rpc   # generated from llamad.proto
 
-target_link_libraries(myapp PRIVATE llamad::client)
+stub = rpc.LlamaStub(grpc.insecure_channel("unix:/run/user/1000/llamad.sock"))
+for chunk in stub.Chat(pb.ChatRequest(messages=[pb.ChatMessage(role="user", content="Hi")])):
+    if chunk.WhichOneof("chunk") == "text":
+        print(chunk.text, end="")
 ```
 
-Included by another project, llamad builds only the client and its protocol code
-(`llamad::proto`): no llama.cpp, no daemon, no tests. It needs gRPC, Protobuf and nlohmann/json
-from your build or your system; [docs/client.md](docs/client.md#linking) has the details.
-
-```cpp
-#include <llamad/client.h>
-
-llamad::client::Client client;                 // default socket path
-llamad::client::SamplingParams params;
-params.temperature = 0.0f;
-
-auto result = client.chat({{"user", "Name three primes."}}, params,
-                          [](const std::string & text) {
-                              std::fputs(text.c_str(), stdout);
-                              return true;      // false cancels the request
-                          });
-```
-
-`llamad/client.h` exposes no gRPC or protobuf types. Tools are plain C++ functions
-registered with `ToolSet::add`, free or bound to an object, with or without parameters; the
-client runs the execute-and-resend loop.
-`chat<T>` returns the reply as an instance of a reflected struct, constrained by its schema.
-`embed` returns one unit-length vector per input from a daemon serving an embedding model.
-Every call takes a trailing `CallOptions`: a `std::stop_token` that cancels it from another
-thread, and a timeout.
-[docs/client.md](docs/client.md) has the full walkthrough.
+[docs/protocol.md](docs/protocol.md) covers generating stubs, streams, the tool-calling loop,
+typed replies, embeddings and errors.
 
 ## Documentation
 
 | Page | Contents |
 |---|---|
+| [docs/protocol.md](docs/protocol.md) | Integrating: stubs, streams, tool calling, typed replies, embeddings, errors |
 | [docs/building.md](docs/building.md) | Dependencies, platform notes, GPU builds, tests, smoke test |
-| [docs/daemon.md](docs/daemon.md) | Daemon flags, socket, signals, `llamad-chat` and `engine_smoke` |
-| [docs/client.md](docs/client.md) | Client library, tool calling, typed replies, embeddings, JSON conversions |
+| [docs/daemon.md](docs/daemon.md) | Daemon flags, socket, signals, and `engine_smoke` |
 | [docs/design.md](docs/design.md) | Design notes: layering, stream shape, chat templates |
 | [docs/performance.md](docs/performance.md) | Measuring prefill and decode speed, and reference numbers |
-| `./scripts/docs.sh` | Doxygen API reference in `build-docs/html/` (needs CMake and Doxygen 1.17) |
+| `./scripts/docs.sh` | Doxygen reference for the daemon's sources in `build-docs/html/` |
 | `AGENTS.md` | Layout and rules for changing the code |
 
 ## License

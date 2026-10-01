@@ -1,5 +1,13 @@
 # Design notes
 
+- **The proto is the interface.** `proto/llamad/v1/llamad.proto` is what an application
+  integrates against, in whatever language it is written in, and the guarantees below are
+  written into it. There is no client library: everything that knows what a tool does or what
+  a reply means, such as running tools, looping over tool rounds or mapping a reply onto a type,
+  belongs to the application.
+- **One compiler, no special toolchain.** The daemon is C++23 built by the platform's own
+  compiler, so on macOS it links against Homebrew's gRPC and llama.cpp gets its usual Apple
+  settings (Accelerate, native CPU features, Metal).
 - **No TCP listener.** gRPC here is HTTP/2 over a Unix domain socket. There is
   no port to firewall; access control is the socket's file permissions (0600).
 - **llama.cpp is an unmodified pinned submodule**, not a fork. `src/engine.cpp`
@@ -23,11 +31,11 @@
   freshly started daemon gives. `cached_prompt_tokens` in the stats says how much was reused.
 - **v1 serves one generation at a time.** The engine serializes `generate`, so
   concurrent clients queue rather than sharing the context.
-- **Stream shape.** Zero or more text chunks, then exactly one final chunk carrying
-  `finish_reason` and `stats`. Tool calls arrive whole on that final chunk, and `tool_calls`
-  is non-empty if and only if the finish reason is `TOOL_CALLS`. Text chunks carry
-  user-visible content only: never tool-call markup, never partial UTF-8, never part of a
-  matched stop string.
+- **Stream shape.** Zero or more `text` chunks, then exactly one `finish` chunk carrying the
+  finish reason and stats; `GenerateChunk` is a `oneof` of the two, so the shape is in the
+  types. Tool calls arrive whole on `finish`, and `tool_calls` is non-empty if and only if the
+  finish reason is `TOOL_CALLS`. Text chunks carry user-visible content only: never tool-call
+  markup, never partial UTF-8, never part of a matched stop string.
 - **Chat renders the model's own Jinja template**, the one stored in the GGUF,
   through llama.cpp's `common` library, the same path `llama-server` takes. So
   whatever scaffolding the model was trained on (tool blocks, role markers, its
@@ -55,5 +63,4 @@
 - **Errors are typed.** Caller mistakes map to `INVALID_ARGUMENT`, a missing capability to
   `FAILED_PRECONDITION`, everything else to `INTERNAL`.
 
-The wire contract itself is `proto/llamad/v1/llamad.proto`, and `AGENTS.md` lists the
-layering rules the code is held to.
+`AGENTS.md` lists the layering rules the code is held to.

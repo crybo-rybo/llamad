@@ -1,142 +1,68 @@
-cmake_minimum_required(VERSION 3.21)
-project(llamad LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.25)
+project(llamad LANGUAGES C CXX)
 
-# A project that pulls llamad in wants the client, not a second copy of the daemon: client-only
-# builds llamad_proto and llamad_client and nothing else, so it needs neither llama.cpp (nor the
-# submodule checked out) nor a C compiler.
-if(PROJECT_IS_TOP_LEVEL)
-    option(LLAMAD_CLIENT_ONLY "Build only llamad_proto and llamad_client, without llama.cpp" OFF)
-else()
-    option(LLAMAD_CLIENT_ONLY "Build only llamad_proto and llamad_client, without llama.cpp" ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release)
 endif()
 
+option(LLAMAD_WARNINGS_AS_ERRORS "Fail the build on a warning in llamad's own sources" OFF)
 option(LLAMAD_BUILD_DOCS "Enable the Doxygen documentation target" OFF)
 if(LLAMAD_BUILD_DOCS)
     add_subdirectory(docs)
 endif()
 
-# Only for the project being built, never for one that includes llamad.
-if(PROJECT_IS_TOP_LEVEL)
-    set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-    if(NOT CMAKE_BUILD_TYPE)
-        set(CMAKE_BUILD_TYPE Release)
-    endif()
+# llama.cpp: libllama + ggml, plus `common` (the Jinja chat templates, PEG chat parsers and
+# schema->grammar converter), which only the chat layer uses. None of its tools/server.
+# OPENSSL/SUBPROCESS off: common's vendored cpp-httplib is for model downloads only, and turning
+# them off keeps llamad free of an OpenSSL dependency and of process spawning. llama.cpp sets the
+# language standard of its own targets.
+set(LLAMA_BUILD_COMMON   ON  CACHE BOOL "" FORCE)
+set(LLAMA_OPENSSL        OFF CACHE BOOL "" FORCE)
+set(LLAMA_SUBPROCESS     OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_TOOLS    OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/llama.cpp EXCLUDE_FROM_ALL)
+# Their headers are someone else's code: llamad's warning flags do not apply to them.
+set_target_properties(llama ggml llama-common nlohmann PROPERTIES SYSTEM ON)
+
+# Protobuf through its CMake config where it ships one (Arch, Homebrew), else CMake's module
+# (Debian and Ubuntu).
+find_package(Protobuf CONFIG QUIET)
+if(NOT Protobuf_FOUND)
+    find_package(Protobuf REQUIRED)
 endif()
+find_package(gRPC CONFIG REQUIRED)
 
-if(NOT LLAMAD_CLIENT_ONLY)
-    enable_language(C)
+# What every llamad target compiles with.
+add_library(llamad_options INTERFACE)
+target_compile_features(llamad_options INTERFACE cxx_std_23)
+target_compile_options(llamad_options INTERFACE
+    -Wall -Wextra -Wpedantic
+    $<$<BOOL:${LLAMAD_WARNINGS_AS_ERRORS}>:-Werror>)
 
-    # llama.cpp builds at the standard it is written for. The project's own targets are declared
-    # after it and use C++26 (see below).
-    set(CMAKE_CXX_STANDARD 17)
-    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# The wire contract, generated: target llamad_proto.
+add_subdirectory(proto)
 
-    # llama.cpp: libllama + ggml, plus `common` (the Jinja chat templates, PEG chat parsers and
-    # schema->grammar converter), which only the chat layer below uses. None of its tools/server.
-    # OPENSSL/SUBPROCESS off: common's vendored cpp-httplib is for model downloads only, and
-    # turning them off is what keeps llamad free of an OpenSSL dependency and of process spawning.
-    set(LLAMA_BUILD_COMMON   ON  CACHE BOOL "" FORCE)
-    set(LLAMA_OPENSSL        OFF CACHE BOOL "" FORCE)
-    set(LLAMA_SUBPROCESS     OFF CACHE BOOL "" FORCE)
-    set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
-    set(LLAMA_BUILD_TOOLS    OFF CACHE BOOL "" FORCE)
-    set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
-    add_subdirectory(third_party/llama.cpp EXCLUDE_FROM_ALL)
+# Engine: libllama wrapper, no gRPC or protobuf.
+add_library(llamad_engine STATIC src/engine.cpp)
+target_include_directories(llamad_engine PUBLIC src)
+target_link_libraries(llamad_engine PUBLIC llama PRIVATE llamad_options)
 
-    # On macOS, build.sh points ggml's BLAS backend at vecLib's cblas.h, whose classic interface
-    # Apple marks deprecated in favour of one GCC cannot compile. The warning is about
-    # llama.cpp's source, not this project's.
-    if(TARGET ggml-blas)
-        target_compile_options(ggml-blas PRIVATE -Wno-deprecated-declarations)
-    endif()
-endif()
+# Chat layer: the only place llama.cpp's unstable `common` chat API is used. llama-common is
+# PRIVATE so none of its headers (nlohmann/json among them) leak to users of chat_format.h; CMake
+# still propagates the archive itself because llamad_chat is static.
+add_library(llamad_chat STATIC src/chat_format.cpp)
+target_link_libraries(llamad_chat PUBLIC llamad_engine PRIVATE llama-common llamad_options)
 
-# llamad is written in C++26 and relies on static reflection (<meta>), which GCC enables with
-# -freflection. Checked here so an unsupported compiler fails at configure time with a reason.
-set(CMAKE_CXX_STANDARD 26)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-include(CheckCXXSourceCompiles)
-set(CMAKE_REQUIRED_FLAGS "-std=c++26 -freflection")
-check_cxx_source_compiles("
-    #include <meta>
-    struct S { int a; };
-    static_assert(std::meta::nonstatic_data_members_of(^^S, std::meta::access_context::current()).size() == 1);
-    int main() {}" LLAMAD_HAVE_REFLECTION)
-unset(CMAKE_REQUIRED_FLAGS)
-if(NOT LLAMAD_HAVE_REFLECTION)
-    message(FATAL_ERROR "llamad needs a compiler with C++26 static reflection (GCC 16 or later): "
-                        "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} does not provide it.")
-endif()
-add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-freflection>)
+# The gRPC service and the conversion between wire messages and engine types.
+add_library(llamad_service STATIC src/service.cpp src/wire.cpp)
+target_link_libraries(llamad_service PUBLIC llamad_engine llamad_chat llamad_proto PRIVATE llamad_options)
 
-if(NOT LLAMAD_CLIENT_ONLY)
-    # Command-line flags, from a struct whose members are the flags. Header-only and standard
-    # library only; its one include directory is src/cli, so llamad-chat parses its flags without
-    # any daemon header becoming reachable from the client tree.
-    add_library(llamad_flags INTERFACE)
-    target_include_directories(llamad_flags INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src/cli)
+add_executable(llamad src/main.cpp)
+target_link_libraries(llamad PRIVATE llamad_service gRPC::grpc++_reflection llamad_options)
 
-    # Engine: libllama wrapper, no gRPC/protobuf.
-    add_library(llamad_engine STATIC src/engine.cpp)
-    target_include_directories(llamad_engine PUBLIC src)
-    target_link_libraries(llamad_engine PUBLIC llama)
-
-    # Chat layer: the only place llama.cpp's unstable `common` chat API is used. llama-common is
-    # PRIVATE so none of its headers (or nlohmann/json) leak to consumers of chat_format.h; CMake
-    # still propagates the archive itself through $<LINK_ONLY:> because llamad_chat is static.
-    # common's headers (nlohmann/json among them) are written for C++17 and are included as
-    # system headers, so what C++26 deprecates in them is not reported against this project.
-    add_library(llamad_chat STATIC src/chat_format.cpp)
-    set_target_properties(llama-common nlohmann PROPERTIES SYSTEM ON)
-    target_include_directories(llamad_chat PUBLIC src)
-    target_link_libraries(llamad_chat PRIVATE llama-common)
-endif()
-
-# Registered with a project that includes llamad, the tests would be its tests.
-if(PROJECT_IS_TOP_LEVEL)
-    enable_testing()
-endif()
-
-# Everything below needs gRPC; the engine can be built and tested without it, but the client
-# cannot.
-find_package(Protobuf CONFIG)
-find_package(gRPC CONFIG)
-if(NOT (Protobuf_FOUND AND gRPC_FOUND))
-    if(LLAMAD_CLIENT_ONLY)
-        message(FATAL_ERROR "gRPC/Protobuf not found, and the client needs them: `pacman -S grpc protobuf` "
-                            "on Arch Linux; on macOS, build them with llamad's scripts/build-deps-macos.sh "
-                            "and put its build-deps/prefix on CMAKE_PREFIX_PATH (see docs/building.md)")
-    endif()
-    message(WARNING "gRPC/Protobuf not found: building the engine only (see README.md for dependencies)")
-    add_subdirectory(tests)
-    return()
-endif()
-
-# `proto` is on the include path alongside the generated sources, so convert.h sits next to the
-# .proto it converts and both sides spell it "llamad/v1/convert.h".
-add_library(llamad_proto STATIC proto/llamad/v1/llamad.proto)
-add_library(llamad::proto ALIAS llamad_proto)
-target_link_libraries(llamad_proto PUBLIC protobuf::libprotobuf gRPC::grpc++)
-target_include_directories(llamad_proto PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/proto ${CMAKE_CURRENT_BINARY_DIR}/gen)
-file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/gen)
-protobuf_generate(TARGET llamad_proto
-    IMPORT_DIRS proto
-    PROTOC_OUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/gen)
-protobuf_generate(TARGET llamad_proto
-    LANGUAGE grpc
-    GENERATE_EXTENSIONS .grpc.pb.h .grpc.pb.cc
-    PLUGIN "protoc-gen-grpc=$<TARGET_FILE:gRPC::grpc_cpp_plugin>"
-    IMPORT_DIRS proto
-    PROTOC_OUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/gen)
-
-add_subdirectory(client)
-if(LLAMAD_CLIENT_ONLY)
-    return()
-endif()
-
-add_executable(llamad src/main.cpp src/service.cpp)
-target_link_libraries(llamad PRIVATE llamad_engine llamad_chat llamad_flags llamad_proto gRPC::grpc++_reflection)
-
-# Last: the contract test sees the proto, the engine, the chat layer and the client together.
+enable_testing()
 add_subdirectory(tests)

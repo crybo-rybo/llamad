@@ -50,48 +50,28 @@ instruction prefix a model expects (Qwen3-Embedding's `Instruct: ...\nQuery:` fo
 is the caller's to write. A client that cancels, or whose deadline passes, stops the batch before
 its next input.
 
-## Chat from the terminal
+## Talking to it from the terminal
+
+The daemon answers gRPC server reflection, so [grpcurl](https://github.com/fullstorydev/grpcurl)
+can call it with no copy of the proto. Each streamed chunk prints as one JSON object.
 
 ```sh
-./build-cpu/client/llamad-chat                       # interactive REPL
-./build-cpu/client/llamad-chat --once "Hello" --temp 0
-./build-cpu/client/llamad-chat --demo-tools          # with one built-in tool
-./build-cpu/client/llamad-chat --demo-json           # one reply parsed into a struct
+sock=unix:///run/user/1000/llamad.sock
+grpcurl -plaintext $sock llamad.v1.Llama/GetModelInfo
+grpcurl -plaintext -d '{"prompt": "The capital of France is", "sampling": {"temperature": 0, "max_tokens": 16}}' \
+    $sock llamad.v1.Llama/Generate
+grpcurl -plaintext -d '{"inputs": ["a cat", "a kitten"]}' unix:///tmp/embed.sock llamad.v1.Llama/Embed
 ```
 
-Also accepts `--socket`, `--system TEXT`, `--seed N`, `--max-tokens N`. Ctrl-C
-cancels the reply in progress; Ctrl-C or Ctrl-D at the prompt quits.
-
-`--demo-tools` offers a `get_current_time` tool and runs the execute-and-resend loop for any
-call the model makes; [client.md](client.md) explains what that involves.
-
-```sh
-./build-cpu/client/llamad-chat --demo-tools --once "What time is it in Tokyo right now?" --temp 0
-# [tool] get_current_time(Asia/Tokyo) -> 2026-09-21 08:44:44 JST
-# The current time in Tokyo is 2026-09-21 08:44:44 JST.
-# [stats] finish=eog prompt_tokens=465 cached_prompt_tokens=219 completion_tokens=52 ...
-```
-
-`--demo-json` runs one turn whose reply is constrained to a struct's JSON Schema, streams the
-JSON and prints the parsed fields. It cannot be combined with `--once` or `--demo-tools`.
-
-`--embed TEXT`, repeatable, asks a daemon serving an embedding model for the vectors of every
-TEXT in one request, prints the first few values of each and its cosine with the first, and exits.
-
-```sh
-./build-cpu/client/llamad-chat --embed "A cat sits on the mat." --embed "A kitten is resting on a rug." \
-    --embed "The central bank raised interest rates."
-# embedding 0: cosine with 0: 1.0000  values: 0.035994 -0.024416 0.018401 0.058833 ...
-# embedding 1: cosine with 0: 0.7900  values: -0.010850 0.003091 0.075260 0.107859 ...
-# embedding 2: cosine with 0: 0.3779  values: -0.031368 0.013564 -0.028393 0.028225 ...
-# [stats] inputs=3 n_embd=384 input_tokens=28
-```
+[protocol.md](protocol.md) covers what an application does with these: streams, the tool-calling
+loop, typed replies and embeddings.
 
 ## The engine without the daemon
 
 `./build-cpu/tests/engine_smoke` drives the engine in-process, with no daemon and no gRPC.
 It takes the same context and offload flags as the daemon, plus `--chat` to render the prompt
-through the model's chat template, `--demo-tool` to add the same `get_current_time` tool to
+through the model's chat template, `--demo-tool` to add a `get_current_time` tool to
 that rendering, `--grammar-file PATH` to constrain generation with a GBNF file of your own,
 `--stop` and `--cancel-after`. With an embedding model, `--embed TEXT` (repeatable, in place of
-the prompt) embeds instead and prints what `llamad-chat --embed` does. `--help` lists them all.
+the prompt) embeds instead and prints the first values of each vector and its cosine with the
+first. `--help` lists them all.

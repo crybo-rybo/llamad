@@ -30,15 +30,12 @@
 
 namespace {
 
-using llamad::cli::help;
-
-/// Options specific to this executable; shared flags are composed separately.
+/// Options specific to this executable; the context and offload flags are EngineFlags.
 struct Options {
-    [[=help{"N", "measured runs per scenario, after one warm-up run (default 5)"}]]
-    int32_t reps = 5;  ///< Measured runs per scenario.
-
-    [[=help{"NAME", "run only the scenarios whose name starts with NAME (repeatable)"}]]
-    std::vector<std::string> only;  ///< Scenario name prefixes to run; empty runs every scenario.
+    int32_t                  reps = 5;      ///< Measured runs per scenario.
+    std::vector<std::string> only;          ///< Scenario name prefixes to run; empty runs every scenario.
+    bool                     help = false;  ///< Print usage and exit.
+    std::vector<std::string> positional;    ///< The model.
 };
 
 /// Varied English, so the tokenizer sees ordinary text rather than one repeated token.
@@ -107,10 +104,33 @@ bool selected(const Options & options, const std::string & name) {
                        [&](const std::string & prefix) { return name.starts_with(prefix); });
 }
 
-/// Print usage and reflected flag descriptions to stderr.
+/// Print usage and every flag to stderr.
 void print_usage(const char * argv0) {
-    std::fprintf(stderr, "usage: %s <model.gguf> [options]\n\n", argv0);
-    llamad::cli::print_flags(stderr, Options{}, llamad::EngineFlags{}, llamad::cli::HelpFlag{});
+    std::fprintf(stderr,
+                 "usage: %s <model.gguf> [options]\n"
+                 "\n"
+                 "  --reps N            measured runs per scenario, after one warm-up run (default 5)\n"
+                 "  --only NAME         run only the scenarios whose name starts with NAME (repeatable)\n"
+                 "%s"
+                 "  --help              show this message\n",
+                 argv0, llamad::kEngineFlagsHelp);
+}
+
+/// Fill `options` and `engine_flags` from the command line. Throws cli::FlagError.
+void parse_command_line(int argc, char ** argv, Options & options, llamad::EngineFlags & engine_flags) {
+    for (llamad::cli::Args args(argc, argv); args.next();) {
+        if (!args.is_flag()) {
+            options.positional.push_back(args.current());
+        } else if (args.is("--reps")) {
+            options.reps = args.number<int32_t>();
+        } else if (args.is("--only")) {
+            options.only.push_back(args.value());
+        } else if (args.is("--help")) {
+            options.help = true;
+        } else if (!llamad::parse_engine_flag(args, engine_flags)) {
+            throw args.unknown();
+        }
+    }
 }
 
 }  // namespace
@@ -118,15 +138,13 @@ void print_usage(const char * argv0) {
 /// Run the executable.
 /// @return Zero on success, two for invalid command-line usage, or one for a runtime failure.
 int main(int argc, char ** argv) {
-    Options                  options;
-    llamad::EngineFlags      engine_flags;
-    llamad::cli::HelpFlag    help_flag;
-    llamad::EngineConfig     config;
-    std::vector<std::string> positional;
+    Options              options;
+    llamad::EngineFlags  engine_flags;
+    llamad::EngineConfig config;
 
     try {
-        positional = llamad::cli::parse_flags(argc, argv, options, engine_flags, help_flag);
-        if (help_flag.help) {
+        parse_command_line(argc, argv, options, engine_flags);
+        if (options.help) {
             print_usage(argv[0]);
             return 0;
         }
@@ -139,11 +157,11 @@ int main(int argc, char ** argv) {
         print_usage(argv[0]);
         return 2;
     }
-    if (positional.size() != 1) {
+    if (options.positional.size() != 1) {
         print_usage(argv[0]);
         return 2;
     }
-    config.model_path = positional[0];
+    config.model_path = options.positional[0];
 
     try {
         llamad::Engine engine(config);

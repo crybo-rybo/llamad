@@ -11,26 +11,13 @@
 #include <utility>
 #include <vector>
 
-#include "llamad/v1/convert.h"
+#include "wire.h"
 
 namespace llamad {
 namespace {
 
-/// Only fields the client actually set override the engine defaults from engine.h.
-SamplingParams from_proto(const v1::SamplingParams & p) {
-    SamplingParams out;  // engine defaults
-    if (p.has_temperature()) { out.temperature = p.temperature(); }
-    if (p.has_top_k())       { out.top_k       = p.top_k(); }
-    if (p.has_top_p())       { out.top_p       = p.top_p(); }
-    if (p.has_min_p())       { out.min_p       = p.min_p(); }
-    if (p.has_seed())        { out.seed        = p.seed(); }
-    if (p.has_max_tokens())  { out.max_tokens  = p.max_tokens(); }
-    out.stop.assign(p.stop().begin(), p.stop().end());
-    return out;
-}
-
 /// `tool_calls` < 0 leaves the count out of the line entirely (Generate has no tool calls).
-void log_request(const char * rpc_name, const GenerateStats & stats, const char * reason, double wall_ms,
+void log_request(const char * rpc_name, const GenerateStats & stats, const std::string & reason, double wall_ms,
                  int tool_calls) {
     char tools[32] = "";
     if (tool_calls >= 0) {
@@ -38,7 +25,7 @@ void log_request(const char * rpc_name, const GenerateStats & stats, const char 
     }
     std::fprintf(stderr,
                  "[llamad] %s prompt_tokens=%d cached_prompt_tokens=%d completion_tokens=%d finish=%s%s %.0fms\n",
-                 rpc_name, stats.prompt_tokens, stats.cached_prompt_tokens, stats.completion_tokens, reason, tools,
+                 rpc_name, stats.prompt_tokens, stats.cached_prompt_tokens, stats.completion_tokens, reason.c_str(), tools,
                  wall_ms);
 }
 
@@ -138,45 +125,23 @@ grpc::Status LlamaService::stream_generation(const char * rpc_name,
         client_gone = true;
     }
 
-    v1::FinishReason      reason = wire::enum_cast<v1::FinishReason>(result.reason);
     std::vector<ToolCall> tool_calls;
-
     if (!client_gone && stream != nullptr) {
         ChatFormat::Stream::Final final = stream->finish();
         tool_calls                      = std::move(final.tool_calls);
-
-        // Invariant, both ways: tool_calls is non-empty on the wire iff finish_reason is
-        // TOOL_CALLS. A run cut short by the token limit or by the client stopped mid-thought,
-        // so whatever the parser salvaged is not a call anyone should execute.
-        const bool ran_to_completion =
-            result.reason == FinishReason::Eog || result.reason == FinishReason::Stop;
-        if (ran_to_completion && !tool_calls.empty()) {
-            reason = v1::FINISH_REASON_TOOL_CALLS;
-        } else {
-            tool_calls.clear();
-        }
-
         // Content the parser only became sure about at the end is just more text.
         if (!final.content_tail.empty()) {
             write_text(final.content_tail);
         }
     }
 
-    if (!client_gone) {
-        // Exactly one final chunk, carrying finish_reason, stats and any tool calls.
-        v1::GenerateChunk final_chunk;
-        final_chunk.set_finish_reason(reason);
-        wire::to_proto(result.stats, final_chunk.mutable_stats());
-        for (const ToolCall & call : tool_calls) {
-            wire::to_proto(call, final_chunk.add_tool_calls());
-        }
-        if (!writer->Write(final_chunk)) {
-            client_gone = true;
-        }
+    const v1::GenerateChunk finish = wire::finish_chunk(result.reason, result.stats, std::move(tool_calls));
+    if (!client_gone && !writer->Write(finish)) {
+        client_gone = true;
     }
 
-    log_request(rpc_name, result.stats, wire::value_name(reason), ms_since(started),
-                stream != nullptr ? static_cast<int>(tool_calls.size()) : -1);
+    log_request(rpc_name, result.stats, v1::FinishReason_Name(finish.finish().reason()), ms_since(started),
+                stream != nullptr ? finish.finish().tool_calls_size() : -1);
 
     return grpc::Status::OK;
 }
@@ -188,7 +153,7 @@ grpc::Status LlamaService::Generate(grpc::ServerContext * context,
         if (engine_.serves_embeddings()) {
             return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, kEmbeddingModel);
         }
-        return stream_generation("Generate", context, request->prompt(), from_proto(request->sampling()), writer,
+        return stream_generation("Generate", context, request->prompt(), wire::from_proto(request->sampling()), writer,
                                  /*stream*/ nullptr);
     });
 }
@@ -210,20 +175,20 @@ grpc::Status LlamaService::Chat(grpc::ServerContext * context,
         std::vector<llamad::ChatMessage> messages;
         messages.reserve(static_cast<size_t>(request->messages().size()));
         for (const v1::ChatMessage & m : request->messages()) {
-            messages.push_back(wire::from_proto<llamad::ChatMessage>(m));
+            messages.push_back(wire::from_proto(m));
         }
 
         std::vector<llamad::Tool> tools;
         tools.reserve(static_cast<size_t>(request->tools().size()));
         for (const v1::Tool & t : request->tools()) {
-            tools.push_back(wire::from_proto<llamad::Tool>(t));
+            tools.push_back(wire::from_proto(t));
         }
 
         // Rendering happens before the engine's generate mutex, so a queued request pays for its
         // own template rendering rather than the one holding the mutex.
         const RenderedChat rendered = chat_format_->render(messages, tools, request->response_json_schema());
 
-        SamplingParams params = from_proto(request->sampling());
+        SamplingParams params = wire::from_proto(request->sampling());
         // With tools or a response schema the output is grammar-constrained; with neither the chat
         // layer leaves the grammar empty and this is all a no-op.
         params.grammar          = rendered.grammar;
