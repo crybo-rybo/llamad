@@ -24,7 +24,7 @@ jobs:
         shell: bash
     steps:
       - name: Install documentation tools
-        run: pacman -Syu --noconfirm --needed git cmake doxygen
+        run: pacman -Syu --noconfirm --needed git cmake doxygen python
 
       # Documentation reads only llamad sources, so no submodules or inference dependencies.
       - name: Check out source

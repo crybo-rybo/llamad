@@ -1,0 +1,76 @@
+<figure class="diagram-figure">
+<div class="diagram-scroll">
+<svg class="diagram" viewBox="0 0 880 316" role="img" aria-label="A successful Generate or Chat stream: zero or more text chunks, then exactly one finish chunk, then the end of the stream. Each GenerateChunk is a oneof of text and finish.">
+  <defs>
+    <marker id="sf-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path class="arrowhead" d="M0 0 L10 5 L0 10 z"/>
+    </marker>
+  </defs>
+
+  <!-- The stream, in order -->
+  <text class="eyebrow" x="0" y="14">ONE SUCCESSFUL STREAM, IN ORDER</text>
+
+  <path class="line" d="M0 44 v-7 h440 v7"/>
+  <text class="muted small" x="220" y="31" text-anchor="middle">zero or more text chunks</text>
+  <path class="line-accent" d="M470 44 v-7 h300 v7"/>
+  <text class="accent-text small" x="620" y="31" text-anchor="middle">exactly one finish, always last</text>
+
+  <rect class="box" x="0" y="52" width="140" height="64" rx="8"/>
+  <text class="mono accent-text" x="12" y="73">text</text>
+  <text class="mono" x="12" y="97">"Three primes:"</text>
+
+  <rect class="box" x="150" y="52" width="140" height="64" rx="8"/>
+  <text class="mono accent-text" x="162" y="73">text</text>
+  <text class="mono" x="162" y="97">" 2, 3"</text>
+
+  <rect class="box" x="300" y="52" width="140" height="64" rx="8"/>
+  <text class="mono accent-text" x="312" y="73">text</text>
+  <text class="mono" x="312" y="97">" and 5."</text>
+
+  <rect class="box-accent" x="470" y="52" width="300" height="64" rx="8"/>
+  <text class="mono accent-text" x="482" y="73">finish</text>
+  <text class="mono" x="482" y="91">reason: FINISH_REASON_EOG</text>
+  <text class="mono" x="482" y="107">stats: {…}  tool_calls: []</text>
+
+  <rect class="end-bar" x="796" y="52" width="4" height="64" rx="2"/>
+  <text class="muted small" x="810" y="80">end of</text>
+  <text class="muted small" x="810" y="96">stream</text>
+
+  <!-- The oneof -->
+  <text class="eyebrow" x="0" y="172">EACH CHUNK IS A ONEOF</text>
+
+  <rect class="box-plain" x="0" y="188" width="200" height="94" rx="8"/>
+  <a href="#wire_GenerateChunk"><text class="mono title" x="16" y="216">GenerateChunk</text></a>
+  <text class="mono faint" x="16" y="240">oneof chunk</text>
+  <text class="muted small" x="16" y="266">one of the two, never both</text>
+
+  <path class="line" d="M200 222 H260" marker-end="url(#sf-arrow)"/>
+  <path class="line" d="M200 262 H260" marker-end="url(#sf-arrow)"/>
+
+  <rect class="box" x="262" y="200" width="230" height="44" rx="8"/>
+  <text class="mono" x="276" y="220">text = 1</text>
+  <text class="mono muted" x="390" y="220">string</text>
+  <text class="muted small" x="276" y="236">never empty</text>
+
+  <rect class="box-accent" x="262" y="246" width="230" height="36" rx="8"/>
+  <text class="mono" x="276" y="268">finish = 2</text>
+  <a href="#wire_Finish"><text class="mono" x="390" y="268">Finish</text></a>
+
+  <path class="line-accent" d="M492 264 H540" marker-end="url(#sf-arrow)"/>
+
+  <rect class="box-plain" x="542" y="188" width="336" height="124" rx="8"/>
+  <a href="#wire_Finish"><text class="mono title" x="558" y="214">Finish</text></a>
+  <text class="mono" x="558" y="240">reason</text>
+  <a href="#wire_FinishReason"><text class="mono" x="676" y="240">FinishReason</text></a>
+  <text class="mono" x="558" y="262">stats</text>
+  <a href="#wire_GenerateStats"><text class="mono" x="676" y="262">GenerateStats</text></a>
+  <text class="mono" x="558" y="284">tool_calls</text>
+  <text class="mono muted" x="676" y="284">repeated</text>
+  <a href="#wire_ToolCall"><text class="mono" x="750" y="284">ToolCall</text></a>
+  <text class="accent-text small" x="558" y="302">non-empty if and only if reason is TOOL_CALLS</text>
+</svg>
+</div>
+<figcaption>The shape of a successful <code>Generate</code> or <code>Chat</code> stream. Cancellation or a
+transport failure can end a stream before <code>finish</code>; an error status ends it with no
+<code>finish</code> at all.</figcaption>
+</figure>

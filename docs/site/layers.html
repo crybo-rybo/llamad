@@ -1,0 +1,85 @@
+<figure class="diagram-figure">
+<div class="diagram-scroll">
+<svg class="diagram" viewBox="0 0 880 456" role="img" aria-label="Layers: llamad.proto is implemented by LlamaService, which main.cpp serves. LlamaService converts messages with llamad::wire, renders and parses chat with ChatFormat, and generates with Engine. ChatFormat sits on llama.cpp's common library; Engine on the public libllama API.">
+  <defs>
+    <marker id="ly-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path class="arrowhead" d="M0 0 L10 5 L0 10 z"/>
+    </marker>
+  </defs>
+
+  <!-- The contract -->
+  <a href="wire_protocol.html">
+    <rect class="box-accent" x="300" y="0" width="280" height="56" rx="8"/>
+    <text class="mono title" x="316" y="24">llamad.proto</text>
+  </a>
+  <text class="muted small" x="316" y="44">llamad.v1.Llama, the wire contract</text>
+  <path class="line" d="M440 56 V98" marker-end="url(#ly-arrow)"/>
+  <text class="faint small" x="450" y="82">implemented by</text>
+
+  <!-- gRPC layer -->
+  <a href="main_8cpp.html">
+    <rect class="box" x="40" y="100" width="200" height="56" rx="8"/>
+    <text class="mono title" x="56" y="124">main.cpp</text>
+  </a>
+  <text class="muted small" x="56" y="144">socket 0600 · signals</text>
+  <path class="line" d="M240 128 H298" marker-end="url(#ly-arrow)"/>
+  <text class="faint small" x="269" y="120" text-anchor="middle">serves</text>
+
+  <a href="classllamad_1_1_llama_service.html">
+    <rect class="box" x="300" y="100" width="280" height="56" rx="8"/>
+    <text class="mono title" x="316" y="124">LlamaService</text>
+  </a>
+  <text class="muted small" x="316" y="144">one method per RPC · status codes</text>
+  <path class="line" d="M580 128 H638" marker-end="url(#ly-arrow)"/>
+  <text class="faint small" x="609" y="120" text-anchor="middle">convert</text>
+
+  <a href="wire_8h.html">
+    <rect class="box" x="640" y="100" width="200" height="56" rx="8"/>
+    <text class="mono title" x="656" y="124">llamad::wire</text>
+  </a>
+  <text class="muted small" x="656" y="144">proto ⇄ plain types</text>
+
+  <!-- The boundary -->
+  <text class="eyebrow" x="40" y="194">GRPC AND PROTOBUF</text>
+  <path class="boundary" d="M40 204 H840"/>
+  <text class="eyebrow" x="40" y="224">PLAIN C++, NO DAEMON</text>
+
+  <path class="line" d="M400 156 V180 H300 V246" marker-end="url(#ly-arrow)"/>
+  <text class="faint small" x="308" y="236">render, parse tool calls</text>
+  <path class="line" d="M480 156 V180 H580 V246" marker-end="url(#ly-arrow)"/>
+  <text class="faint small" x="588" y="236">generate, embed</text>
+
+  <!-- Engine and chat layer -->
+  <a href="classllamad_1_1_chat_format.html">
+    <rect class="box" x="180" y="248" width="240" height="56" rx="8"/>
+    <text class="mono title" x="196" y="272">ChatFormat</text>
+  </a>
+  <text class="muted small" x="196" y="292">template · grammar · tool calls</text>
+
+  <a href="classllamad_1_1_engine.html">
+    <rect class="box" x="460" y="248" width="240" height="56" rx="8"/>
+    <text class="mono title" x="476" y="272">Engine</text>
+  </a>
+  <text class="muted small" x="476" y="292">tokenize · sample · KV cache</text>
+
+  <!-- llama.cpp -->
+  <rect class="box-dashed" x="160" y="340" width="560" height="112" rx="10"/>
+  <text class="eyebrow" x="176" y="442">LLAMA.CPP, A PINNED SUBMODULE</text>
+
+  <path class="line" d="M300 304 V362" marker-end="url(#ly-arrow)"/>
+  <path class="line" d="M580 304 V362" marker-end="url(#ly-arrow)"/>
+
+  <rect class="box-plain" x="180" y="364" width="240" height="56" rx="8"/>
+  <text class="mono title" x="196" y="388">common</text>
+  <text class="muted small" x="196" y="408">unstable; chat_format.cpp only</text>
+
+  <rect class="box-plain" x="460" y="364" width="240" height="56" rx="8"/>
+  <text class="mono title" x="476" y="388">libllama</text>
+  <text class="muted small" x="476" y="408">public llama.h and ggml-backend.h</text>
+  <path class="line" d="M420 392 H458" marker-end="url(#ly-arrow)"/>
+</svg>
+</div>
+<figcaption>Who calls whom. <code>LlamaService</code> is the hub: it converts each request through
+<code>llamad::wire</code>, has <code>ChatFormat</code> render a <code>Chat</code> conversation and parse
+the reply, and runs <code>Engine</code>. Boxes link to their reference pages.</figcaption>
+</figure>

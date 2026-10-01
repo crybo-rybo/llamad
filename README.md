@@ -82,7 +82,7 @@ typed replies, embeddings and errors.
 | [docs/daemon.md](docs/daemon.md) | Daemon flags, socket, signals, and `engine_smoke` |
 | [docs/design.md](docs/design.md) | Design notes: layering, stream shape, chat templates |
 | [docs/performance.md](docs/performance.md) | Measuring prefill and decode speed, and reference numbers |
-| `./scripts/docs.sh` | Doxygen reference for the daemon's sources in `build-docs/html/` |
+| `./scripts/docs.sh` | The documentation site in `build-docs/html/`: wire protocol reference, guides and the C++ reference |
 | `AGENTS.md` | Layout and rules for changing the code |
 
 ## License

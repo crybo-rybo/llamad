@@ -1,0 +1,59 @@
+<figure class="diagram-figure">
+<div class="diagram-scroll">
+<svg class="diagram" viewBox="0 0 880 500" role="img" aria-label="One tool round: the application sends a Chat request with tools, llamad finishes with TOOL_CALLS, the application runs the tool and resends the whole history with the assistant's call and a tool message, and llamad streams the answer and finishes with EOG.">
+  <defs>
+    <marker id="tr-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path class="arrowhead" d="M0 0 L10 5 L0 10 z"/>
+    </marker>
+    <marker id="tr-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path class="arrowhead-accent" d="M0 0 L10 5 L0 10 z"/>
+    </marker>
+  </defs>
+
+  <!-- Participants -->
+  <rect class="box" x="40" y="0" width="200" height="40" rx="8"/>
+  <text class="title" x="140" y="25" text-anchor="middle">Application</text>
+  <rect class="box-accent" x="640" y="0" width="200" height="40" rx="8"/>
+  <text class="title" x="740" y="25" text-anchor="middle">llamad</text>
+  <path class="lifeline" d="M140 40 V492"/>
+  <path class="lifeline" d="M740 40 V492"/>
+
+  <!-- 1. The first request -->
+  <text class="title" x="170" y="68">Chat</text>
+  <text class="mono" x="170" y="86">messages: [user "What time is it in Tokyo?"]</text>
+  <text class="mono" x="170" y="102">tools: [get_current_time]</text>
+  <path class="line" d="M140 114 H738" marker-end="url(#tr-arrow)"/>
+
+  <!-- 2. The call -->
+  <text class="title accent-text" x="170" y="144">finish, reason TOOL_CALLS</text>
+  <text class="mono" x="170" y="162">tool_calls: [{id: "abc", name: "get_current_time",</text>
+  <text class="mono" x="170" y="178">              arguments_json: "{\"timezone\":\"Asia/Tokyo\"}"}]</text>
+  <path class="line-accent" d="M740 190 H142" marker-end="url(#tr-arrow-accent)"/>
+
+  <!-- 3. The application runs the tool; the daemon remembers nothing -->
+  <rect class="box-plain" x="40" y="210" width="360" height="56" rx="8"/>
+  <text class="title" x="56" y="233">The application runs the tool</text>
+  <text class="mono muted" x="56" y="253">get_current_time → "2026-10-01 09:00 JST"</text>
+  <text class="muted small" x="725" y="234" text-anchor="end">keeps no session and never runs a tool:</text>
+  <text class="muted small" x="725" y="252" text-anchor="end">the next request carries everything</text>
+
+  <!-- 4. The history, resent -->
+  <text class="title" x="170" y="296">Chat, with the whole history resent</text>
+  <text class="mono" x="170" y="314">messages: [user "What time is it in Tokyo?",</text>
+  <text class="mono" x="170" y="330">           assistant {tool_calls: [the call, as received]},</text>
+  <text class="mono" x="170" y="346">           tool {tool_call_id: "abc", content: "2026-10-01 09:00 JST"}]</text>
+  <text class="mono" x="170" y="362">tools: [get_current_time]</text>
+  <path class="line" d="M140 374 H738" marker-end="url(#tr-arrow)"/>
+
+  <!-- 5. The answer -->
+  <text class="title" x="170" y="404">text chunks</text>
+  <text class="mono" x="170" y="422">"The current time in Tokyo is 09:00."</text>
+  <path class="line" d="M740 434 H142" marker-end="url(#tr-arrow)"/>
+
+  <text class="title" x="170" y="464">finish, reason EOG</text>
+  <path class="line" d="M740 476 H142" marker-end="url(#tr-arrow)"/>
+</svg>
+</div>
+<figcaption>One tool round. The application owns the loop: it runs each call, answers it with a
+<code>tool</code> message carrying the call's <code>id</code>, and bounds the number of rounds.</figcaption>
+</figure>
