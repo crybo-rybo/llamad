@@ -1,12 +1,12 @@
-# Building
+# Build llamad
 
 ## Compiler and platforms
 
-llamad is C++23 and builds with the platform's own compiler: GCC 13 or Clang 18 on Linux, Apple
-Clang 16 (Xcode 16) or later on macOS. Linux and macOS on Apple silicon are the supported
-platforms. gRPC and Protobuf come from the system package manager; CMake finds Protobuf through its
-CMake config where the package ships one, and through CMake's own module where it does not
-(Debian and Ubuntu).
+llamad is C++23. Use the compiler of your platform: GCC 13 or Clang 18 on Linux, or Apple Clang
+16 (Xcode 16) on macOS. Later versions are also satisfactory. The supported platforms are Linux
+and macOS on Apple silicon. Install gRPC and Protobuf with the package manager of the system. If
+the Protobuf package includes a CMake config, CMake uses it to find Protobuf. If not (Debian and
+Ubuntu), CMake uses its own module.
 
 ## Linux
 
@@ -20,7 +20,8 @@ cd llamad
 ./scripts/test.sh cpu                       # chat template, flags, engine and wire tests
 ```
 
-If you already cloned without submodules: `git submodule update --init --recursive`.
+If you cloned the repository without submodules, use this command:
+`git submodule update --init --recursive`.
 
 ## macOS
 
@@ -33,61 +34,62 @@ cd llamad
 ./scripts/test.sh cpu
 ```
 
-llama.cpp builds with its usual Apple settings: Accelerate for BLAS, the CPU's native features,
-and Metal in a `gpu` build.
+The llama.cpp build uses its usual Apple settings: Accelerate for BLAS, the native features of
+the CPU, and Metal in a `gpu` build.
 
-## What the build contains
+## Contents of the build
 
-The build includes llama.cpp's `common` library, which the chat layer needs for Jinja
-templates and tool-call parsing; it is the bulk of a first build.
+The build includes the `common` library of llama.cpp. The chat layer uses this library for Jinja
+templates and to parse tool calls. Most of the time of a first build is for this library.
 
-The tests need no model file and no daemon: the chat-template ones render and parse against a
-template checked into the submodule, the rest need nothing but the build.
-`./scripts/build-test.sh [cpu|gpu]` builds and then runs them in one step. Extra arguments to
-`build.sh` are passed to CMake configure, and `CMAKE_BUILD_PARALLEL_LEVEL` sets the job count
-(default 4). `-DLLAMAD_WARNINGS_AS_ERRORS=ON`, which CI uses, fails the build on a warning in
-llamad's own sources.
+The tests do not use a model file or a daemon. The chat template tests use a template that is in
+the submodule. The other tests use only the build. `./scripts/build-test.sh [cpu|gpu]` builds the
+project and then runs the tests, in one step.
+
+`build.sh` gives all additional arguments to the CMake configure step. `CMAKE_BUILD_PARALLEL_LEVEL`
+sets the number of jobs (the default is 4). With `-DLLAMAD_WARNINGS_AS_ERRORS=ON`, a warning in
+the llamad source files stops the build. CI uses this option.
 
 ## GPU
 
-llama.cpp's GPU backends are enabled with their usual CMake flags, and `build.sh gpu` passes the
-one for the platform: Vulkan on Linux, Metal on macOS. `build.sh cpu` turns that backend off.
-Vulkan is the Linux backend tested here: it runs on Pascal cards (GTX 10xx), which CUDA 13 no
-longer targets.
+The usual CMake flags of llama.cpp enable its GPU backends. `build.sh gpu` sets the flag for the
+platform: Vulkan on Linux, Metal on macOS. `build.sh cpu` disables that backend. Vulkan is the
+Linux backend that this project tests. Vulkan operates on Pascal cards (GTX 10xx), and CUDA 13
+does not support these cards.
 
 ```sh
-pacman -S vulkan-headers spirv-headers vulkan-icd-loader shaderc   # Linux; Metal needs nothing
+pacman -S vulkan-headers spirv-headers vulkan-icd-loader shaderc   # Linux only (Metal: no packages)
 ./scripts/build.sh gpu                  # -DGGML_VULKAN=ON or -DGGML_METAL=ON, in build-gpu/
 ./scripts/test.sh gpu
 ./scripts/smoke-test.sh gpu /absolute/path/to/model.gguf
 ```
 
-The project does not include a model. `test.sh` needs none; `smoke-test.sh` requires
-an explicit model path, absolute or relative to your working directory. It runs one chat
-turn through `engine_smoke` at temperature 0.
+The project does not include a model. `test.sh` does not use a model. `smoke-test.sh` must have a
+model path as an argument. The path can be absolute or relative to your working directory. The
+script runs one chat turn through `engine_smoke` at temperature 0.
 
-On Linux a working Vulkan driver for the GPU is also required. The smoke test fails if
-inference falls back to the CPU; listing devices alone does not test model loading
-or token generation.
+On Linux, you must also have a Vulkan driver for the GPU that operates correctly. If the
+inference runs on the CPU, the smoke test stops with an error. A device list does not test the
+model load or the token generation.
 
 ### Device selection
 
-Under Vulkan every discrete GPU is used by default: llama.cpp splits the model's
-layers across them in proportion to each card's free memory, and ignores an
-integrated GPU whenever a discrete one exists. Two 8 GB cards therefore hold a
-model that fits on neither alone. Apple silicon offers one Metal device, `MTL0`,
-over unified memory. The daemon prints one line per offload device at startup.
+With Vulkan, llama.cpp uses all discrete GPUs by default. It divides the layers of the model
+between them, in proportion to the free memory of each card. If there is a discrete GPU,
+llama.cpp does not use an integrated GPU. Thus, two 8 GB cards can hold a model that is too large
+for one card. Apple silicon has one Metal device, `MTL0`, with unified memory. When the daemon
+starts, it writes one line for each offload device.
 
 ```sh
 ./build-gpu/llamad --list-devices                    # names, types, free/total memory
-./build-gpu/llamad --model M --devices Vulkan0       # this card only; MTL0 on macOS
+./build-gpu/llamad --model M --devices Vulkan0       # this card only (MTL0 on macOS)
 ./build-gpu/llamad --model M --tensor-split 3,1      # 3:1 share, in device order
 ```
 
 ## API reference
 
-Only CMake and Doxygen (1.17 or later) are needed to generate HTML; no compiler, submodule
-checkout, Graphviz, model or gRPC installation is required:
+To make the HTML reference, you must have only CMake and Doxygen (1.17 or later). A compiler, a
+submodule checkout, Graphviz, a model and gRPC are not necessary:
 
 ```sh
 pacman -S cmake doxygen
