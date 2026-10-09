@@ -75,6 +75,19 @@ For example:
 /json Invent a tiny quest about a dragon who lost its glasses.
 ```
 
+The client shows the reply as it streams, and then reads the reply as data.
+After the stats, it prints the three fields on `[quest]` lines:
+
+```text
+[quest] Lost Glasses Quest
+  objective: Find the missing glasses of the dragon and restore its vision.
+  reward:    A magical potion that restores the dragon's sight.
+```
+
+A `/json` request has a different system prompt. Thus, the next chat request shows few cached prompt tokens.
+The daemon keeps one KV cache, and it reuses only the prompt prefix that two requests share.
+Refer to [design.md](design.md) for the stateless design and the cache.
+
 The client uses temperature zero and a limit of 512 output tokens per stream.
 Each chat RPC has a two-minute deadline. Ctrl+C exits the client and disconnects its stream.
 For a conversation that exceeds the model's context, use `/clear`.

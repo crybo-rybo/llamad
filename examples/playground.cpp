@@ -9,6 +9,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <google/protobuf/struct.pb.h>
@@ -148,6 +149,20 @@ v1::ChatRequest chat_request() {
     return request;
 }
 
+v1::ChatRequest quest_request(const std::string & prompt) {
+    v1::ChatRequest request;
+    request.mutable_sampling()->set_temperature(0);
+    request.mutable_sampling()->set_max_tokens(512);
+    request.set_response_json_schema(kQuestSchema);
+    auto * system = request.add_messages();
+    system->set_role("system");
+    system->set_content("Create a short, playful quest from the user's prompt.");
+    auto * user = request.add_messages();
+    user->set_role("user");
+    user->set_content(prompt);
+    return request;
+}
+
 void print_help(std::ostream & output) {
     output << "\nType a message to chat. Try:\n"
            << "  What time is it?\n"
@@ -161,8 +176,13 @@ void print_help(std::ostream & output) {
 }
 
 void print_stats(const v1::Finish & finish, std::ostream & output) {
+    constexpr std::string_view prefix = "FINISH_REASON_";
+    std::string reason(v1::FinishReason_Name(finish.reason()));
+    if (reason.starts_with(prefix)) {
+        reason.erase(0, prefix.size());
+    }
     const auto & stats = finish.stats();
-    output << "[finish " << v1::FinishReason_Name(finish.reason())
+    output << "[finish " << reason
            << " | prompt " << stats.prompt_tokens() << " (cached " << stats.cached_prompt_tokens() << ")"
            << " | output " << stats.completion_tokens()
            << " | prefill " << std::fixed << std::setprecision(1) << stats.prompt_ms() << " ms";
@@ -181,47 +201,32 @@ void chat(v1::Llama::StubInterface & stub, v1::ChatRequest & request,
         v1::GenerateChunk chunk;
         std::string text;
         std::optional<v1::Finish> finish;
-        output << "assistant> " << std::flush;
         while (reader->Read(&chunk)) {
-            if (finish) {
-                context.TryCancel();
-                break;
-            }
             if (chunk.has_text()) {
+                // Text chunks are never empty, so empty text means the first chunk of this round.
+                if (text.empty()) {
+                    output << "assistant> ";
+                }
                 text += chunk.text();
                 output << chunk.text() << std::flush;
             } else if (chunk.has_finish()) {
                 finish = chunk.finish();
             }
         }
-        output << '\n';
+        if (!text.empty()) {
+            output << '\n';
+        }
         check_status(reader->Finish());
         if (!finish) {
             throw std::runtime_error("stream ended without a finish chunk");
         }
         print_stats(*finish, output);
 
-        const bool tool_calls = !finish->tool_calls().empty();
-        if (tool_calls != (finish->reason() == v1::FINISH_REASON_TOOL_CALLS)) {
-            throw std::runtime_error("finish reason disagrees with tool calls");
-        }
-        if (tool_calls && request.tools().empty()) {
-            throw std::runtime_error("model called a tool without tools in the request");
-        }
         auto * assistant = request.add_messages();
         assistant->set_role("assistant");
         assistant->set_content(text);
         *assistant->mutable_tool_calls() = finish->tool_calls();
-        if (!tool_calls) {
-            if (!request.response_json_schema().empty()) {
-                Object object;
-                if (finish->reason() != v1::FINISH_REASON_EOG && finish->reason() != v1::FINISH_REASON_STOP) {
-                    throw std::runtime_error("JSON reply is incomplete; try a shorter quest");
-                }
-                if (!google::protobuf::util::JsonStringToMessage(text, &object).ok()) {
-                    throw std::runtime_error("reply is not a complete JSON object");
-                }
-            }
+        if (finish->reason() != v1::FINISH_REASON_TOOL_CALLS) {
             return;
         }
         if (round == kMaxToolRounds) {
@@ -237,6 +242,21 @@ void chat(v1::Llama::StubInterface & stub, v1::ChatRequest & request,
             message->set_content(result);
         }
     }
+}
+
+void print_quest(const std::string & reply, std::ostream & output) {
+    // The schema constrains the reply, so a parse fails only when max_tokens cuts it off.
+    Object quest;
+    if (!google::protobuf::util::JsonStringToMessage(reply, &quest).ok()) {
+        throw std::runtime_error("JSON reply is incomplete; try a shorter quest");
+    }
+    const auto field = [&](const char * name) {
+        const auto at = quest.fields().find(name);
+        return at == quest.fields().end() ? std::string() : at->second.string_value();
+    };
+    output << "[quest] " << field("title") << '\n'
+           << "  objective: " << field("objective") << '\n'
+           << "  reward:    " << field("reward") << '\n';
 }
 
 }  // namespace
@@ -285,19 +305,18 @@ int run_playground(v1::Llama::StubInterface & stub, std::istream & input, std::o
             output << "Use /help, /clear, /quit or /json PROMPT.\n";
             continue;
         }
-        // Work on a copy so a failed stream or tool loop cannot leave partial history behind.
-        auto request = quest ? chat_request() : history;
-        if (quest) {
-            request.clear_tools();
-            request.set_response_json_schema(kQuestSchema);
-            request.mutable_messages(0)->set_content("Create a short, playful quest from the user's prompt.");
-        }
-        auto * user = request.add_messages();
-        user->set_role("user");
-        user->set_content(quest ? line.substr(6) : line);
         try {
-            chat(stub, request, random, output);
-            if (!quest) {
+            if (quest) {
+                auto request = quest_request(line.substr(6));
+                chat(stub, request, random, output);
+                print_quest(request.messages(request.messages_size() - 1).content(), output);
+            } else {
+                // Work on a copy so a failed stream or tool loop cannot leave partial history behind.
+                auto request = history;
+                auto * user = request.add_messages();
+                user->set_role("user");
+                user->set_content(line);
+                chat(stub, request, random, output);
                 history = std::move(request);
             }
         } catch (const std::exception & e) {

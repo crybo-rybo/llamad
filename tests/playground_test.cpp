@@ -136,8 +136,10 @@ void test_tools_history_json_and_clear() {
                 CHECK_EQ(request.messages(6).content(), "A fun result.");
             } else if (turn == 3) {
                 CHECK_EQ(request.messages_size(), 2);
+                CHECK_EQ(request.messages(0).content(), "Create a short, playful quest from the user's prompt.");
+                CHECK_EQ(request.messages(1).content(), "A pirate quest");
                 CHECK_EQ(request.tools_size(), 0);
-                CHECK(!request.response_json_schema().empty());
+                CHECK(request.response_json_schema().find(R"("reward")") != std::string::npos);
                 text(writer, R"({"title":"Pirates","objective":"Find treasure","reward":"Gold"})");
                 CHECK(writer.Write(finish()));
                 return grpc::Status::OK;
@@ -160,6 +162,9 @@ void test_tools_history_json_and_clear() {
     CHECK(output.find("[tool] roll_dice(") != std::string::npos);
     CHECK(output.find("[tool] flip_coin({}) ->") != std::string::npos);
     CHECK(output.find("assistant> A fun result.") != std::string::npos);
+    CHECK(output.find("[quest] Pirates\n  objective: Find treasure\n  reward:    Gold\n") != std::string::npos);
+    CHECK(output.find("[finish TOOL_CALLS | prompt 11") != std::string::npos);
+    CHECK(output.find("[finish EOG | prompt 11") != std::string::npos);
     CHECK(output.find("prompt 11 (cached 3) | output 5 | prefill 2.0 ms | decode 5.0 tok/s") != std::string::npos);
 }
 
@@ -185,8 +190,10 @@ void test_tool_errors_are_returned_to_the_model() {
         }
         return grpc::Status::OK;
     };
-    run(service, "bad tools\n", 0);
+    const auto output = run(service, "bad tools\n", 0);
     CHECK_EQ(service.requests.size(), 2u);
+    CHECK(output.find("assistant> \n") == std::string::npos);
+    CHECK(output.find("you> [finish TOOL_CALLS") != std::string::npos);
 }
 
 void test_failed_rpc_does_not_run_tools_or_commit_history() {
