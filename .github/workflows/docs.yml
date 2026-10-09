@@ -17,7 +17,8 @@ jobs:
   build:
     name: Doxygen build
     runs-on: ubuntu-24.04
-    container: archlinux:base-devel
+    # Docker Hub's image through Google's mirror, which has no anonymous pull limit.
+    container: mirror.gcr.io/library/archlinux:base-devel
     timeout-minutes: 10
     defaults:
       run:
