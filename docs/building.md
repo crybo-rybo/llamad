@@ -17,7 +17,7 @@ apt install g++ cmake ninja-build libgrpc++-dev libprotobuf-dev \
 git clone --recurse-submodules git@github.com:crybo-rybo/llamad.git
 cd llamad
 ./scripts/build.sh cpu                      # builds into build-cpu/
-./scripts/test.sh cpu                       # chat template, flags, engine and wire tests
+./scripts/test.sh cpu                       # tests without a model
 ```
 
 If you cloned the repository without submodules, use this command:
@@ -41,6 +41,8 @@ the CPU, and Metal in a `gpu` build.
 
 The build includes the `common` library of llama.cpp. The chat layer uses this library for Jinja
 templates and to parse tool calls. Most of the time of a first build is for this library.
+
+The build also includes `llamad_playground`, a standalone terminal client. See [playground.md](playground.md) for its commands.
 
 The tests do not use a model file or a daemon. The chat template tests use a template that is in
 the submodule. The other tests use only the build. `./scripts/build-test.sh [cpu|gpu]` builds the

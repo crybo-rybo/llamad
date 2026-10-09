@@ -80,11 +80,25 @@ for chunk in stub.Chat(pb.ChatRequest(messages=[pb.ChatMessage(role="user", cont
 For information about stubs, streams, the tool-call loop, typed replies, embeddings and errors,
 refer to [docs/protocol.md](docs/protocol.md).
 
+## Terminal playground
+
+Start the daemon, then open the example client in another terminal:
+
+```sh
+./build-cpu/llamad_playground
+```
+
+Ask for the time, roll dice or flip a coin. The client shows each tool call and its result.
+Replies stream as text. Each reply shows token counts, cache reuse and decode speed.
+Use `/json Invent a pirate quest` to request a quest with a JSON schema.
+See [docs/playground.md](docs/playground.md) for commands and examples.
+
 ## Documentation
 
 | Page | Contents |
 |---|---|
 | [docs/protocol.md](docs/protocol.md) | Integration: stubs, streams, tool calls, typed replies, embeddings, errors |
+| [docs/playground.md](docs/playground.md) | Terminal example: chat, local tools, JSON replies and stats |
 | [docs/building.md](docs/building.md) | Dependencies, platform notes, GPU builds, tests, smoke test |
 | [docs/daemon.md](docs/daemon.md) | Daemon flags, socket, signals, and `engine_smoke` |
 | [docs/design.md](docs/design.md) | Design notes: layers, stream shape, chat templates |
