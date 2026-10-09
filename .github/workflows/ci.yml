@@ -18,7 +18,8 @@ jobs:
     name: Linux ${{ matrix.compiler }}
     runs-on: ubuntu-24.04
     # Match the dependencies documented in README.md, including Protobuf's CMake config.
-    container: archlinux:base-devel
+    # Docker Hub's image through Google's mirror, which has no anonymous pull limit.
+    container: mirror.gcr.io/library/archlinux:base-devel
     timeout-minutes: 30
     strategy:
       fail-fast: false
