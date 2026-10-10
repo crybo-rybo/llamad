@@ -39,7 +39,7 @@ doxygen_add_docs(llamad_docs
     "${CMAKE_CURRENT_SOURCE_DIR}/building.md"
     "${CMAKE_CURRENT_SOURCE_DIR}/daemon.md"
     "${CMAKE_CURRENT_SOURCE_DIR}/protocol.md"
-    "${CMAKE_CURRENT_SOURCE_DIR}/playground.md"
+    "${CMAKE_CURRENT_SOURCE_DIR}/python-example.md"
     "${CMAKE_CURRENT_SOURCE_DIR}/design.md"
     "${CMAKE_CURRENT_SOURCE_DIR}/performance.md"
     "${LLAMAD_SOURCE_DIR}/src"

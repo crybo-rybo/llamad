@@ -16,6 +16,7 @@ Explain their benefit and effect on callers.
 | `src/service.{h,cpp}`, `src/main.cpp` | gRPC service and daemon lifecycle |
 | `src/flags.h`, `src/engine_flags.h` | Command-line flags |
 | `tests/` | Plain CTest executables, engine smoke tests and benchmarks |
+| `examples/python/` | Python chat client from generated stubs, outside the CMake build |
 | `third_party/llama.cpp` | Pinned submodule (do not modify) |
 
 Read `README.md` and `docs/` for user documentation. Local GGUF files belong in `models/` and are absent from CI.

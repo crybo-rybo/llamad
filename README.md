@@ -80,24 +80,28 @@ for chunk in stub.Chat(pb.ChatRequest(messages=[pb.ChatMessage(role="user", cont
 For information about stubs, streams, the tool-call loop, typed replies, embeddings and errors,
 refer to [docs/protocol.md](docs/protocol.md).
 
-## Terminal playground
+## Python example
 
-Start the daemon, then open the example client in another terminal:
+`examples/python/chat.py` is a runnable version of the snippet above. It is a terminal chat with
+streamed replies and stats. To use it, start the daemon. Then, from the repository root, do these
+steps:
 
 ```sh
-./build-cpu/llamad_playground
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r examples/python/requirements.txt
+python -m grpc_tools.protoc -I proto --python_out=examples/python \
+    --grpc_python_out=examples/python llamad/v1/llamad.proto
+python examples/python/chat.py
 ```
 
-Type a message to chat with the model. Replies stream as text.
-Each reply shows token counts, cache reuse and decode speed.
-See [docs/playground.md](docs/playground.md) for commands.
+For the commands and the stats, refer to [docs/python-example.md](docs/python-example.md).
 
 ## Documentation
 
 | Page | Contents |
 |---|---|
 | [docs/protocol.md](docs/protocol.md) | Integration: stubs, streams, tool calls, typed replies, embeddings, errors |
-| [docs/playground.md](docs/playground.md) | Terminal example: chat with streamed replies and stats |
+| [docs/python-example.md](docs/python-example.md) | Python chat client: generated stubs, streamed replies and stats |
 | [docs/building.md](docs/building.md) | Dependencies, platform notes, GPU builds, tests, smoke test |
 | [docs/daemon.md](docs/daemon.md) | Daemon flags, socket, signals, and `engine_smoke` |
 | [docs/design.md](docs/design.md) | Design notes: layers, stream shape, chat templates |

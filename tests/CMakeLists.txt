@@ -27,12 +27,6 @@ add_executable(wire_test wire_test.cpp)
 target_link_libraries(wire_test PRIVATE llamad_service llamad_options)
 add_test(NAME wire COMMAND wire_test)
 
-# The example's tool loop against a scripted gRPC service; no model or engine.
-add_executable(playground_test playground_test.cpp ../examples/playground.cpp)
-target_include_directories(playground_test PRIVATE ../examples)
-target_link_libraries(playground_test PRIVATE llamad_proto llamad_options)
-add_test(NAME playground COMMAND playground_test)
-
 # The engine and the chat layer in-process, without the daemon. It needs a model file, so it is
 # a CLI to run by hand and not a CTest test.
 add_executable(engine_smoke engine_smoke.cpp)

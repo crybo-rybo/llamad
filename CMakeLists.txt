@@ -64,10 +64,5 @@ target_link_libraries(llamad_service PUBLIC llamad_engine llamad_chat llamad_pro
 add_executable(llamad src/main.cpp)
 target_link_libraries(llamad PRIVATE llamad_service gRPC::grpc++_reflection llamad_options)
 
-# A standalone example client: only generated stubs, with no engine or chat-layer dependency.
-add_executable(llamad_playground examples/playground_main.cpp examples/playground.cpp)
-target_include_directories(llamad_playground PRIVATE src)
-target_link_libraries(llamad_playground PRIVATE llamad_proto llamad_options)
-
 enable_testing()
 add_subdirectory(tests)
