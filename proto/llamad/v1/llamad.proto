@@ -22,8 +22,9 @@
 //   for something the loaded model cannot do (Chat without a usable template, Embed on a
 //   generative model, Generate or Chat on an embedding model), INTERNAL for anything else.
 //
-// During pre-release, meaningful improvements may include incompatible contract changes.
-// Breaking changes require callers to update their generated stubs and request/response handling.
+// llamad follows semantic versioning. Before 1.0.0, a minor release can change this contract
+// incompatibly; callers then regenerate their stubs and update their request and response
+// handling. A patch release keeps it compatible.
 
 syntax = "proto3";
 
