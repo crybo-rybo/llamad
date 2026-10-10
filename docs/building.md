@@ -17,7 +17,7 @@ apt install g++ cmake ninja-build libgrpc++-dev libprotobuf-dev \
 git clone --recurse-submodules git@github.com:crybo-rybo/llamad.git
 cd llamad
 ./scripts/build.sh cpu                      # builds into build-cpu/
-./scripts/test.sh cpu                       # chat template, flags, engine and wire tests
+./scripts/test.sh cpu                       # tests without a model
 ```
 
 If you cloned the repository without submodules, use this command:

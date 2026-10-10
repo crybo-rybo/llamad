@@ -80,11 +80,29 @@ for chunk in stub.Chat(pb.ChatRequest(messages=[pb.ChatMessage(role="user", cont
 For information about stubs, streams, the tool-call loop, typed replies, embeddings and errors,
 refer to [docs/protocol.md](docs/protocol.md).
 
+## Python example
+
+`examples/python/chat.py` is a runnable version of the snippet above. It is a terminal chat with
+streamed replies and stats. To use it, start the daemon. Then, from the repository root, do these
+steps:
+
+```sh
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r examples/python/requirements.txt
+python examples/python/chat.py
+```
+
+The client compiles `llamad.proto` when it starts, so you do not generate stubs. With
+[uv](https://docs.astral.sh/uv/), `uv run examples/python/chat.py` does all of these steps.
+
+For the commands and the stats line, refer to [docs/python-example.md](docs/python-example.md).
+
 ## Documentation
 
 | Page | Contents |
 |---|---|
 | [docs/protocol.md](docs/protocol.md) | Integration: stubs, streams, tool calls, typed replies, embeddings, errors |
+| [docs/python-example.md](docs/python-example.md) | Python chat client: proto loaded at start-up, streamed replies, a tool call and stats |
 | [docs/building.md](docs/building.md) | Dependencies, platform notes, GPU builds, tests, smoke test |
 | [docs/daemon.md](docs/daemon.md) | Daemon flags, socket, signals, and `engine_smoke` |
 | [docs/design.md](docs/design.md) | Design notes: layers, stream shape, chat templates |

@@ -91,3 +91,23 @@ jobs:
 
       - name: Run tests
         run: ctest --test-dir build --output-on-failure --no-tests=error
+
+  # The example shares only the proto with the daemon. This job fails when a proto change stops it
+  # compiling the proto or using its messages. It needs no submodules and no build.
+  python-example:
+    name: Python example
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install requirements
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -r examples/python/requirements.txt
+
+      - name: Load the proto
+        run: .venv/bin/python examples/python/chat.py --help
