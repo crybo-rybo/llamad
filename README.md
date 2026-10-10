@@ -120,7 +120,6 @@ llamad uses [semantic versioning](https://semver.org). `llamad --version` shows 
 | [docs/daemon.md](docs/daemon.md) | Daemon flags, socket, signals, and `engine_smoke` |
 | [docs/design.md](docs/design.md) | Design notes: layers, stream shape, chat templates |
 | [docs/performance.md](docs/performance.md) | How to measure prefill and decode speed, and reference numbers |
-| `./scripts/docs.sh` | Doxygen reference for the source files of the daemon, in `build-docs/html/` |
 | `AGENTS.md` | Layout of the code, and rules for changes to it |
 
 ## License

@@ -102,13 +102,3 @@ starts, it writes one line for each offload device.
 ./build-gpu/llamad --model M --devices Vulkan0       # this card only (MTL0 on macOS)
 ./build-gpu/llamad --model M --tensor-split 3,1      # 3:1 share, in device order
 ```
-
-## API reference
-
-To make the HTML reference, you must have only CMake and Doxygen (1.17 or later). A compiler, a
-submodule checkout, Graphviz, a model and gRPC are not necessary:
-
-```sh
-pacman -S cmake doxygen
-./scripts/docs.sh                       # open build-docs/html/index.html
-```
