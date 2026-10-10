@@ -11,6 +11,7 @@ Set it up from the repository root:
 import argparse
 import os
 import sys
+from datetime import datetime
 
 import grpc
 
@@ -27,8 +28,12 @@ except ImportError:
 SYSTEM = pb.ChatMessage(role="system", content="You are a concise, friendly assistant.")
 SAMPLING = pb.SamplingParams(temperature=0, max_tokens=512)
 CHAT_TIMEOUT_S = 120
+# The client runs the tools itself. The daemon only offers them to the model.
+TOOLS = [pb.Tool(name="get_current_time",
+                 description="Get the current local date and time on this computer.")]
+MAX_TOOL_ROUNDS = 4  # replies per turn, so a model that keeps calling tools cannot loop forever
 HELP = """
-Type a message to chat with the model.
+Type a message to chat with the model. Ask the time to see a tool call.
 /clear  Reset chat history.
 /help   Show this help.
 /quit   Exit (or press Ctrl+D).
@@ -72,7 +77,8 @@ def check_model(stub):
 
 def stream_reply(stub, messages):
     """Print the reply as it arrives. Return its text and the Finish chunk."""
-    stream = stub.Chat(pb.ChatRequest(messages=messages, sampling=SAMPLING), timeout=CHAT_TIMEOUT_S)
+    request = pb.ChatRequest(messages=messages, sampling=SAMPLING, tools=TOOLS)
+    stream = stub.Chat(request, timeout=CHAT_TIMEOUT_S)
     text, finish = [], None
     try:
         for chunk in stream:
@@ -85,10 +91,40 @@ def stream_reply(stub, messages):
         stream.cancel()
         raise
     finally:
-        print()
+        # A reply with only tool calls streams no text, so its tool lines can share this line.
+        if text or finish is None:
+            print()
     if finish is None:
         raise RuntimeError("the stream ended without a finish chunk")
     return "".join(text), finish
+
+
+def run_tool(call):
+    if call.name == "get_current_time":
+        # Models often cannot work out the weekday from a date, so the result gives it.
+        now = datetime.now().astimezone()
+        return f"{now:%A} {now.isoformat(timespec='seconds')}"
+    return f"error: unknown tool {call.name}"
+
+
+def chat_turn(stub, history, user):
+    """Answer one user message, running tool calls between replies.
+
+    Return the messages of the turn, or None if the model still calls tools after MAX_TOOL_ROUNDS.
+    """
+    turn = [user]
+    for _ in range(MAX_TOOL_ROUNDS):
+        print(paint("assistant> ", "1;34"), end="", flush=True)
+        text, finish = stream_reply(stub, history + turn)
+        turn.append(pb.ChatMessage(role="assistant", content=text, tool_calls=finish.tool_calls))
+        for call in finish.tool_calls:
+            result = run_tool(call)
+            print(paint(f"[tool {call.name}] {result}", "2"))
+            turn.append(pb.ChatMessage(role="tool", tool_call_id=call.id, content=result))
+        print(paint(stats_line(finish), "2"))
+        if finish.reason != pb.FINISH_REASON_TOOL_CALLS:
+            return turn
+    return None
 
 
 def stats_line(finish):
@@ -144,9 +180,8 @@ def main():
             continue
 
         user = pb.ChatMessage(role="user", content=line)
-        print(paint("assistant> ", "1;34"), end="", flush=True)
         try:
-            text, finish = stream_reply(stub, history + [user])
+            turn = chat_turn(stub, history, user)
         except KeyboardInterrupt:
             print(paint("[reply cancelled]", "2"))
             continue
@@ -155,8 +190,11 @@ def main():
             print("Use /clear if the conversation exceeds the model's context.")
             failed = True
             continue
-        print(paint(stats_line(finish), "2"))
-        history += [user, pb.ChatMessage(role="assistant", content=text)]
+        if turn is None:
+            # Drop the turn, so the history never ends on tool results without a reply.
+            print(paint(f"[still calling tools after {MAX_TOOL_ROUNDS} replies, turn dropped]", "2"))
+            continue
+        history += turn  # only a complete turn, so Ctrl+C or an error leaves the history clean
     print()
     return 1 if failed else 0
 

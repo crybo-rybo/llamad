@@ -39,5 +39,7 @@ reuses from its KV cache ([design.md](design.md)).
 Use `/clear` to reset the history, `/help` for the commands, and `/quit` or Ctrl+D to exit.
 Ctrl+C cancels a reply.
 
-The example shows only chat. For tool calls, typed replies and embeddings, refer to
-[protocol.md](protocol.md).
+The client offers one tool, `get_current_time`. When the model calls it, the client runs it and
+sends the result back. A dim line shows each call and its result. A turn can have at most four
+replies. Small models, such as the 0.5B model, often do not call the tool. For typed replies,
+embeddings and tool details, refer to [protocol.md](protocol.md).

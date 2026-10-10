@@ -101,7 +101,7 @@ For the commands and the stats line, refer to [docs/python-example.md](docs/pyth
 | Page | Contents |
 |---|---|
 | [docs/protocol.md](docs/protocol.md) | Integration: stubs, streams, tool calls, typed replies, embeddings, errors |
-| [docs/python-example.md](docs/python-example.md) | Python chat client: generated stubs, streamed replies and stats |
+| [docs/python-example.md](docs/python-example.md) | Python chat client: generated stubs, streamed replies, a tool call and stats |
 | [docs/building.md](docs/building.md) | Dependencies, platform notes, GPU builds, tests, smoke test |
 | [docs/daemon.md](docs/daemon.md) | Daemon flags, socket, signals, and `engine_smoke` |
 | [docs/design.md](docs/design.md) | Design notes: layers, stream shape, chat templates |
