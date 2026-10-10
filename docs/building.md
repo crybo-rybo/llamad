@@ -14,7 +14,7 @@ Ubuntu), CMake uses its own module.
 pacman -S gcc grpc protobuf cmake ninja     # Arch Linux
 apt install g++ cmake ninja-build libgrpc++-dev libprotobuf-dev \
     protobuf-compiler protobuf-compiler-grpc  # Debian and Ubuntu
-git clone --recurse-submodules git@github.com:crybo-rybo/llamad.git
+git clone --recurse-submodules https://github.com/crybo-rybo/llamad.git
 cd llamad
 ./scripts/build.sh cpu                      # builds into build-cpu/
 ./scripts/test.sh cpu                       # tests without a model
@@ -28,7 +28,7 @@ If you cloned the repository without submodules, use this command:
 ```sh
 xcode-select --install                      # Apple Clang, if Xcode is not installed
 brew install grpc protobuf cmake ninja
-git clone --recurse-submodules git@github.com:crybo-rybo/llamad.git
+git clone --recurse-submodules https://github.com/crybo-rybo/llamad.git
 cd llamad
 ./scripts/build.sh cpu
 ./scripts/test.sh cpu
@@ -36,6 +36,23 @@ cd llamad
 
 The llama.cpp build uses its usual Apple settings: Accelerate for BLAS, the native features of
 the CPU, and Metal in a `gpu` build.
+
+## Release archive
+
+Each GitHub release attaches `llamad-<version>.tar.gz`. This archive includes the source of the
+pinned llama.cpp commit. Thus, it needs no submodule step. Install the dependencies for your
+platform, as shown above. Then do these steps:
+
+```sh
+tar -xzf llamad-<version>.tar.gz
+cd llamad-<version>
+./scripts/build.sh cpu
+./scripts/test.sh cpu
+```
+
+The archive has no Git repository. Thus, the llama.cpp configure step shows a warning about its
+build info. You can ignore this warning. The "Source code" archives of GitHub do not include
+llama.cpp, so they do not build.
 
 ## Contents of the build
 
