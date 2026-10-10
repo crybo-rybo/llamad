@@ -92,8 +92,8 @@ jobs:
       - name: Run tests
         run: ctest --test-dir build --output-on-failure --no-tests=error
 
-  # The example shares only the proto with the daemon. This job fails when a proto change breaks
-  # its generated stubs or its imports. It needs no submodules and no build.
+  # The example shares only the proto with the daemon. This job fails when a proto change stops it
+  # compiling the proto or using its messages. It needs no submodules and no build.
   python-example:
     name: Python example
     runs-on: ubuntu-24.04
@@ -109,10 +109,5 @@ jobs:
           python3 -m venv .venv
           .venv/bin/pip install -r examples/python/requirements.txt
 
-      - name: Generate stubs
-        run: >-
-          .venv/bin/python -m grpc_tools.protoc -I proto --python_out=examples/python
-          --grpc_python_out=examples/python llamad/v1/llamad.proto
-
-      - name: Import the stubs
+      - name: Load the proto
         run: .venv/bin/python examples/python/chat.py --help

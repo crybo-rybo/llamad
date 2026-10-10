@@ -89,10 +89,11 @@ steps:
 ```sh
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r examples/python/requirements.txt
-python -m grpc_tools.protoc -I proto --python_out=examples/python \
-    --grpc_python_out=examples/python llamad/v1/llamad.proto
 python examples/python/chat.py
 ```
+
+The client compiles `llamad.proto` when it starts, so you do not generate stubs. With
+[uv](https://docs.astral.sh/uv/), `uv run examples/python/chat.py` does all of these steps.
 
 For the commands and the stats line, refer to [docs/python-example.md](docs/python-example.md).
 
@@ -101,7 +102,7 @@ For the commands and the stats line, refer to [docs/python-example.md](docs/pyth
 | Page | Contents |
 |---|---|
 | [docs/protocol.md](docs/protocol.md) | Integration: stubs, streams, tool calls, typed replies, embeddings, errors |
-| [docs/python-example.md](docs/python-example.md) | Python chat client: generated stubs, streamed replies, a tool call and stats |
+| [docs/python-example.md](docs/python-example.md) | Python chat client: proto loaded at start-up, streamed replies, a tool call and stats |
 | [docs/building.md](docs/building.md) | Dependencies, platform notes, GPU builds, tests, smoke test |
 | [docs/daemon.md](docs/daemon.md) | Daemon flags, socket, signals, and `engine_smoke` |
 | [docs/design.md](docs/design.md) | Design notes: layers, stream shape, chat templates |

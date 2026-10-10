@@ -1,24 +1,35 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.9"
+# dependencies = ["grpcio>=1.84", "grpcio-tools>=1.84"]
+# ///
 """A terminal chat client for llamad. It shares only llamad.proto with the daemon.
 
-Set it up from the repository root:
+Run it from a llamad checkout, with pip:
 
     pip install -r examples/python/requirements.txt
-    python -m grpc_tools.protoc -I proto --python_out=examples/python \\
-        --grpc_python_out=examples/python llamad/v1/llamad.proto
+    python examples/python/chat.py
+
+or with uv, which reads the dependencies above:
+
+    uv run examples/python/chat.py
 """
 
 import argparse
 import os
 import sys
 from datetime import datetime
+from pathlib import Path
 
 import grpc
 
+# Compile llamad.proto at start-up, so there are no generated stubs to keep in step with it.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "proto"))
 try:
-    from llamad.v1 import llamad_pb2 as pb, llamad_pb2_grpc as rpc
-except ModuleNotFoundError:
-    sys.exit("error: generate the llamad.v1 stubs first, as the top of chat.py shows.")
+    pb, rpc = grpc.protos_and_services("llamad/v1/llamad.proto")
+except (ImportError, NotImplementedError) as error:
+    sys.exit(f"error: cannot load llamad.proto ({error}). Install the requirements, "
+             "and run chat.py from a llamad checkout.")
 
 try:
     import readline  # line editing and input history for input()

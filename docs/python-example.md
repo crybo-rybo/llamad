@@ -1,7 +1,9 @@
 # Python example
 
 `examples/python/chat.py` is a small terminal chat client. It shares only `llamad.proto` with
-the daemon, and it uses stubs that `grpc_tools.protoc` generates. There is no client library.
+the daemon. There is no client library and there are no generated stubs. When the client starts,
+`grpcio-tools` compiles `proto/llamad/v1/llamad.proto` from the checkout. Thus the client always
+agrees with the current proto.
 
 ## Start the example
 
@@ -12,13 +14,11 @@ the daemon, and it uses stubs that `grpc_tools.protoc` generates. There is no cl
    ./build-cpu/llamad --model models/qwen2.5-0.5b-instruct-q4_k_m.gguf --ctx 4096
    ```
 
-2. In another terminal, install the requirements and generate the stubs:
+2. In another terminal, install the requirements with pip:
 
    ```sh
    python3 -m venv .venv && . .venv/bin/activate
    pip install -r examples/python/requirements.txt
-   python -m grpc_tools.protoc -I proto --python_out=examples/python \
-       --grpc_python_out=examples/python llamad/v1/llamad.proto
    ```
 
 3. Start the client:
@@ -27,8 +27,11 @@ the daemon, and it uses stubs that `grpc_tools.protoc` generates. There is no cl
    python examples/python/chat.py
    ```
 
-Git ignores the generated stubs in `examples/python/llamad/`. If the proto changes, generate them
-again. For a different socket, give the daemon and the client the same `--socket PATH`.
+If you use [uv](https://docs.astral.sh/uv/), you can skip step 2. Start the client with
+`uv run examples/python/chat.py`. uv reads the dependencies from the top of `chat.py`.
+
+Run the client from a llamad checkout, because it reads the proto from the `proto/` directory.
+For a different socket, give the daemon and the client the same `--socket PATH`.
 
 ## Use the client
 

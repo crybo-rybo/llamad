@@ -3,4 +3,3 @@ models/
 compile_commands.json
 .cache/
 .venv/
-examples/python/llamad/
