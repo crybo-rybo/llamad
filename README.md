@@ -94,7 +94,7 @@ python -m grpc_tools.protoc -I proto --python_out=examples/python \
 python examples/python/chat.py
 ```
 
-For the commands and the stats, refer to [docs/python-example.md](docs/python-example.md).
+For a sample session and the commands, refer to [docs/python-example.md](docs/python-example.md).
 
 ## Documentation
 
