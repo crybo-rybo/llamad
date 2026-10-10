@@ -30,20 +30,11 @@ the daemon, and it uses stubs that `grpc_tools.protoc` generates. There is no cl
 Git ignores the generated stubs in `examples/python/llamad/`. If the proto changes, generate them
 again. For a different socket, give the daemon and the client the same `--socket PATH`.
 
-## Sample session
+## Use the client
 
-```text
-you> Hi, my name is Sam. I like sailing.
-assistant> Hello Sam! I'm glad to meet you. What kind of sailing do you like to do?
-[finish EOG | prompt 32 (cached 0) | output 29 | prefill 53.6 ms | decode 123.5 tok/s]
-you> What is my name and what do I like?
-assistant> Your name is Sam, and you like sailing.
-[finish EOG | prompt 81 (cached 61) | output 10 | prefill 54.5 ms | decode 127.8 tok/s]
-```
-
-The daemon keeps no conversation, so the client sends the full history with each message.
-The `cached` count shows the part of that prompt that the daemon reuses from its KV cache
-([design.md](design.md)).
+Each reply ends with a stats line. The client sends the full history with each message, because
+the daemon keeps no conversation. The `cached` count is the part of that prompt that the daemon
+reuses from its KV cache ([design.md](design.md)).
 
 Use `/clear` to reset the history, `/help` for the commands, and `/quit` or Ctrl+D to exit.
 Ctrl+C cancels a reply.
