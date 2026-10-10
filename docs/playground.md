@@ -28,71 +28,31 @@ For a different socket, give both programs the same `--socket PATH`.
 The default socket matches the daemon. Use `--help` for details.
 For a GPU build, use `gpu` and `build-gpu` instead of `cpu` and `build-cpu`.
 
-## Try the tools
+## Read a reply
 
-Enter these prompts:
+Type a message to chat with the model. Text appears as the daemon sends it.
+At the end of each stream, the client shows the finish reason and these stats:
 
-```text
-What time is it?
-Roll two six-sided dice for my goblin's attack.
-Flip a coin to decide whether we enter the haunted cave.
-Get the time and roll one twenty-sided die.
-```
-
-The client supplies three tools with each chat request:
-
-| Tool | Arguments | Result |
-|---|---|---|
-| `get_time` | None | Local time with a UTC offset, and UTC time |
-| `roll_dice` | `count`: 1–10, `sides`: 2–100 | Each random roll and their total |
-| `flip_coin` | None | Random `heads` or `tails` |
-
-The daemon constrains tool arguments with JSON schemas. Tool choice depends on the model.
-A larger tool-capable model can give better results than the small smoke-test model.
-
-Text appears as the daemon sends it. At the end of each stream, the client shows the finish reason and stats.
-Stats include prompt tokens, cached prompt tokens, output tokens, prefill time and decode speed.
-Decode speed includes stream time. It is not a benchmark.
-
-For each complete tool call, the client prints the name, arguments and result.
-The client executes the tool, then sends its result with the call ID and the full history.
-The daemon never executes tools. Tool errors return as JSON so the model can respond to them.
-The client permits at most four tool rounds per user prompt.
+- Prompt tokens.
+- Cached prompt tokens. The client sends the full history again with each message. Thus, from
+  the second message, this count shows how many prompt tokens the daemon reuses from its KV
+  cache. Refer to [design.md](design.md) for the stateless design and the cache.
+- Output tokens.
+- Prefill time.
+- Decode speed. This value includes stream time. It is not a benchmark.
 
 ## Commands
 
 | Command | Action |
 |---|---|
-| `/help` | Show commands and example prompts |
+| `/help` | Show the commands |
 | `/clear` | Reset the client's chat history |
-| `/json PROMPT` | Generate a quest object with `title`, `objective` and `reward` |
 | `/quit` or Ctrl+D | Exit |
 
-JSON requests use `response_json_schema` without tools. Each JSON request is separate from the chat history.
-For example:
-
-```text
-/json Invent a tiny quest about a dragon who lost its glasses.
-```
-
-The client shows the reply as it streams, and then reads the reply as data.
-After the stats, it prints the three fields on `[quest]` lines:
-
-```text
-[quest] Lost Glasses Quest
-  objective: Find the missing glasses of the dragon and restore its vision.
-  reward:    A magical potion that restores the dragon's sight.
-```
-
-A `/json` request has a different system prompt. Thus, the next chat request shows few cached prompt tokens.
-The daemon keeps one KV cache, and it reuses only the prompt prefix that two requests share.
-Refer to [design.md](design.md) for the stateless design and the cache.
-
-The client uses temperature zero and a limit of 512 output tokens per stream.
+The client uses temperature zero and a limit of 512 output tokens for each reply.
 Each chat RPC has a two-minute deadline. Ctrl+C exits the client and disconnects its stream.
 For a conversation that exceeds the model's context, use `/clear`.
-If a request fails, the client preserves the history from before that user prompt.
-The client returns a nonzero exit code if an RPC fails or a reply is incomplete in JSON mode.
+If a request fails, the client keeps the history from before that message.
+The client returns a nonzero exit code if an RPC fails.
 
-The playground demonstrates chat, tool calls, structured replies and cache stats.
-An embedding model cannot serve chat. See [protocol.md](protocol.md) for the `Embed` RPC and other capabilities.
+The playground shows only chat. For tool calls, typed replies (`response_json_schema`) and embeddings, refer to [protocol.md](protocol.md).
