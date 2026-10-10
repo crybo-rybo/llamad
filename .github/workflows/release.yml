@@ -1,0 +1,119 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  archive:
+    name: Source archive
+    runs-on: ubuntu-24.04
+    # The same image as the GCC job in ci.yml, so the archive builds where CI builds.
+    container: mirror.gcr.io/library/archlinux:base-devel
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Git must be available before checkout to fetch the llama.cpp submodule.
+      - name: Install dependencies
+        run: pacman -Syu --noconfirm --needed git cmake ninja grpc protobuf gcc
+
+      - name: Check out source and submodules
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      # The container runs as root, and the workspace has a different owner. Git refuses such a
+      # repository unless it is marked safe, and scripts/dist.sh runs git in two of them.
+      - name: Mark the checkout safe for git
+        run: git config --global --add safe.directory '*'
+
+      # CMakeLists.txt holds the version. A tag that does not match it would name the release wrong.
+      - name: Check the tag against the version
+        run: |
+          version=$(sed -n 's/^project(llamad VERSION \([0-9][0-9.]*\).*/\1/p' CMakeLists.txt)
+          if [[ "${GITHUB_REF_NAME#v}" != "$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version '$version' in CMakeLists.txt"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "SOURCE=$RUNNER_TEMP/llamad-$version" >> "$GITHUB_ENV"
+
+      - name: Make the source archive
+        run: ./scripts/dist.sh dist
+
+      # Build and test the extracted archive, not the checkout: a file that the archive misses
+      # fails the build here, and not on the machine of a user.
+      - name: Extract the archive
+        run: tar -x -z -f "dist/llamad-$VERSION.tar.gz" -C "$RUNNER_TEMP"
+
+      - name: Configure
+        run: >-
+          cmake -S "$SOURCE" -B "$SOURCE/build" -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DLLAMAD_WARNINGS_AS_ERRORS=ON
+          -DGGML_NATIVE=OFF
+          -DGGML_VULKAN=OFF
+          -DGGML_CUDA=OFF
+
+      - name: Build
+        run: cmake --build "$SOURCE/build" --parallel 4
+
+      - name: Run tests
+        run: ctest --test-dir "$SOURCE/build" --output-on-failure --no-tests=error
+
+      - name: Check the version of the build
+        run: |
+          actual=$("$SOURCE/build/llamad" --version)
+          if [[ "$actual" != "llamad $VERSION" ]]; then
+            echo "::error::llamad --version printed '$actual', expected 'llamad $VERSION'"
+            exit 1
+          fi
+
+      # Callers generate stubs from the proto of the version that they run.
+      - name: Add the proto and checksums
+        run: |
+          cp proto/llamad/v1/llamad.proto dist/
+          cd dist
+          sha256sum "llamad-$VERSION.tar.gz" llamad.proto > SHA256SUMS
+
+      - name: Upload the release files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Draft release
+    needs: archive
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Only this job writes to the repository, and it runs no code from the checkout.
+    permissions:
+      contents: write
+    steps:
+      - name: Download the release files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release
+          path: dist
+
+      # A draft is visible only to maintainers. The maintainer edits the generated notes and
+      # publishes the release by hand.
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          --repo "$GITHUB_REPOSITORY"
+          --draft
+          --verify-tag
+          --title "llamad ${GITHUB_REF_NAME#v}"
+          --generate-notes
+          "dist/llamad-${GITHUB_REF_NAME#v}.tar.gz" dist/llamad.proto dist/SHA256SUMS

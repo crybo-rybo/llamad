@@ -2,7 +2,7 @@
 
 llamad is a small C++23 daemon that serves one llama.cpp model through gRPC on a Unix socket.
 The proto is the product and the integration surface. There is no client library.
-The project is pre-release. Breaking changes are welcome when they improve the design.
+The project is at version 0.x. Breaking changes are welcome when they improve the design.
 Explain their benefit and effect on callers.
 
 ## Repository map
@@ -71,3 +71,14 @@ Use `gpu` for Vulkan on Linux or Metal on macOS. See `docs/building.md` and `doc
 
 Work on a branch. Commit and push only when the user asks.
 Keep commits coherent and independently buildable. Use `Area: what changed` subjects and explain the reason in the body.
+
+## Release
+
+`project()` in `CMakeLists.txt` holds the version. CMake gives it to `llamad --version`, and `scripts/dist.sh` reads it.
+Before 1.0.0, increase the minor version for an incompatible change to the proto or the flags.
+Increase the patch version for all other changes.
+
+1. Set the version in `project()` on a branch. Merge the branch.
+2. Tag the merge commit on `main` as `v<version>`. Push the tag.
+3. The Release workflow makes the archive with `scripts/dist.sh`. It builds and tests the archive, and makes a draft GitHub release.
+4. Edit the notes of the draft. Then publish it.

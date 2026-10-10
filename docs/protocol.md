@@ -12,9 +12,10 @@ To use the daemon, do these steps:
 
 ## Connect to the daemon
 
-Copy `llamad.proto` into your project. As an alternative, add this repository as a pinned
-submodule, and give its `proto/` directory to `protoc`. Then generate the code as for all other
-gRPC services:
+Use the `llamad.proto` of the llamad version that you run. Each GitHub release attaches this
+file. Copy it into your project. As an alternative, add this repository as a pinned submodule,
+and give its `proto/` directory to `protoc`. Then generate the code as for all other gRPC
+services:
 
 ```sh
 # C++

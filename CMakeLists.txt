@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(llamad LANGUAGES C CXX)
+project(llamad VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -63,6 +63,8 @@ target_link_libraries(llamad_service PUBLIC llamad_engine llamad_chat llamad_pro
 
 add_executable(llamad src/main.cpp)
 target_link_libraries(llamad PRIVATE llamad_service gRPC::grpc++_reflection llamad_options)
+# project() holds the one copy of the version; --version and scripts/dist.sh read it from there.
+target_compile_definitions(llamad PRIVATE LLAMAD_VERSION="${PROJECT_VERSION}")
 
 enable_testing()
 add_subdirectory(tests)

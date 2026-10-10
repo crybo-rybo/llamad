@@ -15,9 +15,11 @@
 | `--devices NAMES` | all discrete GPUs | A comma-separated list of offload devices, for example `Vulkan0` or `MTL0` |
 | `--tensor-split S` | by free memory | A comma-separated list with the share of each device, for example `3,1` |
 | `--list-devices` | | Show the devices that this build can offload to, then exit |
+| `--version` | | Show the version of llamad on stdout, then exit |
 
 The daemon creates the socket with mode 0600. Thus, only your user can connect to it. The daemon
-writes one `[llamad] ...` log line for each request to stderr. It writes nothing to stdout.
+writes one `[llamad] ...` log line for each request to stderr. While it runs, it writes nothing to
+stdout.
 
 SIGINT or SIGTERM stops the daemon and removes the socket. If a script starts the daemon in the
 background, the daemon inherits SIGINT as ignored. macOS discards a signal that is both ignored

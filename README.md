@@ -38,11 +38,14 @@ brew install grpc protobuf cmake ninja      # macOS, with the Xcode command line
 ## Build
 
 ```sh
-git clone --recurse-submodules git@github.com:crybo-rybo/llamad.git
+git clone --recurse-submodules https://github.com/crybo-rybo/llamad.git
 cd llamad
 ./scripts/build.sh cpu                      # builds into build-cpu/ (gpu for Vulkan or Metal)
 ./scripts/test.sh cpu                       # a model is not necessary
 ```
+
+Each GitHub release attaches `llamad-<version>.tar.gz`, which includes llama.cpp. The "Source
+code" archives of GitHub do not include llama.cpp. Thus, they do not build.
 
 For GPU builds, multi-GPU selection and the smoke test, refer to
 [docs/building.md](docs/building.md). The smoke test must have a model.
@@ -96,6 +99,16 @@ The client compiles `llamad.proto` when it starts, so you do not generate stubs.
 [uv](https://docs.astral.sh/uv/), `uv run examples/python/chat.py` does all of these steps.
 
 For the commands and the stats line, refer to [docs/python-example.md](docs/python-example.md).
+
+## Versions
+
+llamad uses [semantic versioning](https://semver.org). `llamad --version` shows the version.
+
+- Each release pins one llama.cpp commit.
+- Before 1.0.0, a minor release (0.x.0) can change the proto and the flags in ways that are not
+  compatible. A patch release (0.x.y) does not.
+- Each release attaches the `llamad.proto` of its version. Generate stubs from the proto of the
+  version that you run.
 
 ## Documentation
 

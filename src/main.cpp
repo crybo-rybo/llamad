@@ -41,7 +41,8 @@ namespace {
 struct Options {
     std::string                model;   ///< GGUF model to load (required).
     std::optional<std::string> socket;  ///< Unix socket path; unset uses the per-user default.
-    bool                       help = false;  ///< Print usage and exit.
+    bool                       help = false;     ///< Print usage and exit.
+    bool                       version = false;  ///< Print the version and exit.
 };
 
 /// Print usage and every flag to stderr.
@@ -53,7 +54,8 @@ void print_usage(const char * argv0) {
                  "  --socket PATH       unix socket to listen on\n"
                  "                      (default: $XDG_RUNTIME_DIR/llamad.sock, else /tmp/llamad-<uid>.sock)\n"
                  "%s"
-                 "  --help              show this message\n",
+                 "  --help              show this message\n"
+                 "  --version           show the version, and exit\n",
                  argv0, llamad::kEngineFlagsHelp);
 }
 
@@ -66,6 +68,8 @@ void parse_command_line(int argc, char ** argv, Options & options, llamad::Engin
             options.socket = args.value();
         } else if (args.is("--help")) {
             options.help = true;
+        } else if (args.is("--version")) {
+            options.version = true;
         } else if (!llamad::parse_engine_flag(args, engine_flags)) {
             throw args.unknown();
         }
@@ -150,6 +154,10 @@ int main(int argc, char ** argv) {
         parse_command_line(argc, argv, options, engine_flags);
         if (options.help) {
             print_usage(argv[0]);
+            return 0;
+        }
+        if (options.version) {
+            std::fputs("llamad " LLAMAD_VERSION "\n", stdout);
             return 0;
         }
         config = llamad::to_config(engine_flags);
