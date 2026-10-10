@@ -7,10 +7,6 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(LLAMAD_WARNINGS_AS_ERRORS "Fail the build on a warning in llamad's own sources" OFF)
-option(LLAMAD_BUILD_DOCS "Enable the Doxygen documentation target" OFF)
-if(LLAMAD_BUILD_DOCS)
-    add_subdirectory(docs)
-endif()
 
 # llama.cpp: libllama + ggml, plus `common` (the Jinja chat templates, PEG chat parsers and
 # schema->grammar converter), which only the chat layer uses. None of its tools/server.
