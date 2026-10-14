@@ -34,10 +34,9 @@ trap 'rm -f -- "$log"' EXIT
 "$root/build-$mode/tests/engine_smoke" "$model" --ngl "$ngl" \
     --chat --temp 0 --max-tokens 32 "Count from one to three." 2>&1 | tee "$log"
 
-# Offload devices are named after their backend: Vulkan0 on Linux, MTL0 on macOS.
-if [[ $(uname -s) == Darwin ]]; then backend=MTL; else backend=Vulkan; fi
-if [[ "$mode" == gpu ]] && ! grep -Eq "^\[llamad\] device ${backend}[0-9]+:" "$log"; then
-    echo "FAIL: inference did not report $backend GPU offload." >&2
+# Offload devices are named after their backend: CUDA0 or Vulkan0 on Linux, MTL0 on macOS.
+if [[ "$mode" == gpu ]] && ! grep -Eq '^\[llamad\] device (CUDA|Vulkan|MTL)[0-9]+:' "$log"; then
+    echo "FAIL: inference did not report offload to a CUDA, Vulkan or Metal (MTL) device." >&2
     exit 1
 fi
 if ! grep -Eq 'finish: (Eog|Length) .*completion_tokens: [1-9][0-9]* ' "$log"; then
