@@ -22,8 +22,8 @@ The contract gives these guarantees in all languages:
 - **Local only.** The daemon creates a Unix socket with mode 0600. It does not open a TCP
   listener.
 
-llama.cpp is a pinned submodule that is not modified. Its CPU, Vulkan (Linux) and Metal (macOS)
-backends are available.
+llama.cpp is a pinned submodule that is not modified. Its CPU, CUDA and Vulkan (Linux) and Metal
+(macOS) backends are available.
 
 ## Requirements
 
@@ -40,7 +40,7 @@ brew install grpc protobuf cmake ninja      # macOS, with the Xcode command line
 ```sh
 git clone --recurse-submodules https://github.com/crybo-rybo/llamad.git
 cd llamad
-./scripts/build.sh cpu                      # builds into build-cpu/ (gpu for Vulkan or Metal)
+./scripts/build.sh cpu                      # builds into build-cpu/ (gpu for CUDA, Vulkan or Metal)
 ./scripts/test.sh cpu                       # a model is not necessary
 ```
 
