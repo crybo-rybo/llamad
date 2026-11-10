@@ -19,7 +19,8 @@
 
 The daemon creates the socket with mode 0600. Thus, only your user can connect to it. The daemon
 writes one `[llamad] ...` log line for each request to stderr. While it runs, it writes nothing to
-stdout.
+stdout. At start-up, the log shows the llamad version, the model path, and the name and
+description of the model.
 
 Each request line starts with the name of the call and the request id: `[llamad] <call> id=<id>`.
 The daemon sends the same id to the client in the `x-request-id` metadata

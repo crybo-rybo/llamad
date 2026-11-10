@@ -159,7 +159,7 @@ grpc::Status LlamaService::GetModelInfo(grpc::ServerContext * context,
                                         const v1::GetModelInfoRequest *,
                                         v1::ModelInfo * response) {
     return guarded(context, "GetModelInfo", [&](RequestLog & log) {
-        wire::to_proto(engine_.info(), response);
+        wire::to_proto(engine_.info(), daemon_, response);
         log.line();
         return grpc::Status::OK;
     });

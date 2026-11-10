@@ -170,7 +170,8 @@ def main():
         print(paint("error> ", "1;31") + describe(error))
         print("Start llamad with a chat model and check --socket.")
         return 1
-    print(paint(f"llamad | {info.description} | context {info.n_ctx} tokens", "1"))
+    model = info.model_name or info.model_file
+    print(paint(f"llamad {info.llamad_version} | {model} ({info.description}) | context {info.n_ctx} tokens", "1"))
     print(HELP)
 
     history = [SYSTEM]  # The daemon keeps no conversation, so the client sends all of it each turn.

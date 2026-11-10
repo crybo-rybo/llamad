@@ -60,6 +60,11 @@ grpcurl -plaintext -d '{"messages": [{"role": "user", "content": "Name three pri
     unix:///run/user/1000/llamad.sock llamad.v1.Llama/Chat
 ```
 
+`GetModelInfo` identifies the daemon and the model that answer. `llamad_version` is the version
+of the daemon. `model_file` is the file name of the GGUF, without its directory. `model_name` is
+the `general.name` metadata of the GGUF. It is empty if the GGUF does not have this metadata.
+Record these values with your logs or benchmark results.
+
 ## Streams
 
 `Generate` and `Chat` send a stream of `GenerateChunk` messages. Each chunk is one of these three

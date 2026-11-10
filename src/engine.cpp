@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <ranges>
 #include <string>
@@ -622,6 +623,8 @@ struct Engine::Impl {
     llama_context *     ctx   = nullptr;  ///< Owned generation context.
     const llama_vocab * vocab = nullptr;  ///< Vocabulary borrowed from model.
 
+    std::string model_file;  ///< File name of the loaded GGUF; the directory can be private, so it is not kept.
+
     uint32_t n_ctx     = 0;  ///< context size actually in use
     uint32_t n_ctx_seq = 0;  ///< per-sequence capacity (what a single generation may use)
     uint32_t n_batch   = 0;  ///< largest batch llama_decode accepts
@@ -864,6 +867,10 @@ Engine::Engine(const EngineConfig & config) : impl_(new Impl()) {
                           "offload devices; see the errors above)");
     }
 
+    // A path that names a directory, such as "models/", has an empty file name. It cannot load,
+    // so it never reaches here.
+    impl_->model_file = std::filesystem::path(config.model_path).filename().string();
+
     impl_->vocab = llama_model_get_vocab(impl_->model);
     if (impl_->vocab == nullptr) {
         throw EngineError("model '" + config.model_path + "' has no vocabulary");
@@ -957,21 +964,38 @@ Engine::Engine(const EngineConfig & config) : impl_(new Impl()) {
 
 Engine::~Engine() = default;
 
+namespace {
+
+/// A string from a llama.cpp getter with snprintf's contract: it returns the length the whole
+/// string needs, or a negative value when there is none, which reads as empty. A string too long
+/// for the first buffer is read again into one of the length it reported.
+template <typename Write>
+std::string llama_string(Write && write) {
+    char          buf[256];
+    const int32_t n = write(buf, sizeof(buf));
+    if (n < 0) {
+        return {};
+    }
+    if (static_cast<size_t>(n) < sizeof(buf)) {
+        return std::string(buf, static_cast<size_t>(n));
+    }
+    std::vector<char> big(static_cast<size_t>(n) + 1);
+    const int32_t     n2 = write(big.data(), big.size());
+    if (n2 < 0) {
+        return {};
+    }
+    return std::string(big.data(), std::min(static_cast<size_t>(n2), big.size() - 1));
+}
+
+}  // namespace
+
 ModelInfo Engine::info() const {
     ModelInfo out;
 
-    char          buf[256];
-    const int32_t n = llama_model_desc(impl_->model, buf, sizeof(buf));
-    if (n >= 0 && static_cast<size_t>(n) < sizeof(buf)) {
-        out.description = std::string(buf, static_cast<size_t>(n));
-    } else if (n > 0) {
-        // Truncated: llama_model_desc uses snprintf, so n is the length needed.
-        std::vector<char> big(static_cast<size_t>(n) + 1);
-        const int32_t     n2 = llama_model_desc(impl_->model, big.data(), big.size());
-        if (n2 > 0) {
-            out.description = std::string(big.data(), std::min<size_t>(static_cast<size_t>(n2), big.size() - 1));
-        }
-    }
+    out.description = llama_string([&](char * buf, size_t size) { return llama_model_desc(impl_->model, buf, size); });
+    out.name        = llama_string(
+        [&](char * buf, size_t size) { return llama_model_meta_val_str(impl_->model, "general.name", buf, size); });
+    out.file        = impl_->model_file;
 
     out.n_params          = llama_model_n_params(impl_->model);
     out.size_bytes        = llama_model_size(impl_->model);

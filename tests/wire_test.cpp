@@ -59,8 +59,11 @@ void test_field_coverage() {
     check_fields<v1::ChatMessage>({"role", "content", "tool_calls", "tool_call_id"});
     check_fields<v1::Tool>({"name", "description", "parameters_json_schema"});
     check_fields<v1::ToolCall>({"id", "name", "arguments_json"});
-    check_fields<v1::ModelInfo>({"description", "n_params", "size_bytes", "n_ctx", "n_ctx_train",
-                                 "has_chat_template", "n_embd", "serves_embeddings"});
+    // The model's fields come from the engine's ModelInfo; llamad_version from the daemon's
+    // DaemonInfo.
+    check_fields<v1::ModelInfo>({"description", "model_name", "model_file", "n_params", "size_bytes", "n_ctx",
+                                 "n_ctx_train", "has_chat_template", "n_embd", "serves_embeddings",
+                                 "llamad_version"});
     check_fields<v1::GenerateStats>(
         {"prompt_tokens", "completion_tokens", "prompt_ms", "completion_ms", "cached_prompt_tokens"});
     check_fields<v1::Finish>({"reason", "stats", "tool_calls"});
@@ -183,6 +186,8 @@ void test_tool() {
 void test_model_info() {
     llamad::ModelInfo info;
     info.description       = "qwen2 0.5B Q4_K - Medium";
+    info.name              = "Qwen2.5 0.5B Instruct";
+    info.file              = "qwen2.5-0.5b-instruct-q4_k_m.gguf";
     info.n_params          = 494032768;
     info.size_bytes        = 397808192;
     info.n_ctx             = 4096;
@@ -191,9 +196,14 @@ void test_model_info() {
     info.n_embd            = 896;
     info.serves_embeddings = true;
 
+    const wire::DaemonInfo daemon{"0.1.0"};
+
     v1::ModelInfo out;
-    wire::to_proto(info, &out);
+    wire::to_proto(info, daemon, &out);
     CHECK_EQ(out.description(), "qwen2 0.5B Q4_K - Medium");
+    CHECK_EQ(out.model_name(), "Qwen2.5 0.5B Instruct");
+    CHECK_EQ(out.model_file(), "qwen2.5-0.5b-instruct-q4_k_m.gguf");
+    CHECK_EQ(out.llamad_version(), "0.1.0");
     CHECK(out.n_params() == 494032768u);
     CHECK(out.size_bytes() == 397808192u);
     CHECK(out.n_ctx() == 4096u);

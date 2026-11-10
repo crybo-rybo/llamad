@@ -49,6 +49,8 @@ struct DeviceInfo {
 /// Metadata for the loaded model and its configured context.
 struct ModelInfo {
     std::string description;                ///< Human-readable model architecture and quantization description.
+    std::string name;                       ///< The GGUF's general.name metadata; empty when the file has none.
+    std::string file;                       ///< File name of the loaded GGUF, without its directory.
     uint64_t    n_params          = 0;      ///< Number of model parameters.
     uint64_t    size_bytes        = 0;      ///< Size of model tensors in bytes.
     uint32_t    n_ctx             = 0;      ///< Actual context capacity configured by the daemon, in tokens.

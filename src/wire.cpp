@@ -108,8 +108,10 @@ ToolCall from_proto(const v1::ToolCall & call) {
     return {call.id(), call.name(), call.arguments_json()};
 }
 
-void to_proto(const ModelInfo & info, v1::ModelInfo * out) {
+void to_proto(const ModelInfo & info, const DaemonInfo & daemon, v1::ModelInfo * out) {
     out->set_description(info.description);
+    out->set_model_name(info.name);
+    out->set_model_file(info.file);
     out->set_n_params(info.n_params);
     out->set_size_bytes(info.size_bytes);
     out->set_n_ctx(info.n_ctx);
@@ -117,6 +119,7 @@ void to_proto(const ModelInfo & info, v1::ModelInfo * out) {
     out->set_has_chat_template(info.has_chat_template);
     out->set_n_embd(info.n_embd);
     out->set_serves_embeddings(info.serves_embeddings);
+    out->set_llamad_version(daemon.version);
 }
 
 void to_proto(const EmbedResult & result, v1::EmbedResponse * out) {

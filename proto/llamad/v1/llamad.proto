@@ -77,6 +77,9 @@ message ModelInfo {
   bool has_chat_template = 6;  // the model stores a template; Chat also needs it to parse
   uint32 n_embd = 7;           // length of every Embed vector; 0 unless serves_embeddings
   bool serves_embeddings = 8;  // an embedding model: Embed is served, Generate and Chat are not
+  string model_name = 9;       // the GGUF's general.name metadata; empty when the file has none
+  string model_file = 10;      // file name of the loaded GGUF, without its directory
+  string llamad_version = 11;  // the daemon's version, e.g. "0.1.0"; `llamad --version` prints it too
 }
 
 message TokenizeRequest {

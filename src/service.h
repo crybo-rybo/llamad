@@ -16,6 +16,7 @@
 #include "chat_format.h"
 #include "engine.h"
 #include "llamad/v1/llamad.grpc.pb.h"
+#include "wire.h"
 
 namespace llamad {
 
@@ -29,14 +30,16 @@ public:
     /// `chat_format` may be null: a model whose template is missing or unparsable still serves
     /// Generate, Tokenize and GetModelInfo, and Chat fails with FAILED_PRECONDITION and
     /// `chat_unavailable_reason`. An embedding model serves Embed instead of Generate and Chat.
-    /// Both `engine` and `chat_format` must outlive the service.
-    LlamaService(Engine & engine, const ChatFormat * chat_format,
+    /// Both `engine` and `chat_format` must outlive the service. `daemon` is what GetModelInfo
+    /// reports about the daemon beside the model.
+    LlamaService(Engine & engine, wire::DaemonInfo daemon, const ChatFormat * chat_format,
                  std::string chat_unavailable_reason = "the model has no built-in chat template")
         : engine_(engine),
+          daemon_(std::move(daemon)),
           chat_format_(chat_format),
           chat_unavailable_reason_(std::move(chat_unavailable_reason)) {}
 
-    /// Return model metadata without applying a template.
+    /// Return model and daemon metadata without applying a template.
     grpc::Status GetModelInfo(grpc::ServerContext * context,
                               const v1::GetModelInfoRequest * request,
                               v1::ModelInfo * response) override;
@@ -85,9 +88,10 @@ private:
                                    grpc::ServerWriter<v1::GenerateChunk> * writer,
                                    ChatFormat::Stream * stream);
 
-    Engine &           engine_;                   ///< Borrowed engine; outlives the service.
-    const ChatFormat * chat_format_;              ///< Borrowed immutable formatter, or null when Chat is unavailable.
-    const std::string  chat_unavailable_reason_;  ///< Diagnostic returned with FAILED_PRECONDITION.
+    Engine &               engine_;                   ///< Borrowed engine; outlives the service.
+    const wire::DaemonInfo daemon_;                   ///< Version GetModelInfo reports.
+    const ChatFormat *     chat_format_;              ///< Borrowed immutable formatter, or null when Chat is unavailable.
+    const std::string      chat_unavailable_reason_;  ///< Diagnostic returned with FAILED_PRECONDITION.
 };
 
 }  // namespace llamad

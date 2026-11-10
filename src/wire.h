@@ -12,9 +12,15 @@
 #include "engine.h"
 #include "llamad/v1/llamad.pb.h"
 
+#include <string>
 #include <vector>
 
 namespace llamad::wire {
+
+/// What GetModelInfo reports about the daemon itself, beside the model. main.cpp fills it.
+struct DaemonInfo {
+    std::string version;  ///< As `llamad --version` prints it, without the program name.
+};
 
 /// Engine sampling parameters, with the engine's defaults wherever the request left a field unset.
 SamplingParams from_proto(const v1::SamplingParams & params);
@@ -32,8 +38,8 @@ Tool from_proto(const v1::Tool & tool);
 /// One tool call replayed from history.
 ToolCall from_proto(const v1::ToolCall & call);
 
-/// Model metadata.
-void to_proto(const ModelInfo & info, v1::ModelInfo * out);
+/// Model metadata, and the daemon facts that GetModelInfo sends with it.
+void to_proto(const ModelInfo & info, const DaemonInfo & daemon, v1::ModelInfo * out);
 
 /// The vectors of one Embed request.
 void to_proto(const EmbedResult & result, v1::EmbedResponse * out);

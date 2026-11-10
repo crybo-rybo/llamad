@@ -34,6 +34,7 @@
 #include "engine_flags.h"
 #include "flags.h"
 #include "service.h"
+#include "wire.h"
 
 namespace {
 
@@ -202,6 +203,7 @@ int main(int argc, char ** argv) {
     // that can generate, never one waiting on a half-ready daemon.
     std::unique_ptr<llamad::Engine> engine;
     try {
+        std::fprintf(stderr, "[llamad] version %s\n", LLAMAD_VERSION);
         std::fprintf(stderr, "[llamad] loading %s ...\n", config.model_path.c_str());
         engine = std::make_unique<llamad::Engine>(config);
     } catch (const std::exception & e) {
@@ -237,7 +239,8 @@ int main(int argc, char ** argv) {
         }
     }
 
-    llamad::LlamaService service(*engine, chat_format.get(), chat_unavailable_reason);
+    const llamad::wire::DaemonInfo daemon{LLAMAD_VERSION};
+    llamad::LlamaService service(*engine, daemon, chat_format.get(), chat_unavailable_reason);
 
     grpc::EnableDefaultHealthCheckService(true);
     grpc::reflection::InitProtoReflectionServerBuilderPlugin();
@@ -270,7 +273,9 @@ int main(int argc, char ** argv) {
         server->Shutdown(std::chrono::system_clock::now() + std::chrono::milliseconds(500));
     });
 
-    std::fprintf(stderr, "[llamad] model: %s (n_ctx=%u)\n", info.description.c_str(), info.n_ctx);
+    // The name is quoted, so a reader can tell it from the description; a GGUF without one shows none.
+    const std::string name = info.name.empty() ? "" : "\"" + info.name + "\", ";
+    std::fprintf(stderr, "[llamad] model: %s%s (n_ctx=%u)\n", name.c_str(), info.description.c_str(), info.n_ctx);
     std::fprintf(stderr, "[llamad] listening on unix:%s\n", socket_path.c_str());
     std::fflush(stderr);
 
