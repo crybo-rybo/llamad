@@ -24,9 +24,12 @@
 //   never a partial UTF-8 sequence.
 // - Tool calls arrive whole, on `finish`, and `finish.tool_calls` is non-empty if and only if
 //   `finish.reason` is FINISH_REASON_TOOL_CALLS. Their arguments are a complete JSON object.
-// - Errors are status codes: INVALID_ARGUMENT for a request the caller can fix, FAILED_PRECONDITION
-//   for something the loaded model cannot do (Chat without a usable template, Embed on a
-//   generative model, Generate or Chat on an embedding model), INTERNAL for anything else.
+// - Errors are status codes: OUT_OF_RANGE for an input with more tokens than the model can take
+//   (a Generate or Chat prompt that does not fit the context, an Embed input over the per-input
+//   limit), which a shorter input can fix; INVALID_ARGUMENT for any other request the caller can
+//   fix; FAILED_PRECONDITION for something the loaded model cannot do (Chat without a usable
+//   template, Embed on a generative model, Generate or Chat on an embedding model); INTERNAL for
+//   anything else.
 //
 // llamad follows semantic versioning. Before 1.0.0, a minor release can change this contract
 // incompatibly; callers then regenerate their stubs and update their request and response

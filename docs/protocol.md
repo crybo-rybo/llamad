@@ -177,7 +177,8 @@ the length of the vectors (`n_embd`).
 `Embed` returns one vector for each input, in the same sequence as the inputs. Each vector is
 L2-normalised. Thus, the dot product of two vectors is their cosine similarity. The daemon embeds
 each input separately, in one decode. An input can have a maximum of 512 tokens. A short `--ctx`
-or a short training context makes this limit lower. Some models expect an instruction prefix on
+or a short training context makes this limit lower. If an input is longer, the daemon embeds no
+input and returns `OUT_OF_RANGE`. Some models expect an instruction prefix on
 queries, for example `Instruct: ...\nQuery:` for Qwen3-Embedding. Put this prefix in the text
 that you send.
 
@@ -185,7 +186,8 @@ that you send.
 
 | Status | Meaning |
 |---|---|
-| `INVALID_ARGUMENT` | The request is not correct, and the application can correct it. Examples: no messages, a prompt that is longer than the context, schema JSON that does not parse, a schema with tools, an embedding input that is too long. |
+| `OUT_OF_RANGE` | An input has more tokens than the model can take. Examples: a `Generate` or `Chat` prompt that does not fit the context, an `Embed` input that is longer than the limit. A shorter input can succeed. Refer to [Inputs that are too long](#inputs-that-are-too-long). |
+| `INVALID_ARGUMENT` | The request is not correct, and the application can correct it. Examples: no messages, schema JSON that does not parse, a schema with tools. |
 | `FAILED_PRECONDITION` | The loaded model cannot do this request. Examples: `Chat` without a usable chat template, `Embed` on a generative model, `Generate` or `Chat` on an embedding model. |
 | `CANCELLED`, `DEADLINE_EXCEEDED` | The application cancelled the call, or its deadline passed. A `Generate` or `Chat` stream then has no `finish` chunk. |
 | `INTERNAL` | All other errors, for example a decode error. The message tells what occurred. |
@@ -194,3 +196,24 @@ The daemon serves one generation at a time. Thus, concurrent requests wait in a 
 in the queue gets `progress` chunks with the stage `STAGE_QUEUED`. A deadline includes the time in
 the queue and the time of the generation. If you cancel a request in the queue, it leaves the
 queue in 250 ms or less, and the daemon decodes nothing for it.
+
+### Inputs that are too long
+
+A conversation becomes longer with each turn. Thus, its prompt can become too long for the
+context. The daemon then returns `OUT_OF_RANGE`, and not `INVALID_ARGUMENT`. Use the status code
+to find this error. Do not parse the message. The message gives the token count and the limit
+for a person to read.
+
+To recover, remove the oldest turns and send the request again. Keep the system message. Remove
+an assistant tool call together with its tool results. The daemon tokenizes a prompt and checks
+its length before the request goes into the queue. Thus, a prompt that is too long fails
+immediately, also while another request uses the model. A loop that removes a turn and tries
+again is fast.
+
+A `Generate` prompt must have fewer tokens than `ModelInfo.n_ctx`. To count the tokens of a
+prompt, call `Tokenize` with `add_special` and `parse_special` set to true. A `Chat` prompt also
+contains the text of the chat template, and `Tokenize` cannot count it. For `Chat`, remove turns
+until the request succeeds.
+
+An `Embed` input that is too long also fails with `OUT_OF_RANGE`, and the daemon embeds no input
+of that request. Make the input shorter, or split it into parts.

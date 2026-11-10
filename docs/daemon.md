@@ -35,7 +35,7 @@ and blocked. Thus, use SIGTERM to stop a daemon that a script started in the bac
 
 The engine serves one generation at a time. Concurrent requests wait in a queue and do not share
 the context. Before a request goes into the queue, the daemon tokenizes its prompt and checks its
-length. Thus, a prompt that is too long fails immediately. A request in the queue gets `progress`
+length. Thus, a prompt that is too long fails immediately with `OUT_OF_RANGE`. A request in the queue gets `progress`
 chunks. If its client cancels, the request leaves the queue in 250 ms or less.
 
 The engine checks for a cancelled request before each prompt batch and after each token. It
@@ -69,7 +69,7 @@ the daemon does not start.
 dot product of two vectors is their cosine similarity. The daemon embeds each input separately,
 in one decode. Thus, an input can have a maximum of 512 tokens, which is the physical batch of
 llama.cpp. The limit is lower if `--ctx` or the training context of the model is shorter. If an
-input is longer, the daemon returns `INVALID_ARGUMENT` for the request.
+input is longer, the daemon returns `OUT_OF_RANGE` for the request.
 
 The daemon tokenizes inputs the same way as `Generate` prompts, and adds the special tokens of the
 model. Some models expect an instruction prefix, for example `Instruct: ...\nQuery:` for

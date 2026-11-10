@@ -50,12 +50,16 @@ void log_request(const char * rpc_name, const GenerateStats & stats, const std::
 /// How long a stream may be silent before the next engine step sends a progress chunk.
 constexpr std::chrono::seconds kProgressAfter{1};
 
-/// Runs one RPC body and turns what it throws into the status the contract promises: caller
-/// mistakes (EngineError, ChatFormatError) INVALID_ARGUMENT, anything else INTERNAL.
+/// Runs one RPC body and turns what it throws into the status the contract promises: an input
+/// too long for the model OUT_OF_RANGE, because the caller can shorten it and retry; other caller
+/// mistakes (EngineError, ChatFormatError) INVALID_ARGUMENT; anything else INTERNAL.
 template <typename Body>
 grpc::Status guarded(const char * rpc_name, Body && body) {
     try {
         return body();
+    } catch (const InputTooLongError & e) {
+        std::fprintf(stderr, "[llamad] %s error: %s\n", rpc_name, e.what());
+        return grpc::Status(grpc::StatusCode::OUT_OF_RANGE, e.what());
     } catch (const EngineError & e) {
         std::fprintf(stderr, "[llamad] %s error: %s\n", rpc_name, e.what());
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, e.what());

@@ -86,7 +86,9 @@
   with one `llama_decode` call for each input. On the CPU, this is as fast as one decode that
   packs many inputs as separate sequences. That alternative also must have a context with space
   for many sequences. The vectors are always L2-normalised.
-- **Errors have types.** Errors in the request map to `INVALID_ARGUMENT`. A missing capability
-  maps to `FAILED_PRECONDITION`. All other errors map to `INTERNAL`.
+- **Errors have types.** An input with more tokens than the model can take maps to
+  `OUT_OF_RANGE`. The application can make the input shorter and try again, for example without
+  the oldest turns. All other errors in the request map to `INVALID_ARGUMENT`. A missing
+  capability maps to `FAILED_PRECONDITION`. All other errors map to `INTERNAL`.
 
 `AGENTS.md` gives the layer rules that the code must follow.

@@ -200,7 +200,8 @@ def main():
             continue
         except (grpc.RpcError, RuntimeError) as error:
             print(paint("error> ", "1;31") + describe(error))
-            print("Use /clear if the conversation exceeds the model's context.")
+            if isinstance(error, grpc.RpcError) and error.code() == grpc.StatusCode.OUT_OF_RANGE:
+                print("The conversation is too long for the model's context. Use /clear.")
             failed = True
             continue
         if turn is None:

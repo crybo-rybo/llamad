@@ -43,24 +43,25 @@ public:
                           v1::TokenizeResponse * response) override;
 
     /// Stream a raw completion and one final result while the client remains connected.
-    /// @returns FAILED_PRECONDITION on an embedding model, INVALID_ARGUMENT for caller errors,
-    /// CANCELLED if the client goes before the finish chunk, INTERNAL for other failures, or OK.
+    /// @returns FAILED_PRECONDITION on an embedding model, OUT_OF_RANGE for a prompt that does not
+    /// fit the context, INVALID_ARGUMENT for other caller errors, CANCELLED if the client goes
+    /// before the finish chunk, INTERNAL for other failures, or OK.
     grpc::Status Generate(grpc::ServerContext * context,
                           const v1::GenerateRequest * request,
                           grpc::ServerWriter<v1::GenerateChunk> * writer) override;
 
     /// Render history and tools, stream visible text and finalize atomic tool calls.
-    /// @returns FAILED_PRECONDITION without a usable template, INVALID_ARGUMENT for caller
-    /// errors, CANCELLED if the client goes before the finish chunk, INTERNAL for other failures,
-    /// or OK after generation.
+    /// @returns FAILED_PRECONDITION without a usable template, OUT_OF_RANGE for a rendered prompt
+    /// that does not fit the context, INVALID_ARGUMENT for other caller errors, CANCELLED if the
+    /// client goes before the finish chunk, INTERNAL for other failures, or OK after generation.
     grpc::Status Chat(grpc::ServerContext * context,
                       const v1::ChatRequest * request,
                       grpc::ServerWriter<v1::GenerateChunk> * writer) override;
 
     /// Embed each input and return one L2-normalised vector per input, in order.
-    /// @returns FAILED_PRECONDITION unless the model is an embedding model, INVALID_ARGUMENT for
-    /// no inputs or an input that does not fit, CANCELLED if the client goes before the last
-    /// input, INTERNAL for other failures, or OK.
+    /// @returns FAILED_PRECONDITION unless the model is an embedding model, OUT_OF_RANGE for an
+    /// input that does not fit, INVALID_ARGUMENT for no inputs or other caller errors, CANCELLED
+    /// if the client goes before the last input, INTERNAL for other failures, or OK.
     grpc::Status Embed(grpc::ServerContext * context,
                        const v1::EmbedRequest * request,
                        v1::EmbedResponse * response) override;
