@@ -35,8 +35,8 @@ and blocked. Thus, use SIGTERM to stop a daemon that a script started in the bac
 
 The engine serves one generation at a time. Concurrent requests wait in a queue and do not share
 the context. Before a request goes into the queue, the daemon tokenizes its prompt and checks its
-length. Thus, a prompt that is too long fails immediately. If the client of a request in the
-queue cancels, the request leaves the queue in 250 ms or less.
+length. Thus, a prompt that is too long fails immediately. A request in the queue gets `progress`
+chunks. If its client cancels, the request leaves the queue in 250 ms or less.
 
 The engine checks for a cancelled request before each prompt batch and after each token. It
 cannot stop in a batch. A batch has a maximum of 2048 tokens. When a request stops in its prompt,

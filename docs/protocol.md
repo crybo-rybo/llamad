@@ -41,10 +41,12 @@ stub = rpc.LlamaStub(grpc.insecure_channel("unix:/run/user/1000/llamad.sock"))
 request = pb.ChatRequest(messages=[pb.ChatMessage(role="user", content="Name three primes.")],
                          sampling=pb.SamplingParams(temperature=0))
 for chunk in stub.Chat(request):
-    if chunk.WhichOneof("chunk") == "text":
+    kind = chunk.WhichOneof("chunk")
+    if kind == "text":
         print(chunk.text, end="", flush=True)
-    else:
+    elif kind == "finish":
         print("\n", pb.FinishReason.Name(chunk.finish.reason), chunk.finish.stats.completion_tokens)
+    # Skip all other chunks, for example progress chunks.
 ```
 
 The daemon also serves gRPC server reflection and the standard health service. Thus, a tool can
@@ -60,14 +62,20 @@ grpcurl -plaintext -d '{"messages": [{"role": "user", "content": "Name three pri
 
 ## Streams
 
-`Generate` and `Chat` send a stream of `GenerateChunk` messages. Each chunk is one of these two
+`Generate` and `Chat` send a stream of `GenerateChunk` messages. Each chunk is one of these three
 types:
 
 - `text`: The next part of the output that the user sees. It is never empty. It never contains a
   partial UTF-8 sequence, part of a matched stop string or tool-call markup.
+- `progress`: A sign that the request is alive. It contains no output. It gives the stage of the
+  request (`stage`) and the token counts at that time.
 - `finish`: The reason that the generation stopped (`reason`), the token counts and times
   (`stats`), and the tool calls, if there are tool calls. It is always the last chunk of a
   successful stream, and there is exactly one.
+
+A successful stream has zero or more `text` and `progress` chunks, in any sequence. Then it has
+one `finish` chunk. Skip each chunk that is not `text` or `finish`, if you do not use it. A later
+version can add other types of chunks.
 
 If a stream ends without a `finish` chunk, the call was cancelled or an error occurred. The gRPC
 status tells which. Some errors occur before the generation starts, for example an empty
@@ -78,6 +86,25 @@ the request at the next step of the engine. A step is one token or one batch of 
 request in the queue stops in 250 ms or less. The stream then ends with the status `CANCELLED` or
 `DEADLINE_EXCEEDED`, and with no `finish` chunk. The prompt tokens that the engine decoded stay in
 the KV cache. Thus, if you send the same prompt again, the daemon does not decode them again.
+
+### Progress and idle timeouts
+
+The daemon sends a `progress` chunk only after approximately one second without a chunk. Thus, a
+fast request gets no `progress` chunks. A slow request gets approximately one chunk each second.
+These are the stages:
+
+| Stage | Meaning |
+|---|---|
+| `STAGE_QUEUED` | The request waits for another request in the queue. |
+| `STAGE_PROMPT` | The engine decodes the prompt. `ready_prompt_tokens` is the number of prompt tokens in the KV cache. |
+| `STAGE_GENERATING` | The engine generates tokens, but the daemon holds back their text. An example is a tool call. |
+
+The daemon can send a `progress` chunk only between two steps of the engine. The engine cannot
+stop in a step. The longest step is one batch of the prompt, which has a maximum of 2048 tokens.
+On a CPU, one batch can take 10 seconds or more. Thus, the longest time without a chunk is
+approximately one second plus the time of one batch. If you use an idle timeout, make it longer
+than this time. To find the time of one batch, look at `prompt_ms` for a cold prompt of 2048
+tokens. A batch late in a long prompt takes more time than the first batch.
 
 `GenerateStats.cached_prompt_tokens` is the number of prompt tokens that came from the KV cache.
 These tokens are at the start of the prompt, and the previous request decoded them. If you send a
@@ -163,6 +190,7 @@ that you send.
 | `CANCELLED`, `DEADLINE_EXCEEDED` | The application cancelled the call, or its deadline passed. A `Generate` or `Chat` stream then has no `finish` chunk. |
 | `INTERNAL` | All other errors, for example a decode error. The message tells what occurred. |
 
-The daemon serves one generation at a time. Thus, concurrent requests wait in a queue. A deadline
-includes the time in the queue and the time of the generation. If you cancel a request in the
-queue, it leaves the queue in 250 ms or less, and the daemon decodes nothing for it.
+The daemon serves one generation at a time. Thus, concurrent requests wait in a queue. A request
+in the queue gets `progress` chunks with the stage `STAGE_QUEUED`. A deadline includes the time in
+the queue and the time of the generation. If you cancel a request in the queue, it leaves the
+queue in 250 ms or less, and the daemon decodes nothing for it.

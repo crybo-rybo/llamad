@@ -11,10 +11,15 @@
 //   any response schema. The daemon keeps no sessions and never executes a tool. The one thing a
 //   request leaves behind is the KV cache, which changes how long the next prompt takes and never
 //   which prompt runs.
-// - Stream shape. A Generate or Chat stream that succeeds is zero or more chunks carrying `text`,
-//   then exactly one chunk carrying `finish`, then the end of the stream. A stream that ends
-//   without `finish` ends with a status that is not OK: CANCELLED or DEADLINE_EXCEEDED after a
-//   cancel or a deadline, or an error.
+// - Stream shape. A Generate or Chat stream that succeeds is zero or more chunks carrying `text`
+//   or `progress`, in any order, then exactly one chunk carrying `finish`, then the end of the
+//   stream. A stream that ends without `finish` ends with a status that is not OK: CANCELLED or
+//   DEADLINE_EXCEEDED after a cancel or a deadline, or an error. Skip a chunk whose kind you do
+//   not know, so that a later version can add one.
+// - Liveness. While a request queues or runs, a stream is silent for at most about one second
+//   longer than the slowest single step of the engine: one prompt batch (up to 2048 tokens) or
+//   one token. A `progress` chunk goes out only when no other chunk did for about a second, so a
+//   fast request has none.
 // - Text is user-visible output only: never tool-call markup, never part of a matched stop string,
 //   never a partial UTF-8 sequence.
 // - Tool calls arrive whole, on `finish`, and `finish.tool_calls` is non-empty if and only if
@@ -132,7 +137,8 @@ enum FinishReason {
   reserved "FINISH_REASON_CANCELLED";
 }
 
-// Token counts and wall-clock time of one generation, not counting time queued behind another.
+// Token counts and wall-clock time of one generation, not counting time queued behind another
+// (progress chunks show that wait as STAGE_QUEUED).
 message GenerateStats {
   int32 prompt_tokens = 1;         // the whole prompt, special and cached tokens included
   int32 completion_tokens = 2;     // tokens generated, withheld stop and tool markup included
@@ -148,10 +154,27 @@ message Finish {
   repeated ToolCall tool_calls = 3;  // non-empty if and only if reason is FINISH_REASON_TOOL_CALLS
 }
 
+// What a request is doing when it sends a progress chunk.
+enum Stage {
+  STAGE_UNSPECIFIED = 0;  // never sent
+  STAGE_QUEUED = 1;       // waiting for another request to release the model
+  STAGE_PROMPT = 2;       // decoding the prompt
+  STAGE_GENERATING = 3;   // generating, with output not yet sent: tool-call markup, say
+}
+
+// A sign of life from a stream that has been silent for about a second. It carries no output.
+message Progress {
+  Stage stage = 1;
+  int32 prompt_tokens = 2;        // the whole prompt, as in GenerateStats
+  int32 ready_prompt_tokens = 3;  // leading prompt tokens in the KV cache so far; 0 while queued
+  int32 completion_tokens = 4;    // tokens generated so far, as in GenerateStats
+}
+
 message GenerateChunk {
   oneof chunk {
-    string text = 1;    // the next piece of user-visible output; never empty
-    Finish finish = 2;  // the last chunk of the stream
+    string text = 1;        // the next piece of user-visible output; never empty
+    Finish finish = 2;      // the last chunk of the stream
+    Progress progress = 3;  // the stream is alive; skip it if you do not need it
   }
 }
 

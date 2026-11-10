@@ -44,13 +44,17 @@
 
   A progress callback lets the service see a request at each step of the engine. The steps are
   a wait of 250 ms in the queue, one prompt batch and one token. At each step, the callback can
-  stop the request. The engine does not use the abort callback of llama.cpp, which could stop in
-  a batch. With that callback, the Metal backend sends its work to the GPU in a different way.
-  The CUDA and Vulkan backends ignore it.
-- **Stream shape.** A stream has zero or more `text` chunks, and then exactly one `finish` chunk.
-  The `finish` chunk contains the finish reason and the stats. `GenerateChunk` is a `oneof` of
-  these two types, so the types enforce the shape. A cancelled stream ends with the status
-  `CANCELLED` and with no `finish` chunk. Thus, there is no finish reason for a cancel.
+  send a `progress` chunk or stop the request. The engine does not use the abort callback of
+  llama.cpp, which could stop in a batch. With that callback, the Metal backend sends its work to
+  the GPU in a different way. The CUDA and Vulkan backends ignore it.
+- **Stream shape.** A stream has zero or more `text` and `progress` chunks, and then exactly one
+  `finish` chunk. The `finish` chunk contains the finish reason and the stats. `GenerateChunk` is
+  a `oneof` of these three types, so the types enforce the shape. A cancelled stream ends with the
+  status `CANCELLED` and with no `finish` chunk. Thus, there is no finish reason for a cancel.
+
+  A `progress` chunk comes only after approximately one second without a chunk. Thus, a client
+  can use an idle timeout, and a fast request looks the same as without progress chunks. There is
+  no timer thread. The steps of the engine send the chunks.
 
   Tool calls are complete and are in the `finish` chunk. `tool_calls` is not empty if and only if
   the finish reason is `TOOL_CALLS`. Text chunks contain only the content that the user sees.

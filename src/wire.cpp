@@ -21,6 +21,16 @@ v1::FinishReason to_proto(FinishReason reason) {
     throw std::invalid_argument("a cancelled generation has no finish chunk");
 }
 
+/// The wire spelling of a generation stage.
+v1::Stage to_proto(GenerateStage stage) {
+    switch (stage) {
+        case GenerateStage::Queued:     return v1::STAGE_QUEUED;
+        case GenerateStage::Prompt:     return v1::STAGE_PROMPT;
+        case GenerateStage::Generating: return v1::STAGE_GENERATING;
+    }
+    return v1::STAGE_UNSPECIFIED;
+}
+
 /// Token counts and timings of one generation.
 void to_proto(const GenerateStats & stats, v1::GenerateStats * out) {
     out->set_prompt_tokens(stats.prompt_tokens);
@@ -104,6 +114,16 @@ v1::GenerateChunk finish_chunk(FinishReason reason, const GenerateStats & stats,
     for (const ToolCall & call : tool_calls) {
         to_proto(call, finish->add_tool_calls());
     }
+    return chunk;
+}
+
+v1::GenerateChunk progress_chunk(const GenerateProgress & progress) {
+    v1::GenerateChunk chunk;
+    v1::Progress *    out = chunk.mutable_progress();
+    out->set_stage(to_proto(progress.stage));
+    out->set_prompt_tokens(progress.prompt_tokens);
+    out->set_ready_prompt_tokens(progress.ready_prompt_tokens);
+    out->set_completion_tokens(progress.completion_tokens);
     return chunk;
 }
 

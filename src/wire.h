@@ -42,4 +42,7 @@ void to_proto(const EmbedResult & result, v1::EmbedResponse * out);
 /// chunk, and the wire has no reason to give one.
 v1::GenerateChunk finish_chunk(FinishReason reason, const GenerateStats & stats, std::vector<ToolCall> tool_calls);
 
+/// A chunk that says where a generation is, for a stream that has been silent for a while.
+v1::GenerateChunk progress_chunk(const GenerateProgress & progress);
+
 }  // namespace llamad::wire

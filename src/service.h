@@ -66,9 +66,10 @@ public:
                        v1::EmbedResponse * response) override;
 
 private:
-    /// Shared body of Generate and Chat: run the engine, stream text chunks, then write the one
-    /// `finish` chunk carrying the finish reason, stats and any tool calls. A client that goes
-    /// stops the engine at its next step and gets no `finish`; the status is then CANCELLED.
+    /// Shared body of Generate and Chat: run the engine, stream text chunks and, after a second
+    /// of silence, progress chunks, then write the one `finish` chunk carrying the finish reason,
+    /// stats and any tool calls. A client that goes stops the engine at its next step and gets
+    /// no `finish`; the status is then CANCELLED.
     /// `stream` is Chat's parser, which decides what text the client sees and parses the tool
     /// calls once generation is over; Generate passes null. What the engine throws propagates.
     grpc::Status stream_generation(const char * rpc_name,

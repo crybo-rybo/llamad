@@ -62,7 +62,8 @@ void test_field_coverage() {
     check_fields<v1::GenerateStats>(
         {"prompt_tokens", "completion_tokens", "prompt_ms", "completion_ms", "cached_prompt_tokens"});
     check_fields<v1::Finish>({"reason", "stats", "tool_calls"});
-    check_fields<v1::GenerateChunk>({"text", "finish"});
+    check_fields<v1::GenerateChunk>({"text", "finish", "progress"});
+    check_fields<v1::Progress>({"stage", "prompt_tokens", "ready_prompt_tokens", "completion_tokens"});
     check_fields<v1::EmbedResponse>({"embeddings", "input_tokens"});
     check_fields<v1::Embedding>({"values"});
 
@@ -71,6 +72,9 @@ void test_field_coverage() {
     // a cancelled stream has no finish chunk.
     CHECK_EQ(v1::FinishReason_descriptor()->value_count(), 5);
     CHECK(v1::FinishReason_descriptor()->FindValueByName("FINISH_REASON_CANCELLED") == nullptr);
+
+    // Every engine stage has a wire stage, and UNSPECIFIED is never sent.
+    CHECK_EQ(v1::Stage_descriptor()->value_count(), 4);
 }
 
 void test_unset_sampling_keeps_engine_defaults() {
@@ -214,6 +218,30 @@ void test_a_cancelled_generation_has_no_finish_chunk() {
     CHECK(threw);
 }
 
+void test_progress_carries_stage_and_counts() {
+    llamad::GenerateProgress progress;
+    progress.stage               = llamad::GenerateStage::Prompt;
+    progress.prompt_tokens       = 5923;
+    progress.ready_prompt_tokens = 2048;
+    progress.completion_tokens   = 0;
+
+    const v1::GenerateChunk chunk = wire::progress_chunk(progress);
+    CHECK(chunk.chunk_case() == v1::GenerateChunk::kProgress);
+    CHECK(chunk.progress().stage() == v1::STAGE_PROMPT);
+    CHECK_EQ(chunk.progress().prompt_tokens(), 5923);
+    CHECK_EQ(chunk.progress().ready_prompt_tokens(), 2048);
+    CHECK_EQ(chunk.progress().completion_tokens(), 0);
+
+    progress.stage = llamad::GenerateStage::Queued;
+    CHECK(wire::progress_chunk(progress).progress().stage() == v1::STAGE_QUEUED);
+
+    progress.stage             = llamad::GenerateStage::Generating;
+    progress.completion_tokens = 17;
+    const v1::GenerateChunk generating = wire::progress_chunk(progress);
+    CHECK(generating.progress().stage() == v1::STAGE_GENERATING);
+    CHECK_EQ(generating.progress().completion_tokens(), 17);
+}
+
 void test_tool_calls_only_when_generation_completed() {
     const llamad::GenerateStats stats;
 
@@ -246,6 +274,7 @@ int main() {
     test_finish_carries_reason_and_stats();
     test_tool_calls_only_when_generation_completed();
     test_a_cancelled_generation_has_no_finish_chunk();
+    test_progress_carries_stage_and_counts();
 
     return tests::report();
 }

@@ -93,11 +93,13 @@ def stream_reply(stub, messages):
     text, finish = [], None
     try:
         for chunk in stream:
-            if chunk.WhichOneof("chunk") == "text":
+            kind = chunk.WhichOneof("chunk")
+            if kind == "text":
                 text.append(chunk.text)
                 print(chunk.text, end="", flush=True)
-            else:
+            elif kind == "finish":
                 finish = chunk.finish
+            # Skip all other chunks: progress chunks, and kinds that a later daemon can add.
     except KeyboardInterrupt:
         stream.cancel()
         raise

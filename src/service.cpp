@@ -47,6 +47,9 @@ void log_request(const char * rpc_name, const GenerateStats & stats, const std::
                  where, tools, wall_ms);
 }
 
+/// How long a stream may be silent before the next engine step sends a progress chunk.
+constexpr std::chrono::seconds kProgressAfter{1};
+
 /// Runs one RPC body and turns what it throws into the status the contract promises: caller
 /// mistakes (EngineError, ChatFormatError) INVALID_ARGUMENT, anything else INTERNAL.
 template <typename Body>
@@ -112,12 +115,17 @@ grpc::Status LlamaService::stream_generation(const char * rpc_name,
     // engine and suppresses the final chunk, which would only fail to write anyway.
     bool client_gone = false;
 
+    // When the stream last carried a chunk of any kind; the start counts as one, so a request
+    // that is fast end to end never sends a progress chunk.
+    auto last_write = started;
+
     // Writes one chunk. Returns false once the client is gone.
     const auto write = [&](const v1::GenerateChunk & chunk) -> bool {
         if (!writer->Write(chunk)) {
             client_gone = true;
             return false;
         }
+        last_write = std::chrono::steady_clock::now();
         return true;
     };
 
@@ -142,8 +150,9 @@ grpc::Status LlamaService::stream_generation(const char * rpc_name,
     };
 
     // The engine asks at every step, so a client that leaves while the request is queued or its
-    // prompt decodes stops it at the next step, not only once text flows. The last step is kept
-    // for the log line.
+    // prompt decodes stops it at the next step, not only once text flows. The steps also drive
+    // progress chunks, so there is no timer thread: one goes out at the first step after a second
+    // of silence. The last step is kept for the log line.
     GenerateProgress last_progress;
     const ProgressCallback on_progress = [&](const GenerateProgress & progress) -> bool {
         last_progress = progress;
@@ -151,7 +160,10 @@ grpc::Status LlamaService::stream_generation(const char * rpc_name,
             client_gone = true;
             return false;
         }
-        return true;
+        if (std::chrono::steady_clock::now() - last_write < kProgressAfter) {
+            return true;
+        }
+        return write(wire::progress_chunk(progress));
     };
 
     const GenerateResult result = engine_.generate(prompt, params, on_chunk, on_progress);

@@ -31,7 +31,7 @@ Read `README.md` and `docs/` for user documentation. Local GGUF files belong in 
   For proto changes, update `wire.cpp`, proto guarantees, `tests/wire_test.cpp` and `docs/protocol.md` together.
 - Keep requests stateless. Clients supply history and execute tools. The daemon has no sessions or tool registries.
   The KV cache affects performance only. Every exit from generation must keep cached tokens consistent with the cache, or clear both.
-- Preserve the stream contract: nonempty text chunks, then exactly one finish chunk.
+- Preserve the stream contract: nonempty text chunks and progress chunks, then exactly one finish chunk.
   Text must contain no tool markup, partial UTF-8 or part of a matched stop string.
   Complete tool calls belong in the finish chunk. `tool_calls` is nonempty if and only if the reason is `TOOL_CALLS`.
 - Keep access local: a Unix socket with mode 0600, with no TCP listener.
