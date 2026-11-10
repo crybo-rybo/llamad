@@ -119,7 +119,17 @@ grpc::Status LlamaService::stream_generation(const char * rpc_name,
         return visible.empty() ? true : write_text(visible);
     };
 
-    const GenerateResult result = engine_.generate(prompt, params, on_chunk);
+    // The engine asks at every step, so a client that leaves while the request is queued or its
+    // prompt decodes stops it at the next step, not only once text flows.
+    const ProgressCallback on_progress = [&](const GenerateProgress &) -> bool {
+        if (context->IsCancelled()) {
+            client_gone = true;
+            return false;
+        }
+        return true;
+    };
+
+    const GenerateResult result = engine_.generate(prompt, params, on_chunk, on_progress);
 
     if (context->IsCancelled()) {
         client_gone = true;

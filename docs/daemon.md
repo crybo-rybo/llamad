@@ -26,7 +26,14 @@ background, the daemon inherits SIGINT as ignored. macOS discards a signal that 
 and blocked. Thus, use SIGTERM to stop a daemon that a script started in the background.
 
 The engine serves one generation at a time. Concurrent requests wait in a queue and do not share
-the context.
+the context. Before a request goes into the queue, the daemon tokenizes its prompt and checks its
+length. Thus, a prompt that is too long fails immediately. If the client of a request in the
+queue cancels, the request leaves the queue in 250 ms or less.
+
+The engine checks for a cancelled request before each prompt batch and after each token. It
+cannot stop in a batch. A batch has a maximum of 2048 tokens. When a request stops in its prompt,
+the KV cache keeps the batches that the engine decoded. A new request with the same prompt uses
+them again.
 
 The KV cache keeps the tokens that the previous request decoded. A request decodes only the part
 of its prompt after the prefix that it shares with these tokens. Thus, a chat turn or a tool
@@ -89,6 +96,8 @@ flags:
 - `--grammar-file PATH`: Limit the generation with a GBNF file that you supply.
 - `--stop TEXT`: Stop the generation at this stop string.
 - `--cancel-after N`: Cancel the generation after N chunks.
+- `--cancel-after-ms N`: Cancel each run after N milliseconds, at the next step of the engine.
+  With `--repeat`, each run continues the prompt from the batches of the run before it.
 - `--embed TEXT`: With an embedding model, embed this text and not a prompt. You can use this
   flag more than one time. The output shows the first values of each vector, and the cosine of
   each vector with the first vector.

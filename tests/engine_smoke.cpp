@@ -16,6 +16,7 @@
 #include "flags.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -42,8 +43,9 @@ struct Options {
     std::optional<float>     min_p;              ///< Min-p.
     std::optional<int32_t>   max_tokens;         ///< Stop after N generated tokens.
     std::vector<std::string> stop;               ///< Stop strings.
-    long                     cancel_after = -1;  ///< Return false from the chunk callback after N chunks.
-    long                     repeat       = 1;   ///< Run generate() N times in the same process.
+    long                     cancel_after    = -1;  ///< Return false from the chunk callback after N chunks.
+    long                     cancel_after_ms = -1;  ///< Return false from the progress callback after N ms.
+    long                     repeat          = 1;   ///< Run generate() N times in the same process.
     std::vector<std::string> embed;              ///< Texts to embed in one embed() call instead of generating.
     bool                     help = false;       ///< Print usage and exit.
     std::vector<std::string> positional;         ///< The model, then the prompt.
@@ -68,6 +70,8 @@ void print_usage(const char * argv0) {
                  "  --max-tokens N      stop after N generated tokens (< 0 = until the context is full)\n"
                  "  --stop STR          stop string (repeatable)\n"
                  "  --cancel-after N    return false from the chunk callback after N chunks\n"
+                 "  --cancel-after-ms N return false from the progress callback once N ms have passed\n"
+                 "                      in a run; the prompt stops at the next batch\n"
                  "  --repeat N          run generate() N times in the same process\n"
                  "  --embed TEXT        embed TEXT with an embedding model instead of generating (repeatable);\n"
                  "                      prints each vector's first values and its cosine with the first TEXT\n"
@@ -103,6 +107,8 @@ void parse_command_line(int argc, char ** argv, Options & options, llamad::Engin
             options.stop.push_back(args.value());
         } else if (args.is("--cancel-after")) {
             options.cancel_after = args.number<long>();
+        } else if (args.is("--cancel-after-ms")) {
+            options.cancel_after_ms = args.number<long>();
         } else if (args.is("--repeat")) {
             options.repeat = args.number<long>();
         } else if (args.is("--embed")) {
@@ -303,15 +309,25 @@ int main(int argc, char ** argv) {
                 return !(options.cancel_after >= 0 && chunks >= options.cancel_after);
             };
 
-            const llamad::GenerateResult result = engine.generate(text, params, on_chunk);
+            // Counts the steps of each stage, and stops the run once --cancel-after-ms has passed.
+            const auto t_run    = std::chrono::steady_clock::now();
+            long       steps[3] = {0, 0, 0};
+            auto on_progress    = [&](const llamad::GenerateProgress & progress) -> bool {
+                ++steps[static_cast<int>(progress.stage)];
+                return !(options.cancel_after_ms >= 0 &&
+                         std::chrono::steady_clock::now() - t_run >= std::chrono::milliseconds(options.cancel_after_ms));
+            };
+
+            const llamad::GenerateResult result = engine.generate(text, params, on_chunk, on_progress);
 
             std::fflush(stdout);
             std::fprintf(stderr,
                          "\nfinish: %s  prompt_tokens: %d  cached_prompt_tokens: %d  completion_tokens: %d  "
-                         "prompt_ms: %.1f  completion_ms: %.1f  chunks: %ld\n",
+                         "prompt_ms: %.1f  completion_ms: %.1f  chunks: %ld\n"
+                         "progress steps: queued %ld  prompt %ld  generating %ld\n",
                          reason_name(result.reason), result.stats.prompt_tokens,
                          result.stats.cached_prompt_tokens, result.stats.completion_tokens, result.stats.prompt_ms,
-                         result.stats.completion_ms, chunks);
+                         result.stats.completion_ms, chunks, steps[0], steps[1], steps[2]);
 
             if (stream) {
                 const llamad::ChatFormat::Stream::Final final = stream->finish();

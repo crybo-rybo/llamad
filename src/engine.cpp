@@ -629,7 +629,9 @@ struct Engine::Impl {
     bool     embeddings       = false;  ///< an embedding model: the context pools and outputs embeddings
     uint32_t max_embed_tokens = 0;      ///< most tokens one embed() input may have
 
-    std::mutex context_mutex;  ///< Serializes requests sharing the context and KV cache.
+    /// Serializes requests sharing the context and KV cache. Timed so that a waiting request can
+    /// give up when its client has gone.
+    std::timed_mutex context_mutex;
 
     /// The tokens sequence 0 of the KV cache holds, in position order. In a generative model only
     /// decode() and clear_cache() change the cache after construction, and both keep this in step
@@ -644,6 +646,18 @@ struct Engine::Impl {
         if (model != nullptr) {
             llama_model_free(model);
         }
+    }
+
+    /// Takes the context lock, asking `keep_waiting` every kQueueTick while another call holds it.
+    /// Returns a lock that does not own the mutex once `keep_waiting` returns false.
+    std::unique_lock<std::timed_mutex> lock_context(const std::function<bool()> & keep_waiting) {
+        std::unique_lock<std::timed_mutex> lock(context_mutex, std::defer_lock);
+        while (!lock.try_lock_for(kQueueTick)) {
+            if (keep_waiting && !keep_waiting()) {
+                break;
+            }
+        }
+        return lock;
     }
 
     /// Empty the KV cache and its record.
@@ -997,13 +1011,13 @@ ChatTemplateInfo Engine::chat_template() const {
 }
 
 GenerateResult Engine::generate(const std::string & prompt, const SamplingParams & params,
-                                const ChunkCallback & on_chunk) {
+                                const ChunkCallback & on_chunk, const ProgressCallback & on_progress) {
     if (impl_->embeddings) {
         throw EngineError("the model is an embedding model: it cannot generate text");
     }
 
-    std::lock_guard<std::mutex> lock(impl_->context_mutex);
-
+    // Everything up to the lock reads only the vocabulary, so a request that cannot run fails
+    // without waiting behind another generation, and a queued one knows its prompt length.
     std::vector<int32_t> tokens = impl_->tokenize(prompt, /*add_special*/ true, /*parse_special*/ true);
     if (tokens.empty()) {
         throw EngineError("the prompt tokenized to zero tokens");
@@ -1017,6 +1031,13 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
     result.reason              = FinishReason::Length;
     result.stats.prompt_tokens = static_cast<int32_t>(tokens.size());
 
+    GenerateProgress progress;
+    progress.prompt_tokens = result.stats.prompt_tokens;
+    const auto report      = [&](GenerateStage stage) {
+        progress.stage = stage;
+        return !on_progress || on_progress(progress);
+    };
+
     // The preserved tokens decide which pieces are rendered with their special text; the triggers
     // are only used by a lazy grammar.
     const ResolvedTokens resolved = impl_->resolve(params);
@@ -1025,14 +1046,32 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
     // say) fails fast, and is freed by RAII on every path.
     SamplerChain sampler(impl_->vocab, params, resolved);
 
+    const std::unique_lock<std::timed_mutex> lock =
+        impl_->lock_context([&] { return report(GenerateStage::Queued); });
+    if (!lock.owns_lock()) {
+        result.reason = FinishReason::Cancelled;
+        return result;
+    }
+
     // --- prompt ---------------------------------------------------------
     // Everything above leaves the cache alone, so a request refused there costs the next one
     // nothing.
     const size_t kept                 = impl_->keep_prefix(tokens);
     result.stats.cached_prompt_tokens = static_cast<int32_t>(kept);
 
+    // The progress check runs between batches and before the first, so a request whose client
+    // left while it was queued decodes nothing. Stopping keeps the batches already decoded:
+    // decode() has recorded each one, so the cache and its record agree and a retry reuses them.
+    // llama_set_abort_callback could stop inside a batch, but it changes how the Metal backend
+    // submits its work and the CUDA and Vulkan backends ignore it.
     const auto t_prompt = std::chrono::steady_clock::now();
     for (size_t off = kept; off < tokens.size();) {
+        progress.ready_prompt_tokens = static_cast<int32_t>(off);
+        if (!report(GenerateStage::Prompt)) {
+            result.reason = FinishReason::Cancelled;
+            break;
+        }
+
         const size_t  n_chunk = std::min<size_t>(impl_->n_batch, tokens.size() - off);
         const int32_t ret     = impl_->decode(tokens.data() + off, n_chunk);
         if (ret != 0) {
@@ -1042,9 +1081,15 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
         off += n_chunk;
     }
     // GPU backends return from llama_decode before the work is done; without this the
-    // prompt would look free and its cost would be billed to the first generated token.
+    // prompt would look free and its cost would be billed to the first generated token. A
+    // cancelled prompt waits here too, for the one batch in flight, so that its prompt_ms is
+    // true and the next request finds the backend idle.
     llama_synchronize(impl_->ctx);
     result.stats.prompt_ms = ms_since(t_prompt);
+    if (result.reason == FinishReason::Cancelled) {
+        return result;
+    }
+    progress.ready_prompt_tokens = progress.prompt_tokens;
 
     // --- generation -----------------------------------------------------
     StreamFilter filter(params.stop, on_chunk);
@@ -1074,7 +1119,11 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
             flush_tail    = false;
             break;
         }
-        if (status == StreamFilter::Status::Cancelled) {
+
+        // Asked after every token, and not only when text is delivered: tool-call markup and a
+        // possible stop string are withheld from on_chunk, and can be long.
+        progress.completion_tokens = result.stats.completion_tokens;
+        if (status == StreamFilter::Status::Cancelled || !report(GenerateStage::Generating)) {
             result.reason = FinishReason::Cancelled;
             flush_tail    = false;
             break;
@@ -1141,11 +1190,14 @@ EmbedResult Engine::embed(const std::vector<std::string> & inputs, const std::fu
         tokenized.push_back(std::move(tokens));
     }
 
-    std::lock_guard<std::mutex> lock(impl_->context_mutex);
+    EmbedResult result;
+    const std::unique_lock<std::timed_mutex> lock = impl_->lock_context(keep_going);
+    if (!lock.owns_lock()) {
+        return result;
+    }
 
     const int32_t n_embd = llama_model_n_embd_out(impl_->model);
 
-    EmbedResult result;
     result.embeddings.reserve(tokenized.size());
     for (std::vector<int32_t> & tokens : tokenized) {
         if (keep_going && !keep_going()) {

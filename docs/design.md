@@ -38,7 +38,15 @@
   just started. The `cached_prompt_tokens` field in the stats shows how many prompt tokens came
   from the cache.
 - **Version v1 serves one generation at a time.** The engine serializes `generate`. Thus,
-  concurrent requests wait in a queue and do not share the context.
+  concurrent requests wait in a queue and do not share the context. The engine tokenizes the
+  prompt and builds the sampler before the request goes into the queue. Thus, a request that
+  cannot run fails without a wait.
+
+  A progress callback lets the service see a request at each step of the engine. The steps are
+  a wait of 250 ms in the queue, one prompt batch and one token. At each step, the callback can
+  stop the request. The engine does not use the abort callback of llama.cpp, which could stop in
+  a batch. With that callback, the Metal backend sends its work to the GPU in a different way.
+  The CUDA and Vulkan backends ignore it.
 - **Stream shape.** A stream has zero or more `text` chunks, and then exactly one `finish` chunk.
   The `finish` chunk contains the finish reason and the stats. `GenerateChunk` is a `oneof` of
   these two types, so the types enforce the shape.

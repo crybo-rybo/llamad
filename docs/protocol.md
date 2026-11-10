@@ -74,7 +74,9 @@ status tells which. Some errors occur before the generation starts, for example 
 conversation or a bad schema. Such an error ends the stream with its status and with no chunks.
 
 To stop a generation, cancel the call with your gRPC library, or set a deadline. The daemon stops
-the generation at the next token.
+the request at the next step of the engine. A step is one token or one batch of the prompt. A
+request in the queue stops in 250 ms or less. The prompt tokens that the engine decoded stay in
+the KV cache. Thus, if you send the same prompt again, the daemon does not decode them again.
 
 `GenerateStats.cached_prompt_tokens` is the number of prompt tokens that came from the KV cache.
 These tokens are at the start of the prompt, and the previous request decoded them. If you send a
@@ -160,4 +162,5 @@ that you send.
 | `INTERNAL` | All other errors, for example a decode error. The message tells what occurred. |
 
 The daemon serves one generation at a time. Thus, concurrent requests wait in a queue. A deadline
-includes the time in the queue and the time of the generation.
+includes the time in the queue and the time of the generation. If you cancel a request in the
+queue, it leaves the queue in 250 ms or less, and the daemon decodes nothing for it.
