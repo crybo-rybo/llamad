@@ -69,13 +69,16 @@
   The template controls the prompt, and its defaults also. For example, Qwen2.5 adds its own
   default system prompt when the request has no `system` message. A response schema on `Chat`
   uses the same path from JSON Schema to grammar as tool arguments. Thus, the reply is a JSON
-  object that agrees with the schema, and it streams as usual text. On a schema turn, the daemon
-  tells the template to close its `<think>` block. Thus, a reasoning model replies with only the
-  JSON.
+  object that agrees with the schema, and it streams as usual text.
 
   The schema also goes into the prompt, as a system instruction to reply with one JSON object
   that agrees with the schema. This instruction gives the property descriptions to the model. It
   replaces the default system prompt of the template.
+
+  A request can turn off reasoning with `REASONING_OFF`, and a schema turn always turns it off.
+  Then the daemon tells the template to close its `<think>` block. If the template ignores this,
+  the daemon keeps the reasoning out of the text. Thus, on a schema turn, a reasoning model
+  replies with only the JSON.
 - **One model, one type of work.** If the GGUF of a model declares a pooling type, the model is
   an embedding model. With an embedding model, the daemon serves `Embed` and rejects `Generate`
   and `Chat`. With all other models, the daemon does the opposite. The daemon rejects a request

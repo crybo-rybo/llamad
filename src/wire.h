@@ -19,6 +19,10 @@ namespace llamad::wire {
 /// Engine sampling parameters, with the engine's defaults wherever the request left a field unset.
 SamplingParams from_proto(const v1::SamplingParams & params);
 
+/// Everything a Chat request asks of the chat template; `sampling` converts on its own.
+/// @throws ChatFormatError For a `reasoning` value this daemon does not know.
+ChatInput from_proto(const v1::ChatRequest & request);
+
 /// One history turn.
 ChatMessage from_proto(const v1::ChatMessage & message);
 

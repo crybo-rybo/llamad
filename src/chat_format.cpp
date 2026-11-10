@@ -188,10 +188,10 @@ ChatFormat::ChatFormat(const std::string & template_source,
 
 ChatFormat::~ChatFormat() = default;
 
-RenderedChat ChatFormat::render(const std::vector<ChatMessage> & messages, const std::vector<Tool> & tools,
-                                const std::string & response_json_schema) const {
+RenderedChat ChatFormat::render(const ChatInput & input) const {
+    const std::string & response_json_schema = input.response_json_schema;
     if (!response_json_schema.empty()) {
-        if (!tools.empty()) {
+        if (!input.tools.empty()) {
             // common's parser matches the response format before tools, so under a response schema
             // a tool call would never be parsed as one. Refusing beats ignoring one of the two.
             throw ChatFormatError("tools and response_json_schema cannot be used together");
@@ -214,15 +214,22 @@ RenderedChat ChatFormat::render(const std::vector<ChatMessage> & messages, const
         }
     }
 
-    // A schema turn and a thinking template disagree about how the assistant turn opens: the
-    // template writes an unclosed <think> block into the generation prompt, while the response
-    // grammar admits only JSON after the assistant header, so the engine's prefill is rejected.
-    // Asking the template to close the block, and the parser to treat thinking as reasoning
-    // rather than content, makes the two agree and keeps thinking text out of the JSON stream.
-    // Plain and tool turns leave a model's thinking inline in the content.
-    const bool                    schema_turn = !response_json_schema.empty();
+    // Reasoning off means enable_thinking=false for the template and reasoning extraction for the
+    // parser; the two only work as a pair. A template that honours the switch writes a closed,
+    // empty <think> block into the generation prompt. Under COMMON_REASONING_FORMAT_NONE the parser
+    // would report that prompt text as content and stream it, so the parser is told to expect
+    // reasoning instead. A template that ignores the switch still opens the block, and the model
+    // still reasons; the parser files that text as reasoning, which never reaches the caller. (A
+    // block the model opens on its own after a closed one is content either way.) A template with
+    // no reasoning markers is unaffected by either setting.
+    //
+    // A schema turn is always off: the response grammar admits only JSON after the assistant
+    // header, so an open <think> block in the prompt would make the engine's prefill fail.
+    // A default turn leaves the template alone and a model's thinking inline in the content.
+    const bool                    schema_turn   = !response_json_schema.empty();
+    const bool                    reasoning_off = schema_turn || input.reasoning == Reasoning::Off;
     const common_reasoning_format reasoning =
-        schema_turn ? COMMON_REASONING_FORMAT_AUTO : COMMON_REASONING_FORMAT_NONE;
+        reasoning_off ? COMMON_REASONING_FORMAT_AUTO : COMMON_REASONING_FORMAT_NONE;
 
     common_chat_templates_inputs inputs;
     inputs.use_jinja             = true;
@@ -230,15 +237,15 @@ RenderedChat ChatFormat::render(const std::vector<ChatMessage> & messages, const
     inputs.tool_choice           = COMMON_CHAT_TOOL_CHOICE_AUTO;
     inputs.parallel_tool_calls   = impl_->parallel_tool_calls;
     inputs.reasoning_format      = reasoning;
-    inputs.enable_thinking       = !schema_turn;
+    inputs.enable_thinking       = !reasoning_off;
     inputs.json_schema           = response_json_schema;           // empty leaves the reply unconstrained
 
-    inputs.messages.reserve(messages.size());
-    for (const ChatMessage & message : messages) {
+    inputs.messages.reserve(input.messages.size());
+    for (const ChatMessage & message : input.messages) {
         inputs.messages.push_back(to_common(message));
     }
-    inputs.tools.reserve(tools.size());
-    for (const Tool & tool : tools) {
+    inputs.tools.reserve(input.tools.size());
+    for (const Tool & tool : input.tools) {
         inputs.tools.push_back(to_common(tool));
     }
 

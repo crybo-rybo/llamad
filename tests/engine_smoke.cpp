@@ -266,7 +266,7 @@ int main(int argc, char ** argv) {
                 tools.push_back(demo_tool());
             }
 
-            rendered = format->render({{"user", prompt, {}, {}}}, tools, /*response_json_schema*/ "");
+            rendered = format->render({.messages = {{"user", prompt, {}, {}}}, .tools = tools});
 
             text                    = rendered.prompt;
             params.grammar          = rendered.grammar;

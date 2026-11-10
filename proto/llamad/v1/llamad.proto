@@ -134,6 +134,22 @@ message ChatRequest {
   // JSON object of that shape. Empty leaves the reply unconstrained; the empty object is refused,
   // because it constrains nothing. Cannot be combined with `tools`.
   string response_json_schema = 4;
+  // Whether the model reasons before it replies. Works with `tools`; a response schema is always
+  // REASONING_OFF. A value this daemon does not know is refused with INVALID_ARGUMENT.
+  Reasoning reasoning = 5;
+}
+
+// Reasoning is text that a reasoning model writes before its reply, in a block that its chat
+// template opens, such as <think>...</think>. The effect of each value depends on the template.
+enum Reasoning {
+  // What the template does on its own. Reasoning the model writes streams as ordinary `text`.
+  REASONING_DEFAULT = 0;
+  // Asks the template to turn reasoning off. A template that supports this closes the block in the
+  // prompt, so the model replies without reasoning. A template without reasoning ignores it: the
+  // prompt and the reply do not change. A template that always opens the block also ignores it,
+  // and the model still reasons: that reasoning is not sent as `text`, but `completion_tokens`
+  // counts it, and a reply that never closes the block has no text.
+  REASONING_OFF = 1;
 }
 
 enum FinishReason {

@@ -39,6 +39,21 @@ struct ChatMessage {
     std::string           tool_call_id;  ///< role "tool": which call this is the result of
 };
 
+/// Whether the model may reason before it replies, for templates that open a reasoning block.
+enum class Reasoning {
+    Default,  ///< What the template does on its own; reasoning the model writes is ordinary content.
+    Off,      ///< Render the template with reasoning switched off, as a schema turn always is.
+};
+
+/// Everything a chat request asks of the template. Sampling parameters travel separately.
+/// Every member has an initializer, so designated initializers can name only what they set.
+struct ChatInput {
+    std::vector<ChatMessage> messages{};              ///< Conversation in template order, with prior calls and tool replies.
+    std::vector<Tool>        tools{};                 ///< Offered during this generation; empty disables tools.
+    std::string              response_json_schema{};  ///< JSON Schema object the reply must fit; empty leaves it free.
+    Reasoning                reasoning = Reasoning::Default;  ///< A response schema implies Off.
+};
+
 /// Opaque parser state shared by a RenderedChat and every Stream made from it.
 struct ParseState;
 
@@ -77,16 +92,14 @@ public:
     ChatFormat & operator=(const ChatFormat &) = delete;
 
     /// Render complete history and request-local tool definitions through the model template.
-    /// @param messages Conversation in template order, including prior calls and tool replies.
-    /// @param tools Opaque tool definitions offered during this generation; empty disables tools.
-    /// @param response_json_schema JSON Schema object, as a JSON string, the reply must fit; empty
-    ///        leaves the reply unconstrained. The JSON reaches the caller as ordinary content.
+    /// A response schema's JSON reaches the caller as ordinary content. With reasoning off, a
+    /// template that honours the switch closes its reasoning block in the prompt; reasoning the
+    /// model writes anyway inside a block the template opened is withheld from the content.
     /// @return Prompt, grammar, stops and shared parser state for a matching output stream.
     /// @throws ChatFormatError For invalid schema JSON, rejected messages or parser setup failure;
     ///         also if response_json_schema is not a JSON object, is the empty object, or is
     ///         combined with tools.
-    RenderedChat render(const std::vector<ChatMessage> & messages, const std::vector<Tool> & tools,
-                        const std::string & response_json_schema) const;
+    RenderedChat render(const ChatInput & input) const;
 
     /// One parser per request; not thread-safe. Recognized tool-call markup is withheld.
     class Stream {

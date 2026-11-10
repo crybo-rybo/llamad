@@ -311,21 +311,9 @@ grpc::Status LlamaService::Chat(grpc::ServerContext * context,
             return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, chat_unavailable_reason_);
         }
 
-        std::vector<llamad::ChatMessage> messages;
-        messages.reserve(static_cast<size_t>(request->messages().size()));
-        for (const v1::ChatMessage & m : request->messages()) {
-            messages.push_back(wire::from_proto(m));
-        }
-
-        std::vector<llamad::Tool> tools;
-        tools.reserve(static_cast<size_t>(request->tools().size()));
-        for (const v1::Tool & t : request->tools()) {
-            tools.push_back(wire::from_proto(t));
-        }
-
         // Rendering happens before the engine's generate mutex, so a queued request pays for its
         // own template rendering rather than the one holding the mutex.
-        const RenderedChat rendered = chat_format_->render(messages, tools, request->response_json_schema());
+        const RenderedChat rendered = chat_format_->render(wire::from_proto(*request));
 
         SamplingParams params = wire::from_proto(request->sampling());
         // With tools or a response schema the output is grammar-constrained; with neither the chat

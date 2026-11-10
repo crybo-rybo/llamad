@@ -223,12 +223,15 @@ int main(int argc, char ** argv) {
                 R"("description":{"type":"string"}},"required":["name","population","description"]}}},)"
                 R"("required":["towns"]})";
             llamad::SamplingParams json = greedy;
-            json.grammar                = format->render({{"user", "x", {}, {}}}, {}, schema).grammar;
+            json.grammar =
+                format->render({.messages = {{"user", "x", {}, {}}}, .response_json_schema = schema}).grammar;
             scenarios.push_back({"tg128-json", false,
                                  [&, schema](int run) {
                                      const std::string ask = "Request " + std::to_string(run) +
                                                              ": describe ten imaginary coastal towns in detail.";
-                                     return format->render({{"user", ask, {}, {}}}, {}, schema).prompt;
+                                     const llamad::ChatInput input = {.messages = {{"user", ask, {}, {}}},
+                                                                      .response_json_schema = schema};
+                                     return format->render(input).prompt;
                                  },
                                  json});
         }

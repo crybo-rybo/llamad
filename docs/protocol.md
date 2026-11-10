@@ -164,8 +164,30 @@ property descriptions.
   complete. A cancelled reply has no `finish` chunk.
 - You cannot use a schema and tools in the same request. The daemon rejects the schema `{}`,
   because it puts no limit on the reply. The two errors are `INVALID_ARGUMENT`.
-- A schema turn has no reasoning. If the template opens a `<think>` block, the daemon tells the
-  template to close it. Thus, the reply is only the JSON object.
+- A schema turn always has reasoning off, as with `REASONING_OFF`. Thus, the text is only the
+  JSON object. Refer to [Reasoning](#reasoning).
+
+## Reasoning
+
+Some models write reasoning before the reply, for example in a `<think>` block. The chat template
+of the model opens this block. Set `ChatRequest.reasoning` to control it:
+
+- `REASONING_DEFAULT`, or no value: The daemon does not change the template. If the model writes
+  reasoning, the reasoning comes in `text` chunks, as part of the reply.
+- `REASONING_OFF`: The daemon tells the template to turn off reasoning. The result depends on the
+  template.
+
+| Template | Result of `REASONING_OFF` |
+|---|---|
+| It obeys the switch, for example Qwen3. | The template closes the block in the prompt. Thus, the model replies without reasoning and uses no tokens for it. |
+| It has no reasoning, for example Qwen2.5. | The template ignores the field. The prompt and the reply do not change. |
+| It always opens the block, for example DeepSeek-R1-Distill-Llama. | The model still writes reasoning. The daemon does not send it in `text`, but `completion_tokens` counts it. If the model does not close the block, the reply has no text. |
+
+`REASONING_OFF` does not filter the reply. If the model opens a new block after the closed
+block, that block comes in `text`.
+
+You can use `REASONING_OFF` with tools. A request with `response_json_schema` always has reasoning
+off. Thus, `REASONING_OFF` with a schema changes nothing.
 
 ## Embeddings
 

@@ -54,6 +54,8 @@ void check_fields(std::vector<std::string> carried) {
 
 void test_field_coverage() {
     check_fields<v1::SamplingParams>({"temperature", "top_k", "top_p", "min_p", "seed", "max_tokens", "stop"});
+    // `sampling` has a conversion of its own; the Chat handler applies it next to this one.
+    check_fields<v1::ChatRequest>({"messages", "sampling", "tools", "response_json_schema", "reasoning"});
     check_fields<v1::ChatMessage>({"role", "content", "tool_calls", "tool_call_id"});
     check_fields<v1::Tool>({"name", "description", "parameters_json_schema"});
     check_fields<v1::ToolCall>({"id", "name", "arguments_json"});
@@ -66,6 +68,9 @@ void test_field_coverage() {
     check_fields<v1::Progress>({"stage", "prompt_tokens", "ready_prompt_tokens", "completion_tokens"});
     check_fields<v1::EmbedResponse>({"embeddings", "input_tokens"});
     check_fields<v1::Embedding>({"values"});
+
+    // Every wire reasoning value has a counterpart in the chat layer's Reasoning.
+    CHECK_EQ(v1::Reasoning_descriptor()->value_count(), 2);
 
     // The engine's FinishReason has a counterpart for every wire reason but TOOL_CALLS, which
     // finish_chunk derives, and UNSPECIFIED, which is never sent. The engine's Cancelled has none:
@@ -130,6 +135,37 @@ void test_chat_message() {
     CHECK_EQ(message.tool_calls[0].id, "call-1");
     CHECK_EQ(message.tool_calls[0].name, "get_time");
     CHECK_EQ(message.tool_calls[0].arguments_json, R"({"tz":"UTC"})");
+}
+
+void test_chat_request() {
+    v1::ChatRequest in;
+    in.add_messages()->set_content("hello");
+    in.add_messages()->set_content("again");
+    in.add_tools()->set_name("search");
+    in.set_response_json_schema(R"({"type":"object"})");
+    in.set_reasoning(v1::REASONING_OFF);
+
+    const llamad::ChatInput input = wire::from_proto(in);
+    CHECK_EQ(input.messages.size(), size_t(2));
+    CHECK_EQ(input.messages[1].content, "again");
+    CHECK_EQ(input.tools.size(), size_t(1));
+    CHECK_EQ(input.tools[0].name, "search");
+    CHECK_EQ(input.response_json_schema, R"({"type":"object"})");
+    CHECK(input.reasoning == llamad::Reasoning::Off);
+
+    // Unset is the template's own behaviour.
+    CHECK(wire::from_proto(v1::ChatRequest{}).reasoning == llamad::Reasoning::Default);
+
+    // A value from a newer proto is refused rather than served as the default.
+    v1::ChatRequest unknown;
+    unknown.set_reasoning(static_cast<v1::Reasoning>(7));
+    bool threw = false;
+    try {
+        wire::from_proto(unknown);
+    } catch (const llamad::ChatFormatError &) {
+        threw = true;
+    }
+    CHECK(threw);
 }
 
 void test_tool() {
@@ -268,6 +304,7 @@ int main() {
     test_unset_sampling_keeps_engine_defaults();
     test_set_sampling_overrides();
     test_chat_message();
+    test_chat_request();
     test_tool();
     test_model_info();
     test_embed_response();

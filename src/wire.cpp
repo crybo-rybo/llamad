@@ -5,6 +5,7 @@
 #include "wire.h"
 
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace llamad::wire {
@@ -29,6 +30,17 @@ v1::Stage to_proto(GenerateStage stage) {
         case GenerateStage::Generating: return v1::STAGE_GENERATING;
     }
     return v1::STAGE_UNSPECIFIED;
+}
+
+/// An open enum: a client built from a newer proto can send a value this daemon does not know.
+/// Refusing it beats quietly serving the default, which the client did not ask for.
+Reasoning from_proto(v1::Reasoning reasoning) {
+    switch (reasoning) {
+        case v1::REASONING_DEFAULT: return Reasoning::Default;
+        case v1::REASONING_OFF:     return Reasoning::Off;
+        default:                    break;
+    }
+    throw ChatFormatError("unknown reasoning value " + std::to_string(static_cast<int>(reasoning)));
 }
 
 /// Token counts and timings of one generation.
@@ -58,6 +70,21 @@ SamplingParams from_proto(const v1::SamplingParams & params) {
     if (params.has_seed())        { out.seed        = params.seed(); }
     if (params.has_max_tokens())  { out.max_tokens  = params.max_tokens(); }
     out.stop.assign(params.stop().begin(), params.stop().end());
+    return out;
+}
+
+ChatInput from_proto(const v1::ChatRequest & request) {
+    ChatInput out;
+    out.messages.reserve(static_cast<size_t>(request.messages_size()));
+    for (const v1::ChatMessage & message : request.messages()) {
+        out.messages.push_back(from_proto(message));
+    }
+    out.tools.reserve(static_cast<size_t>(request.tools_size()));
+    for (const v1::Tool & tool : request.tools()) {
+        out.tools.push_back(from_proto(tool));
+    }
+    out.response_json_schema = request.response_json_schema();
+    out.reasoning            = from_proto(request.reasoning());
     return out;
 }
 
