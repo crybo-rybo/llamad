@@ -220,7 +220,8 @@ public:
 
     /// Generates from a raw prompt. Serialized internally: concurrent callers queue. The prompt is
     /// tokenized, measured and the sampler built before the call queues, so a request that cannot
-    /// run fails without waiting for another one. The KV cache keeps what the previous call decoded, and a call decodes only the part of its
+    /// run fails without waiting for another one.
+    /// The KV cache keeps what the previous call decoded, and a call decodes only the part of its
     /// prompt after the prefix it shares with that (see reusable_prefix). The cache changes how
     /// long a prompt takes, never which prompt runs; the logits can differ from a cold run's in
     /// the last bits, because the prompt is decoded in a different batch split.

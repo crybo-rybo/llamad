@@ -451,7 +451,7 @@ ChatFormat::Stream::Final ChatFormat::Stream::finish() {
 
     for (const common_chat_tool_call & call : impl_->parsed.tool_calls) {
         if (!is_complete(call)) {
-            // Generation ended inside the markup of a call (a length limit or a cancellation): the
+            // Generation ended inside the markup of a call (a length limit, usually): the
             // name or the arguments are a fragment. All or nothing — a half-parsed call is worth
             // less to a client than no call at all, and the finish reason already says the response
             // was cut short. The content parsed so far still streams; the markup never does.

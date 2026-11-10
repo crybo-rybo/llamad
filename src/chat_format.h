@@ -133,7 +133,8 @@ public:
         /// A call id that is empty or repeats one from the history or this reply is replaced. A
         /// rejected final parse falls back to the un-emitted raw suffix if it can be located; that
         /// fallback can include markup.
-        /// Call once after generation. The service discards calls on LENGTH or CANCELLED.
+        /// Call once after generation. The service discards calls on LENGTH, and does not call
+        /// this for a generation that its client cancelled.
         Final finish();
 
     private:

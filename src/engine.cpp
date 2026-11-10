@@ -1048,7 +1048,7 @@ GenerateResult Engine::generate(const std::string & prompt, const SamplingParams
     }
     if (tokens.size() >= impl_->n_ctx_seq) {
         throw InputTooLongError("prompt is too long: " + std::to_string(tokens.size()) +
-                          " tokens for a context of " + std::to_string(impl_->n_ctx_seq));
+                                " tokens for a context of " + std::to_string(impl_->n_ctx_seq));
     }
 
     GenerateResult result;
@@ -1207,9 +1207,9 @@ EmbedResult Engine::embed(const std::vector<std::string> & inputs, const std::fu
             throw EngineError("input " + std::to_string(i) + " tokenized to zero tokens");
         }
         if (tokens.size() > impl_->max_embed_tokens) {
-            throw InputTooLongError("input " + std::to_string(i) + " is too long: " + std::to_string(tokens.size()) +
-                              " tokens, and one input may have at most " +
-                              std::to_string(impl_->max_embed_tokens));
+            throw InputTooLongError("input " + std::to_string(i) + " is too long: " +
+                                    std::to_string(tokens.size()) + " tokens, and one input may have at most " +
+                                    std::to_string(impl_->max_embed_tokens));
         }
         tokenized.push_back(std::move(tokens));
     }
