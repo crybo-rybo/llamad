@@ -30,7 +30,8 @@
 //   limit), which a shorter input can fix; INVALID_ARGUMENT for any other request the caller can
 //   fix; FAILED_PRECONDITION for something the loaded model cannot do (Chat without a usable
 //   template, Embed on a generative model, Generate or Chat on an embedding model); INTERNAL for
-//   anything else.
+//   anything else. A request message larger than ModelInfo.max_request_bytes is refused by the
+//   gRPC transport with RESOURCE_EXHAUSTED before the daemon reads it.
 // - Request id. Each call to this service gets an id from the daemon, in the initial metadata
 //   under the key "x-request-id". It is there on success and on every error status, and Generate
 //   and Chat send it before their first chunk, also while the request queues. The daemon's log
@@ -80,6 +81,9 @@ message ModelInfo {
   string model_name = 9;       // the GGUF's general.name metadata; empty when the file has none
   string model_file = 10;      // file name of the loaded GGUF, without its directory
   string llamad_version = 11;  // the daemon's version, e.g. "0.1.0"; `llamad --version` prints it too
+  // The largest serialized request message the daemon accepts, set by --max-request-bytes. A larger
+  // request gets RESOURCE_EXHAUSTED from the transport and never reaches the daemon.
+  uint32 max_request_bytes = 12;
 }
 
 message TokenizeRequest {
@@ -216,7 +220,8 @@ message GenerateChunk {
 
 message EmbedRequest {
   // Must not be empty. Each input is tokenized as a Generate prompt is and must fit the daemon's
-  // per-input token limit; an instruction prefix the model expects is part of the text.
+  // per-input token limit; an instruction prefix the model expects is part of the text. The whole
+  // request must also fit ModelInfo.max_request_bytes, which a large batch can pass first.
   repeated string inputs = 1;
 }
 

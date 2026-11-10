@@ -59,11 +59,11 @@ void test_field_coverage() {
     check_fields<v1::ChatMessage>({"role", "content", "tool_calls", "tool_call_id"});
     check_fields<v1::Tool>({"name", "description", "parameters_json_schema"});
     check_fields<v1::ToolCall>({"id", "name", "arguments_json"});
-    // The model's fields come from the engine's ModelInfo; llamad_version from the daemon's
-    // DaemonInfo.
+    // The model's fields come from the engine's ModelInfo; llamad_version and max_request_bytes
+    // from the daemon's DaemonInfo.
     check_fields<v1::ModelInfo>({"description", "model_name", "model_file", "n_params", "size_bytes", "n_ctx",
                                  "n_ctx_train", "has_chat_template", "n_embd", "serves_embeddings",
-                                 "llamad_version"});
+                                 "llamad_version", "max_request_bytes"});
     check_fields<v1::GenerateStats>(
         {"prompt_tokens", "completion_tokens", "prompt_ms", "completion_ms", "cached_prompt_tokens"});
     check_fields<v1::Finish>({"reason", "stats", "tool_calls"});
@@ -196,7 +196,7 @@ void test_model_info() {
     info.n_embd            = 896;
     info.serves_embeddings = true;
 
-    const wire::DaemonInfo daemon{"0.1.0"};
+    const wire::DaemonInfo daemon{"0.1.0", 16777216};
 
     v1::ModelInfo out;
     wire::to_proto(info, daemon, &out);
@@ -204,6 +204,7 @@ void test_model_info() {
     CHECK_EQ(out.model_name(), "Qwen2.5 0.5B Instruct");
     CHECK_EQ(out.model_file(), "qwen2.5-0.5b-instruct-q4_k_m.gguf");
     CHECK_EQ(out.llamad_version(), "0.1.0");
+    CHECK(out.max_request_bytes() == 16777216u);
     CHECK(out.n_params() == 494032768u);
     CHECK(out.size_bytes() == 397808192u);
     CHECK(out.n_ctx() == 4096u);

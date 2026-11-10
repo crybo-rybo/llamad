@@ -89,7 +89,7 @@ private:
                                    ChatFormat::Stream * stream);
 
     Engine &               engine_;                   ///< Borrowed engine; outlives the service.
-    const wire::DaemonInfo daemon_;                   ///< Version GetModelInfo reports.
+    const wire::DaemonInfo daemon_;                   ///< Version and limits GetModelInfo reports.
     const ChatFormat *     chat_format_;              ///< Borrowed immutable formatter, or null when Chat is unavailable.
     const std::string      chat_unavailable_reason_;  ///< Diagnostic returned with FAILED_PRECONDITION.
 };

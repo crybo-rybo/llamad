@@ -223,6 +223,7 @@ that you send.
 |---|---|
 | `OUT_OF_RANGE` | An input has more tokens than the model can take. Examples: a `Generate` or `Chat` prompt that does not fit the context, an `Embed` input that is longer than the limit. A shorter input can succeed. Refer to [Inputs that are too long](#inputs-that-are-too-long). |
 | `INVALID_ARGUMENT` | The request is not correct, and the application can correct it. Examples: no messages, schema JSON that does not parse, a schema with tools. |
+| `RESOURCE_EXHAUSTED` | The request message is larger than `ModelInfo.max_request_bytes`. gRPC refuses it before the daemon reads it. Send a smaller request, for example a smaller `Embed` batch. As an alternative, start the daemon with a larger `--max-request-bytes`. Your gRPC library also refuses a response that is larger than its receive limit, often 4 MiB, with this status. A large `Embed` batch can cause this. Increase that limit in the channel options. |
 | `FAILED_PRECONDITION` | The loaded model cannot do this request. Examples: `Chat` without a usable chat template, `Embed` on a generative model, `Generate` or `Chat` on an embedding model. |
 | `CANCELLED`, `DEADLINE_EXCEEDED` | The application cancelled the call, or its deadline passed. A `Generate` or `Chat` stream then has no `finish` chunk. |
 | `INTERNAL` | All other errors, for example a decode error. The message tells what occurred. |

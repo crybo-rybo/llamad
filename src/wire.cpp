@@ -120,6 +120,7 @@ void to_proto(const ModelInfo & info, const DaemonInfo & daemon, v1::ModelInfo *
     out->set_n_embd(info.n_embd);
     out->set_serves_embeddings(info.serves_embeddings);
     out->set_llamad_version(daemon.version);
+    out->set_max_request_bytes(daemon.max_request_bytes);
 }
 
 void to_proto(const EmbedResult & result, v1::EmbedResponse * out) {

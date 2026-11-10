@@ -9,6 +9,7 @@
 |---|---|---|
 | `--model PATH` | necessary | The GGUF model to load |
 | `--socket PATH` | `$XDG_RUNTIME_DIR/llamad.sock`, else `/tmp/llamad-<uid>.sock` | The Unix socket to listen on |
+| `--max-request-bytes N` | 4194304 (4 MiB) | The maximum size of a request message in bytes, from 65536 to 2147483647 |
 | `--ctx N` | 4096 | The context size in tokens |
 | `--ngl N` | 99 | The number of layers to offload to the GPU. 0 disables offload. |
 | `--threads N` | 0 | The number of inference threads. 0 is automatic: half of the hardware threads for generation, and all of them for prompts. |
@@ -42,6 +43,13 @@ Its line also gives the stage where it stopped and the prompt tokens in the KV c
 
 The lines for start and stop have no id. Some calls write no line: a call that the gRPC
 transport refuses before the service gets it, and calls to the health and reflection services.
+
+gRPC refuses a request that is larger than `--max-request-bytes`, before the daemon reads it. The
+client gets `RESOURCE_EXHAUSTED`. The daemon does not see the request. Thus, the log has no line
+for it. `GetModelInfo` gives the limit in `max_request_bytes`. For `Chat` and `Generate`, the
+context is almost always full before a request gets to 4 MiB. An `Embed` batch of thousands of
+short inputs can be larger than 4 MiB. For such batches, increase the limit or send smaller
+batches.
 
 SIGINT or SIGTERM stops the daemon and removes the socket. If a script starts the daemon in the
 background, the daemon inherits SIGINT as ignored. macOS discards a signal that is both ignored

@@ -12,6 +12,7 @@
 #include "engine.h"
 #include "llamad/v1/llamad.pb.h"
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -19,7 +20,8 @@ namespace llamad::wire {
 
 /// What GetModelInfo reports about the daemon itself, beside the model. main.cpp fills it.
 struct DaemonInfo {
-    std::string version;  ///< As `llamad --version` prints it, without the program name.
+    std::string version;                ///< As `llamad --version` prints it, without the program name.
+    uint32_t    max_request_bytes = 0;  ///< The largest request message the server accepts.
 };
 
 /// Engine sampling parameters, with the engine's defaults wherever the request left a field unset.

@@ -66,8 +66,8 @@ pooling type, for example bge-small-en-v1.5 or Qwen3-Embedding. With such a mode
 answers `Embed` requests, and not `Generate` or `Chat` requests.
 
 The project does not include a model. You can use any GGUF file. The daemon accepts the flags
-`--socket`, `--ctx`, `--ngl`, `--threads`, `--devices` and `--tensor-split`. For more
-information, refer to [docs/daemon.md](docs/daemon.md).
+`--socket`, `--max-request-bytes`, `--ctx`, `--ngl`, `--threads`, `--devices` and
+`--tensor-split`. For more information, refer to [docs/daemon.md](docs/daemon.md).
 
 ## Use llamad from your application
 
