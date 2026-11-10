@@ -115,7 +115,9 @@ turn.
 
 The daemon formats and parses tool calls. It is not a tool registry. Each request contains its
 tools as data. Each tool has a name, a description and a JSON Schema for its arguments. The
-daemon does these steps:
+schema must be a JSON object. If the schema has a `type`, the type must be `"object"`. An empty
+schema means that the tool has no arguments. The daemon rejects other schemas with
+`INVALID_ARGUMENT`. The daemon does these steps:
 
 - It renders the tools into the prompt, in the format that the model was trained on.
 - During sampling, it limits the arguments to the schema.
@@ -131,6 +133,12 @@ requests. **Your application must run the tools and send the results in a new re
   stops a reply, the reason is `LENGTH`, and there are no tool calls. A cancelled reply has no
   `finish` chunk.
 - `arguments_json` is always a complete JSON object. For a tool without parameters, it is `{}`.
+- If one call is not complete, or its arguments are not a JSON object, the daemon sends no calls
+  for the reply. The text before the calls still comes. Thus, the reply can have no text and no
+  calls, with the reason `EOG` or `STOP`.
+- Each `id` is unique in the conversation. It is different from each id in the history of the
+  request, and from each other call in the reply. The daemon makes an id from 32 random
+  characters. Thus, ids from different requests and daemon runs are also different in practice.
 
 This example shows one round:
 

@@ -10,6 +10,7 @@
 
 #include <cstdio>
 #include <fstream>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -73,6 +74,11 @@ llamad::ChatFormat make_thinking_format() {
 llamad::ChatFormat make_always_thinking_format() {
     return llamad::ChatFormat(read_file(R1_DISTILL_TEMPLATE_PATH), /*bos*/ "<｜begin▁of▁sentence｜>",
                               /*eos*/ "<｜end▁of▁sentence｜>");
+}
+
+// Mistral Nemo lets the model write each call's id, which the daemon must not trust to be unique.
+llamad::ChatFormat make_model_id_format() {
+    return llamad::ChatFormat(read_file(MISTRAL_NEMO_TEMPLATE_PATH), /*bos*/ "<s>", /*eos*/ "</s>");
 }
 
 bool ends_with(const std::string & text, const std::string & suffix) {
@@ -594,6 +600,162 @@ void test_invalid_tool_schema() {
     CHECK(threw);
 }
 
+// The contract promises arguments that are one JSON object. A model without a grammar can still
+// write another JSON value there. At this pin common's parser turns such a value into {}, and the
+// chat layer drops any call whose arguments are not an object, so either way the client never
+// receives one, and the markup never reaches the content.
+void test_stream_non_object_arguments_never_reach_the_client() {
+    const llamad::ChatFormat   format   = make_format();
+    const llamad::RenderedChat rendered =
+        format.render({.messages = {user("Weather in Paris?")}, .tools = {weather_tool()}});
+
+    const std::string good = "<tool_call>\n" R"({"name": "get_weather", "arguments": {"city": "Paris"}})"
+                             "\n</tool_call>";
+    for (const char * arguments : {"[1]", R"("Paris")", "42", "true"}) {
+        const std::string bad = std::string("<tool_call>\n{\"name\": \"get_weather\", \"arguments\": ") + arguments +
+                                "}\n</tool_call>";
+        for (const std::string & generated : {bad, good + "\n" + bad}) {
+            for (size_t chunk_size : {size_t(0), size_t(1)}) {
+                const Run run = run_stream(format, rendered, generated, chunk_size);
+                CHECK_EQ(run.content(), std::string());
+                for (const llamad::ToolCall & call : run.calls) {
+                    const std::string args = normalize_json(call.arguments_json);
+                    CHECK(!args.empty() && args.front() == '{' && args.back() == '}');
+                }
+            }
+        }
+    }
+}
+
+// An empty schema means a tool without arguments. common renders `{}` into the prompt unchanged and
+// builds the grammar from an empty object schema, so the model can write only {}.
+void test_tool_with_empty_schema() {
+    llamad::Tool tool           = clock_tool();
+    tool.parameters_json_schema = "";
+
+    const llamad::ChatFormat   format   = make_format();
+    const llamad::RenderedChat rendered = format.render({.messages = {user("What time is it?")}, .tools = {tool}});
+    CHECK(contains(rendered.prompt, R"("name": "get_time", "description": "Say what time it is", "parameters": {}})"));
+    CHECK(contains(rendered.grammar.grammar, R"(tool-get-time-schema ::= "{" space "}")"));
+}
+
+// A schema that parses but cannot describe an object is refused before common sees it.
+void test_tool_schema_not_an_object_rejected() {
+    const llamad::ChatFormat format = make_format();
+
+    for (const char * schema : {"[1]", "true", R"("object")", R"({"type":"array"})", R"({"type":["object","null"]})"}) {
+        llamad::Tool tool           = weather_tool();
+        tool.parameters_json_schema = schema;
+
+        bool threw = false;
+        try {
+            format.render({.messages = {user("hi")}, .tools = {tool}});
+        } catch (const llamad::ChatFormatError &) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
+
+    // A schema with properties and no type still describes an object, and is accepted.
+    llamad::Tool untyped           = weather_tool();
+    untyped.parameters_json_schema = R"({"properties":{"city":{"type":"string"}}})";
+    CHECK(!format.render({.messages = {user("hi")}, .tools = {untyped}}).grammar.grammar.empty());
+}
+
+// Arguments in the history come from the client. common refuses ones that do not parse, and the
+// caller sees a ChatFormatError (INVALID_ARGUMENT), not a crash or a silent prompt.
+void test_history_arguments_not_json_rejected() {
+    llamad::ToolCall call;
+    call.id             = "call_1";
+    call.name           = "get_weather";
+    call.arguments_json = R"({"city":)";
+
+    llamad::ChatMessage assistant;
+    assistant.role       = "assistant";
+    assistant.tool_calls = {call};
+
+    const llamad::ChatFormat format = make_format();
+    bool                     threw  = false;
+    try {
+        format.render({.messages = {user("Weather in Paris?"), assistant}, .tools = {weather_tool()}});
+    } catch (const llamad::ChatFormatError &) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
+// Daemon-made ids are 32 alphanumeric characters and do not repeat.
+void test_generated_call_ids() {
+    const llamad::ChatFormat   format   = make_format();
+    const llamad::RenderedChat rendered =
+        format.render({.messages = {user("Weather in Paris?")}, .tools = {weather_tool()}});
+    const std::string generated = "<tool_call>\n" R"({"name": "get_weather", "arguments": {"city": "Paris"}})"
+                                  "\n</tool_call>";
+
+    std::set<std::string> ids;
+    for (int i = 0; i < 200; ++i) {
+        const Run run = run_stream(format, rendered, generated, /*chunk_size*/ 0);
+        CHECK_EQ(run.calls.size(), size_t(1));
+        if (run.calls.size() == 1) {
+            const std::string & id = run.calls[0].id;
+            CHECK_EQ(id.size(), size_t(32));
+            CHECK(id.find_first_not_of("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz") ==
+                  std::string::npos);
+            ids.insert(id);
+        }
+    }
+    CHECK_EQ(ids.size(), size_t(200));
+}
+
+// A model that writes its own ids can repeat one from the history or from the same reply. Such an
+// id is replaced; a fresh one is kept.
+void test_model_call_ids_unique_in_conversation() {
+    llamad::ToolCall earlier;
+    earlier.id             = "abcdefghi";
+    earlier.name           = "get_weather";
+    earlier.arguments_json = R"({"city":"Oslo"})";
+
+    llamad::ChatMessage assistant;
+    assistant.role       = "assistant";
+    assistant.tool_calls = {earlier};
+
+    llamad::ChatMessage result;
+    result.role         = "tool";
+    result.content      = "-3C and snowing";
+    result.tool_call_id = "abcdefghi";
+
+    // The template insists that user and assistant turns alternate.
+    llamad::ChatMessage answer;
+    answer.role    = "assistant";
+    answer.content = "It is -3C and snowing in Oslo.";
+
+    const llamad::ChatFormat   format   = make_model_id_format();
+    const llamad::RenderedChat rendered = format.render(
+        {.messages = {user("Weather in Oslo?"), assistant, result, answer, user("And in Paris, Rome and Berlin?")},
+         .tools    = {weather_tool()}});
+
+    const std::string generated =
+        "[TOOL_CALLS]["
+        R"({"name": "get_weather", "arguments": {"city": "Paris"}, "id": "abcdefghi"}, )"
+        R"({"name": "get_weather", "arguments": {"city": "Rome"}, "id": "zyxwvutsr"}, )"
+        R"({"name": "get_weather", "arguments": {"city": "Berlin"}, "id": "zyxwvutsr"}])";
+
+    // Fed whole, the parser sees each model id. Fed in pieces, a call is first seen before its id
+    // is written, and it keeps the daemon's id from then on. Either way no id may repeat.
+    for (size_t chunk_size : {size_t(0), size_t(1)}) {
+        const Run run = run_stream(format, rendered, generated, chunk_size);
+        CHECK_EQ(run.calls.size(), size_t(3));
+        std::set<std::string> ids = {"abcdefghi"};
+        for (const llamad::ToolCall & call : run.calls) {
+            CHECK(!call.id.empty());
+            CHECK(ids.insert(call.id).second);
+        }
+        if (chunk_size == 0 && run.calls.size() == 3) {
+            CHECK_EQ(run.calls[1].id, std::string("zyxwvutsr"));
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Reasoning
 // ---------------------------------------------------------------------------
@@ -735,6 +897,12 @@ int main() {
     test_render_schema_with_tools_rejected();
     test_render_schema_not_an_object_rejected();
     test_render_empty_schema_object_rejected();
+    test_stream_non_object_arguments_never_reach_the_client();
+    test_tool_with_empty_schema();
+    test_tool_schema_not_an_object_rejected();
+    test_history_arguments_not_json_rejected();
+    test_generated_call_ids();
+    test_model_call_ids_unique_in_conversation();
     test_reasoning_off_closes_think_block();
     test_reasoning_off_without_reasoning_template();
     test_reasoning_off_with_tools();

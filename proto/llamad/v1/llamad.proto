@@ -23,7 +23,8 @@
 // - Text is user-visible output only: never tool-call markup, never part of a matched stop string,
 //   never a partial UTF-8 sequence.
 // - Tool calls arrive whole, on `finish`, and `finish.tool_calls` is non-empty if and only if
-//   `finish.reason` is FINISH_REASON_TOOL_CALLS. Their arguments are a complete JSON object.
+//   `finish.reason` is FINISH_REASON_TOOL_CALLS. Their arguments are a complete JSON object, and
+//   their ids are unique in the conversation.
 // - Errors are status codes: OUT_OF_RANGE for an input with more tokens than the model can take
 //   (a Generate or Chat prompt that does not fit the context, an Embed input over the per-input
 //   limit), which a shorter input can fix; INVALID_ARGUMENT for any other request the caller can
@@ -110,11 +111,17 @@ message GenerateRequest {
 message Tool {
   string name = 1;
   string description = 2;
-  string parameters_json_schema = 3;  // JSON Schema object for the arguments; empty takes none
+  // A JSON Schema object for the arguments; empty takes none. The arguments are a JSON object, so
+  // a schema with a "type" other than "object" is refused with INVALID_ARGUMENT.
+  string parameters_json_schema = 3;
 }
 
 message ToolCall {
-  string id = 1;              // assigned by the daemon; echo it as the "tool" message's tool_call_id
+  // Set by the daemon and unique in the conversation: it repeats no id in the request's history
+  // and no other call in the reply. A daemon-made id is 32 random characters, so in practice it
+  // also differs from the ids of other requests and daemon runs. Echo it as the "tool" message's
+  // tool_call_id.
+  string id = 1;
   string name = 2;
   string arguments_json = 3;  // a complete JSON object; {} for a call without arguments
 }

@@ -21,14 +21,14 @@ namespace llamad {
 struct Tool {
     std::string name;                    ///< Tool function name.
     std::string description;             ///< Model-facing explanation of the tool.
-    std::string parameters_json_schema;  ///< JSON Schema object, as a JSON string
+    std::string parameters_json_schema;  ///< JSON Schema object of `type` "object" if typed; empty takes none
 };
 
 /// One complete model-requested function call, identified for a matching tool reply.
 struct ToolCall {
-    std::string id;              ///< Call identifier; echo it in the corresponding tool reply.
+    std::string id;              ///< Unique in the conversation; echo it in the corresponding tool reply.
     std::string name;            ///< Tool function name.
-    std::string arguments_json;  ///< Complete JSON arguments; an argument-free call carries an empty object.
+    std::string arguments_json;  ///< A complete JSON object; an argument-free call carries an empty object.
 };
 
 /// One history turn; the full ordered history travels with every chat request.
@@ -97,8 +97,8 @@ public:
     /// model writes anyway inside a block the template opened is withheld from the content.
     /// @return Prompt, grammar, stops and shared parser state for a matching output stream.
     /// @throws ChatFormatError For invalid schema JSON, rejected messages or parser setup failure;
-    ///         also if response_json_schema is not a JSON object, is the empty object, or is
-    ///         combined with tools.
+    ///         if a tool schema is not a JSON object or has a `type` other than "object"; if
+    ///         response_json_schema is not a JSON object, is the empty object, or comes with tools.
     RenderedChat render(const ChatInput & input) const;
 
     /// One parser per request; not thread-safe. Recognized tool-call markup is withheld.
@@ -124,13 +124,15 @@ public:
         /// Final visible tail and complete calls from the accumulated output.
         struct Final {
             std::string           content_tail;  ///< Visible text not returned by push().
-            std::vector<ToolCall> tool_calls;    ///< Complete calls; empty if any parsed call is incomplete.
+            std::vector<ToolCall> tool_calls;    ///< Complete calls; empty if any parsed call is not.
         };
 
         /// Generation ended: final (non-partial) parse. content_tail = visible content not yet
-        /// returned by push(). Parser errors are contained. An incomplete call suppresses all
-        /// calls while preserving visible content. A rejected final parse falls back to the
-        /// un-emitted raw suffix if it can be located; that fallback can include markup.
+        /// returned by push(). Parser errors are contained. A call that is incomplete, or whose
+        /// arguments are not a JSON object, suppresses all calls while preserving visible content.
+        /// A call id that is empty or repeats one from the history or this reply is replaced. A
+        /// rejected final parse falls back to the un-emitted raw suffix if it can be located; that
+        /// fallback can include markup.
         /// Call once after generation. The service discards calls on LENGTH or CANCELLED.
         Final finish();
 
