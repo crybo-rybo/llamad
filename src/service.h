@@ -43,13 +43,16 @@ public:
                           v1::TokenizeResponse * response) override;
 
     /// Stream a raw completion and one final result while the client remains connected.
+    /// @returns FAILED_PRECONDITION on an embedding model, INVALID_ARGUMENT for caller errors,
+    /// CANCELLED if the client goes before the finish chunk, INTERNAL for other failures, or OK.
     grpc::Status Generate(grpc::ServerContext * context,
                           const v1::GenerateRequest * request,
                           grpc::ServerWriter<v1::GenerateChunk> * writer) override;
 
     /// Render history and tools, stream visible text and finalize atomic tool calls.
     /// @returns FAILED_PRECONDITION without a usable template, INVALID_ARGUMENT for caller
-    /// errors, INTERNAL for other failures, or OK after generation.
+    /// errors, CANCELLED if the client goes before the finish chunk, INTERNAL for other failures,
+    /// or OK after generation.
     grpc::Status Chat(grpc::ServerContext * context,
                       const v1::ChatRequest * request,
                       grpc::ServerWriter<v1::GenerateChunk> * writer) override;
@@ -64,7 +67,8 @@ public:
 
 private:
     /// Shared body of Generate and Chat: run the engine, stream text chunks, then write the one
-    /// `finish` chunk carrying the finish reason, stats and any tool calls.
+    /// `finish` chunk carrying the finish reason, stats and any tool calls. A client that goes
+    /// stops the engine at its next step and gets no `finish`; the status is then CANCELLED.
     /// `stream` is Chat's parser, which decides what text the client sees and parses the tool
     /// calls once generation is over; Generate passes null. What the engine throws propagates.
     grpc::Status stream_generation(const char * rpc_name,

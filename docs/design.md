@@ -49,7 +49,8 @@
   The CUDA and Vulkan backends ignore it.
 - **Stream shape.** A stream has zero or more `text` chunks, and then exactly one `finish` chunk.
   The `finish` chunk contains the finish reason and the stats. `GenerateChunk` is a `oneof` of
-  these two types, so the types enforce the shape.
+  these two types, so the types enforce the shape. A cancelled stream ends with the status
+  `CANCELLED` and with no `finish` chunk. Thus, there is no finish reason for a cancel.
 
   Tool calls are complete and are in the `finish` chunk. `tool_calls` is not empty if and only if
   the finish reason is `TOOL_CALLS`. Text chunks contain only the content that the user sees.

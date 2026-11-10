@@ -75,7 +75,8 @@ conversation or a bad schema. Such an error ends the stream with its status and 
 
 To stop a generation, cancel the call with your gRPC library, or set a deadline. The daemon stops
 the request at the next step of the engine. A step is one token or one batch of the prompt. A
-request in the queue stops in 250 ms or less. The prompt tokens that the engine decoded stay in
+request in the queue stops in 250 ms or less. The stream then ends with the status `CANCELLED` or
+`DEADLINE_EXCEEDED`, and with no `finish` chunk. The prompt tokens that the engine decoded stay in
 the KV cache. Thus, if you send the same prompt again, the daemon does not decode them again.
 
 `GenerateStats.cached_prompt_tokens` is the number of prompt tokens that came from the KV cache.
@@ -99,8 +100,9 @@ requests. **Your application must run the tools and send the results in a new re
 - Tool calls are complete and are in the `finish` chunk, with `reason` =
   `FINISH_REASON_TOOL_CALLS`. There are no partial arguments. The markup of the tool calls is
   never in a `text` chunk.
-- `finish.tool_calls` is not empty if and only if the reason is `TOOL_CALLS`. If `max_tokens` or
-  a cancel stops a reply, the reason is `LENGTH` or `CANCELLED`, and there are no tool calls.
+- `finish.tool_calls` is not empty if and only if the reason is `TOOL_CALLS`. If `max_tokens`
+  stops a reply, the reason is `LENGTH`, and there are no tool calls. A cancelled reply has no
+  `finish` chunk.
 - `arguments_json` is always a complete JSON object. For a tool without parameters, it is `{}`.
 
 This example shows one round:
@@ -131,8 +133,8 @@ property descriptions.
 
 - The JSON comes in usual `text` chunks. Concatenate the chunks, then parse the result.
 - The object is complete when `finish.reason` is `EOG`. It is also complete when the reason is
-  `STOP` and the stop string matched after the object. `LENGTH` and `CANCELLED` tell that the
-  object is not complete.
+  `STOP` and the stop string matched after the object. `LENGTH` tells that the object is not
+  complete. A cancelled reply has no `finish` chunk.
 - You cannot use a schema and tools in the same request. The daemon rejects the schema `{}`,
   because it puts no limit on the reply. The two errors are `INVALID_ARGUMENT`.
 - A schema turn has no reasoning. If the template opens a `<think>` block, the daemon tells the
@@ -158,7 +160,7 @@ that you send.
 |---|---|
 | `INVALID_ARGUMENT` | The request is not correct, and the application can correct it. Examples: no messages, a prompt that is longer than the context, schema JSON that does not parse, a schema with tools, an embedding input that is too long. |
 | `FAILED_PRECONDITION` | The loaded model cannot do this request. Examples: `Chat` without a usable chat template, `Embed` on a generative model, `Generate` or `Chat` on an embedding model. |
-| `CANCELLED`, `DEADLINE_EXCEEDED` | The application cancelled the call, or its deadline passed. |
+| `CANCELLED`, `DEADLINE_EXCEEDED` | The application cancelled the call, or its deadline passed. A `Generate` or `Chat` stream then has no `finish` chunk. |
 | `INTERNAL` | All other errors, for example a decode error. The message tells what occurred. |
 
 The daemon serves one generation at a time. Thus, concurrent requests wait in a queue. A deadline

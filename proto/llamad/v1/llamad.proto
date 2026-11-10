@@ -12,8 +12,9 @@
 //   request leaves behind is the KV cache, which changes how long the next prompt takes and never
 //   which prompt runs.
 // - Stream shape. A Generate or Chat stream that succeeds is zero or more chunks carrying `text`,
-//   then exactly one chunk carrying `finish`, then the end of the stream. Cancellation or a
-//   transport failure can end it before `finish`; an error status ends it with no `finish`.
+//   then exactly one chunk carrying `finish`, then the end of the stream. A stream that ends
+//   without `finish` ends with a status that is not OK: CANCELLED or DEADLINE_EXCEEDED after a
+//   cancel or a deadline, or an error.
 // - Text is user-visible output only: never tool-call markup, never part of a matched stop string,
 //   never a partial UTF-8 sequence.
 // - Tool calls arrive whole, on `finish`, and `finish.tool_calls` is non-empty if and only if
@@ -125,8 +126,10 @@ enum FinishReason {
   FINISH_REASON_EOG = 1;          // the model ended its turn
   FINISH_REASON_LENGTH = 2;       // max_tokens or the context ran out
   FINISH_REASON_STOP = 3;         // a stop string matched
-  FINISH_REASON_CANCELLED = 4;    // the client cancelled
   FINISH_REASON_TOOL_CALLS = 5;   // the model called one or more tools; see Finish.tool_calls
+  // A cancelled stream ends with the status CANCELLED and no `finish`, so it needs no reason.
+  reserved 4;
+  reserved "FINISH_REASON_CANCELLED";
 }
 
 // Token counts and wall-clock time of one generation, not counting time queued behind another.

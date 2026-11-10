@@ -13,6 +13,7 @@
 #include <google/protobuf/descriptor.h>
 
 #include <algorithm>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -66,8 +67,10 @@ void test_field_coverage() {
     check_fields<v1::Embedding>({"values"});
 
     // The engine's FinishReason has a counterpart for every wire reason but TOOL_CALLS, which
-    // finish_chunk derives, and UNSPECIFIED, which is never sent.
-    CHECK_EQ(v1::FinishReason_descriptor()->value_count(), 6);
+    // finish_chunk derives, and UNSPECIFIED, which is never sent. The engine's Cancelled has none:
+    // a cancelled stream has no finish chunk.
+    CHECK_EQ(v1::FinishReason_descriptor()->value_count(), 5);
+    CHECK(v1::FinishReason_descriptor()->FindValueByName("FINISH_REASON_CANCELLED") == nullptr);
 }
 
 void test_unset_sampling_keeps_engine_defaults() {
@@ -198,8 +201,17 @@ void test_finish_carries_reason_and_stats() {
 
     CHECK(wire::finish_chunk(llamad::FinishReason::Eog, stats, {}).finish().reason() == v1::FINISH_REASON_EOG);
     CHECK(wire::finish_chunk(llamad::FinishReason::Length, stats, {}).finish().reason() == v1::FINISH_REASON_LENGTH);
-    CHECK(wire::finish_chunk(llamad::FinishReason::Cancelled, stats, {}).finish().reason() ==
-          v1::FINISH_REASON_CANCELLED);
+}
+
+void test_a_cancelled_generation_has_no_finish_chunk() {
+    // Building one would put FINISH_REASON_UNSPECIFIED on the wire.
+    bool threw = false;
+    try {
+        wire::finish_chunk(llamad::FinishReason::Cancelled, {}, one_call());
+    } catch (const std::invalid_argument &) {
+        threw = true;
+    }
+    CHECK(threw);
 }
 
 void test_tool_calls_only_when_generation_completed() {
@@ -215,12 +227,10 @@ void test_tool_calls_only_when_generation_completed() {
         CHECK_EQ(chunk.finish().tool_calls(0).arguments_json(), R"({"tz":"UTC"})");
     }
 
-    // One cut short by the token limit or a cancel keeps its reason and drops what was parsed.
-    for (const llamad::FinishReason reason : {llamad::FinishReason::Length, llamad::FinishReason::Cancelled}) {
-        const v1::GenerateChunk chunk = wire::finish_chunk(reason, stats, one_call());
-        CHECK(chunk.finish().reason() != v1::FINISH_REASON_TOOL_CALLS);
-        CHECK_EQ(chunk.finish().tool_calls_size(), 0);
-    }
+    // One cut short by the token limit keeps its reason and drops what was parsed.
+    const v1::GenerateChunk chunk = wire::finish_chunk(llamad::FinishReason::Length, stats, one_call());
+    CHECK(chunk.finish().reason() == v1::FINISH_REASON_LENGTH);
+    CHECK_EQ(chunk.finish().tool_calls_size(), 0);
 }
 
 }  // namespace
@@ -235,6 +245,7 @@ int main() {
     test_embed_response();
     test_finish_carries_reason_and_stats();
     test_tool_calls_only_when_generation_completed();
+    test_a_cancelled_generation_has_no_finish_chunk();
 
     return tests::report();
 }

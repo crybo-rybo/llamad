@@ -4,6 +4,7 @@
 
 #include "wire.h"
 
+#include <stdexcept>
 #include <utility>
 
 namespace llamad::wire {
@@ -15,9 +16,9 @@ v1::FinishReason to_proto(FinishReason reason) {
         case FinishReason::Eog:       return v1::FINISH_REASON_EOG;
         case FinishReason::Length:    return v1::FINISH_REASON_LENGTH;
         case FinishReason::Stop:      return v1::FINISH_REASON_STOP;
-        case FinishReason::Cancelled: return v1::FINISH_REASON_CANCELLED;
+        case FinishReason::Cancelled: break;
     }
-    return v1::FINISH_REASON_UNSPECIFIED;
+    throw std::invalid_argument("a cancelled generation has no finish chunk");
 }
 
 /// Token counts and timings of one generation.
@@ -90,14 +91,15 @@ void to_proto(const EmbedResult & result, v1::EmbedResponse * out) {
 }
 
 v1::GenerateChunk finish_chunk(FinishReason reason, const GenerateStats & stats, std::vector<ToolCall> tool_calls) {
-    const bool ran_to_completion = reason == FinishReason::Eog || reason == FinishReason::Stop;
+    const v1::FinishReason wire_reason       = to_proto(reason);
+    const bool             ran_to_completion = reason == FinishReason::Eog || reason == FinishReason::Stop;
     if (!ran_to_completion) {
         tool_calls.clear();
     }
 
     v1::GenerateChunk chunk;
     v1::Finish *      finish = chunk.mutable_finish();
-    finish->set_reason(tool_calls.empty() ? to_proto(reason) : v1::FINISH_REASON_TOOL_CALLS);
+    finish->set_reason(tool_calls.empty() ? wire_reason : v1::FINISH_REASON_TOOL_CALLS);
     to_proto(stats, finish->mutable_stats());
     for (const ToolCall & call : tool_calls) {
         to_proto(call, finish->add_tool_calls());

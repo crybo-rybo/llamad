@@ -21,6 +21,14 @@ The daemon creates the socket with mode 0600. Thus, only your user can connect t
 writes one `[llamad] ...` log line for each request to stderr. While it runs, it writes nothing to
 stdout.
 
+The log line of a `Generate` or `Chat` request gives the token counts, the finish reason and the
+time from the start of the request, queue time included. A cancelled request has `finish=cancelled`.
+Its line also gives the stage where it stopped and the prompt tokens in the KV cache:
+
+```
+[llamad] Generate prompt_tokens=6689 cached_prompt_tokens=0 completion_tokens=0 finish=cancelled stage=prompt ready_prompt_tokens=2048 8560ms
+```
+
 SIGINT or SIGTERM stops the daemon and removes the socket. If a script starts the daemon in the
 background, the daemon inherits SIGINT as ignored. macOS discards a signal that is both ignored
 and blocked. Thus, use SIGTERM to stop a daemon that a script started in the background.

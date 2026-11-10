@@ -36,8 +36,10 @@ void to_proto(const EmbedResult & result, v1::EmbedResponse * out);
 
 /// The last chunk of a Generate or Chat stream. `tool_calls` are what the chat parser found; they
 /// are kept, and the reason becomes TOOL_CALLS, only when generation ran to completion (EOG or a
-/// stop string). A reply cut short by the token limit or a cancel stopped mid-thought, so whatever
-/// the parser salvaged from it is not a call anyone should execute.
+/// stop string). A reply cut short by the token limit stopped mid-thought, so whatever the parser
+/// salvaged from it is not a call anyone should execute.
+/// @throws std::invalid_argument For FinishReason::Cancelled: a cancelled stream has no finish
+/// chunk, and the wire has no reason to give one.
 v1::GenerateChunk finish_chunk(FinishReason reason, const GenerateStats & stats, std::vector<ToolCall> tool_calls);
 
 }  // namespace llamad::wire

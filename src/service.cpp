@@ -16,17 +16,35 @@
 namespace llamad {
 namespace {
 
-/// `tool_calls` < 0 leaves the count out of the line entirely (Generate has no tool calls).
-void log_request(const char * rpc_name, const GenerateStats & stats, const std::string & reason, double wall_ms,
-                 int tool_calls) {
+/// The engine's spelling of a stage, for the log line of a cancelled request.
+const char * stage_name(GenerateStage stage) {
+    switch (stage) {
+        case GenerateStage::Queued:     return "queued";
+        case GenerateStage::Prompt:     return "prompt";
+        case GenerateStage::Generating: return "generating";
+    }
+    return "?";
+}
+
+/// One line per Generate or Chat request. `cancelled_at` is null for a request that finished,
+/// and otherwise the last step the engine reported: where the request stopped and how much of its
+/// prompt is in the cache. `tool_calls` < 0 leaves the count out of the line entirely (Generate
+/// has no tool calls).
+void log_request(const char * rpc_name, const GenerateStats & stats, const std::string & reason,
+                 const GenerateProgress * cancelled_at, double wall_ms, int tool_calls) {
     char tools[32] = "";
     if (tool_calls >= 0) {
         std::snprintf(tools, sizeof(tools), " tool_calls=%d", tool_calls);
     }
+    char where[80] = "";
+    if (cancelled_at != nullptr) {
+        std::snprintf(where, sizeof(where), " stage=%s ready_prompt_tokens=%d", stage_name(cancelled_at->stage),
+                      cancelled_at->ready_prompt_tokens);
+    }
     std::fprintf(stderr,
-                 "[llamad] %s prompt_tokens=%d cached_prompt_tokens=%d completion_tokens=%d finish=%s%s %.0fms\n",
-                 rpc_name, stats.prompt_tokens, stats.cached_prompt_tokens, stats.completion_tokens, reason.c_str(), tools,
-                 wall_ms);
+                 "[llamad] %s prompt_tokens=%d cached_prompt_tokens=%d completion_tokens=%d finish=%s%s%s %.0fms\n",
+                 rpc_name, stats.prompt_tokens, stats.cached_prompt_tokens, stats.completion_tokens, reason.c_str(),
+                 where, tools, wall_ms);
 }
 
 /// Runs one RPC body and turns what it throws into the status the contract promises: caller
@@ -90,19 +108,23 @@ grpc::Status LlamaService::stream_generation(const char * rpc_name,
                                              ChatFormat::Stream * stream) {
     const auto started = std::chrono::steady_clock::now();
 
-    // Set as soon as the client is known to be gone (cancel or broken stream);
-    // it suppresses the final chunk, which would only fail to write anyway.
+    // Set as soon as the client is known to be gone (cancel or broken stream); it stops the
+    // engine and suppresses the final chunk, which would only fail to write anyway.
     bool client_gone = false;
 
-    // Writes one ordinary text chunk. Returns false once the client is gone.
-    const auto write_text = [&](const std::string & text) -> bool {
-        v1::GenerateChunk chunk;
-        chunk.set_text(text);
+    // Writes one chunk. Returns false once the client is gone.
+    const auto write = [&](const v1::GenerateChunk & chunk) -> bool {
         if (!writer->Write(chunk)) {
             client_gone = true;
             return false;
         }
         return true;
+    };
+
+    const auto write_text = [&](const std::string & text) -> bool {
+        v1::GenerateChunk chunk;
+        chunk.set_text(text);
+        return write(chunk);
     };
 
     const ChunkCallback on_chunk = [&](const std::string & text) -> bool {
@@ -120,8 +142,11 @@ grpc::Status LlamaService::stream_generation(const char * rpc_name,
     };
 
     // The engine asks at every step, so a client that leaves while the request is queued or its
-    // prompt decodes stops it at the next step, not only once text flows.
-    const ProgressCallback on_progress = [&](const GenerateProgress &) -> bool {
+    // prompt decodes stops it at the next step, not only once text flows. The last step is kept
+    // for the log line.
+    GenerateProgress last_progress;
+    const ProgressCallback on_progress = [&](const GenerateProgress & progress) -> bool {
+        last_progress = progress;
         if (context->IsCancelled()) {
             client_gone = true;
             return false;
@@ -131,28 +156,42 @@ grpc::Status LlamaService::stream_generation(const char * rpc_name,
 
     const GenerateResult result = engine_.generate(prompt, params, on_chunk, on_progress);
 
-    if (context->IsCancelled()) {
+    // The engine ends with Cancelled only when one of the callbacks above saw the client go.
+    if (result.reason == FinishReason::Cancelled || context->IsCancelled()) {
         client_gone = true;
     }
 
-    std::vector<ToolCall> tool_calls;
-    if (!client_gone && stream != nullptr) {
-        ChatFormat::Stream::Final final = stream->finish();
-        tool_calls                      = std::move(final.tool_calls);
-        // Content the parser only became sure about at the end is just more text.
-        if (!final.content_tail.empty()) {
-            write_text(final.content_tail);
+    // A finish chunk is built only for a generation the client is still there for; the log line
+    // still gives its reason if writing it then fails.
+    std::string reason     = "cancelled";
+    int         tool_count = 0;
+    const bool  finished   = !client_gone;
+    if (finished) {
+        std::vector<ToolCall> tool_calls;
+        if (stream != nullptr) {
+            ChatFormat::Stream::Final final = stream->finish();
+            tool_calls                      = std::move(final.tool_calls);
+            // Content the parser only became sure about at the end is just more text.
+            if (!final.content_tail.empty()) {
+                write_text(final.content_tail);
+            }
+        }
+
+        const v1::GenerateChunk finish = wire::finish_chunk(result.reason, result.stats, std::move(tool_calls));
+        reason                         = v1::FinishReason_Name(finish.finish().reason());
+        tool_count                     = finish.finish().tool_calls_size();
+        if (!client_gone) {
+            write(finish);
         }
     }
 
-    const v1::GenerateChunk finish = wire::finish_chunk(result.reason, result.stats, std::move(tool_calls));
-    if (!client_gone && !writer->Write(finish)) {
-        client_gone = true;
+    log_request(rpc_name, result.stats, reason, finished ? nullptr : &last_progress, ms_since(started),
+                stream != nullptr ? tool_count : -1);
+
+    // The client is gone, so it never reads this status; it tells gRPC and the log the truth.
+    if (client_gone) {
+        return grpc::Status(grpc::StatusCode::CANCELLED, "the client cancelled the call");
     }
-
-    log_request(rpc_name, result.stats, v1::FinishReason_Name(finish.finish().reason()), ms_since(started),
-                stream != nullptr ? finish.finish().tool_calls_size() : -1);
-
     return grpc::Status::OK;
 }
 
