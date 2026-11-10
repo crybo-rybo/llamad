@@ -73,7 +73,10 @@ def default_socket():
 
 def describe(error):
     if isinstance(error, grpc.RpcError):
-        return f"{error.code().name}: {error.details()}"
+        # The daemon's log line for the call has the same id. A call that did not reach it has none.
+        request_id = dict(error.initial_metadata() or ()).get("x-request-id")
+        suffix = f" (request {request_id})" if request_id else ""
+        return f"{error.code().name}: {error.details()}{suffix}"
     return str(error)
 
 

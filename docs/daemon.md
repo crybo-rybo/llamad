@@ -21,13 +21,26 @@ The daemon creates the socket with mode 0600. Thus, only your user can connect t
 writes one `[llamad] ...` log line for each request to stderr. While it runs, it writes nothing to
 stdout.
 
+Each request line starts with the name of the call and the request id: `[llamad] <call> id=<id>`.
+The daemon sends the same id to the client in the `x-request-id` metadata
+([protocol.md](protocol.md#request-ids)). Thus, an application can report the id with an error,
+and you can find the line of that request. A request that fails writes `error:` or
+`internal error:` and the message:
+
+```
+[llamad] Chat id=bc572824d4031e16 error: prompt is too long: 1230 tokens for a context of 512
+```
+
 The log line of a `Generate` or `Chat` request gives the token counts, the finish reason and the
 time from the start of the request, queue time included. A cancelled request has `finish=cancelled`.
 Its line also gives the stage where it stopped and the prompt tokens in the KV cache:
 
 ```
-[llamad] Generate prompt_tokens=6689 cached_prompt_tokens=0 completion_tokens=0 finish=cancelled stage=prompt ready_prompt_tokens=2048 8560ms
+[llamad] Generate id=90313a784aa353f2 prompt_tokens=6689 cached_prompt_tokens=0 completion_tokens=0 finish=cancelled stage=prompt ready_prompt_tokens=2048 8560ms
 ```
+
+The lines for start and stop have no id. Some calls write no line: a call that the gRPC
+transport refuses before the service gets it, and calls to the health and reflection services.
 
 SIGINT or SIGTERM stops the daemon and removes the socket. If a script starts the daemon in the
 background, the daemon inherits SIGINT as ignored. macOS discards a signal that is both ignored

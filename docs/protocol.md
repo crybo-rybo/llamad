@@ -217,3 +217,32 @@ until the request succeeds.
 
 An `Embed` input that is too long also fails with `OUT_OF_RANGE`, and the daemon embeds no input
 of that request. Make the input shorter, or split it into parts.
+
+## Request ids
+
+The daemon gives each call an id. It sends the id in the initial metadata of the call, with the
+key `x-request-id`. The daemon writes the same id in its log line for the call
+([daemon.md](daemon.md)). Thus, if a call fails, record the id with the error. The id then
+identifies the log line of that call.
+
+- The id is in the metadata of a successful call and of a call that fails with any status.
+- `Generate` and `Chat` send the id before the first chunk. Thus, a request in the queue already
+  has its id.
+- The id is an opaque string. Do not parse it. The daemon makes it from 64 random bits, and not
+  from a counter. Thus, ids do not repeat after a restart of the daemon.
+- The daemon does not read an `x-request-id` that the client sends.
+
+```python
+call = stub.Chat(request)
+request_id = dict(call.initial_metadata()).get("x-request-id")  # waits for the headers only
+
+try:
+    info, call = stub.GetModelInfo.with_call(pb.GetModelInfoRequest())
+    request_id = dict(call.initial_metadata()).get("x-request-id")
+except grpc.RpcError as error:
+    request_id = dict(error.initial_metadata() or ()).get("x-request-id")
+```
+
+Some calls have no id and no log line. The gRPC transport refuses some calls before the service
+gets them, for example a message that is too large or an unknown method. The health service and
+the reflection service also give no id.

@@ -30,6 +30,13 @@
 //   fix; FAILED_PRECONDITION for something the loaded model cannot do (Chat without a usable
 //   template, Embed on a generative model, Generate or Chat on an embedding model); INTERNAL for
 //   anything else.
+// - Request id. Each call to this service gets an id from the daemon, in the initial metadata
+//   under the key "x-request-id". It is there on success and on every error status, and Generate
+//   and Chat send it before their first chunk, also while the request queues. The daemon's log
+//   line for the call carries the same id, so give it with an error report. Treat it as an opaque
+//   string; ids are random, so they do not repeat across restarts of the daemon. The daemon ignores an id the client
+//   sends. A call the transport refuses before the service sees it (an oversized message, an
+//   unknown method) has no id, and neither do the health and reflection services.
 //
 // llamad follows semantic versioning. Before 1.0.0, a minor release can change this contract
 // incompatibly; callers then regenerate their stubs and update their request and response

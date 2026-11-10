@@ -19,6 +19,10 @@
 
 namespace llamad {
 
+/// One request's id, sent to the client as `x-request-id` metadata, and its log lines; defined in
+/// service.cpp.
+class RequestLog;
+
 /// Stateless RPC adapter; serializes generation through Engine and owns no model or tools.
 class LlamaService final : public v1::Llama::Service {
 public:
@@ -72,8 +76,9 @@ private:
     /// stats and any tool calls. A client that goes stops the engine at its next step and gets
     /// no `finish`; the status is then CANCELLED.
     /// `stream` is Chat's parser, which decides what text the client sees and parses the tool
-    /// calls once generation is over; Generate passes null. What the engine throws propagates.
-    grpc::Status stream_generation(const char * rpc_name,
+    /// calls once generation is over; Generate passes null. `log` gets the request's one line.
+    /// What the engine throws propagates.
+    grpc::Status stream_generation(RequestLog & log,
                                    grpc::ServerContext * context,
                                    const std::string & prompt,
                                    const SamplingParams & params,
