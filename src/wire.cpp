@@ -4,6 +4,8 @@
 
 #include "wire.h"
 
+#include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace llamad::wire {
@@ -15,9 +17,30 @@ v1::FinishReason to_proto(FinishReason reason) {
         case FinishReason::Eog:       return v1::FINISH_REASON_EOG;
         case FinishReason::Length:    return v1::FINISH_REASON_LENGTH;
         case FinishReason::Stop:      return v1::FINISH_REASON_STOP;
-        case FinishReason::Cancelled: return v1::FINISH_REASON_CANCELLED;
+        case FinishReason::Cancelled: break;
     }
-    return v1::FINISH_REASON_UNSPECIFIED;
+    throw std::invalid_argument("a cancelled generation has no finish chunk");
+}
+
+/// The wire spelling of a generation stage.
+v1::Stage to_proto(GenerateStage stage) {
+    switch (stage) {
+        case GenerateStage::Queued:     return v1::STAGE_QUEUED;
+        case GenerateStage::Prompt:     return v1::STAGE_PROMPT;
+        case GenerateStage::Generating: return v1::STAGE_GENERATING;
+    }
+    return v1::STAGE_UNSPECIFIED;
+}
+
+/// An open enum: a client built from a newer proto can send a value this daemon does not know.
+/// Refusing it beats quietly serving the default, which the client did not ask for.
+Reasoning from_proto(v1::Reasoning reasoning) {
+    switch (reasoning) {
+        case v1::REASONING_DEFAULT: return Reasoning::Default;
+        case v1::REASONING_OFF:     return Reasoning::Off;
+        default:                    break;
+    }
+    throw ChatFormatError("unknown reasoning value " + std::to_string(static_cast<int>(reasoning)));
 }
 
 /// Token counts and timings of one generation.
@@ -50,6 +73,21 @@ SamplingParams from_proto(const v1::SamplingParams & params) {
     return out;
 }
 
+ChatInput from_proto(const v1::ChatRequest & request) {
+    ChatInput out;
+    out.messages.reserve(static_cast<size_t>(request.messages_size()));
+    for (const v1::ChatMessage & message : request.messages()) {
+        out.messages.push_back(from_proto(message));
+    }
+    out.tools.reserve(static_cast<size_t>(request.tools_size()));
+    for (const v1::Tool & tool : request.tools()) {
+        out.tools.push_back(from_proto(tool));
+    }
+    out.response_json_schema = request.response_json_schema();
+    out.reasoning            = from_proto(request.reasoning());
+    return out;
+}
+
 ChatMessage from_proto(const v1::ChatMessage & message) {
     ChatMessage out;
     out.role         = message.role();
@@ -70,8 +108,10 @@ ToolCall from_proto(const v1::ToolCall & call) {
     return {call.id(), call.name(), call.arguments_json()};
 }
 
-void to_proto(const ModelInfo & info, v1::ModelInfo * out) {
+void to_proto(const ModelInfo & info, const DaemonInfo & daemon, v1::ModelInfo * out) {
     out->set_description(info.description);
+    out->set_model_name(info.name);
+    out->set_model_file(info.file);
     out->set_n_params(info.n_params);
     out->set_size_bytes(info.size_bytes);
     out->set_n_ctx(info.n_ctx);
@@ -79,6 +119,8 @@ void to_proto(const ModelInfo & info, v1::ModelInfo * out) {
     out->set_has_chat_template(info.has_chat_template);
     out->set_n_embd(info.n_embd);
     out->set_serves_embeddings(info.serves_embeddings);
+    out->set_llamad_version(daemon.version);
+    out->set_max_request_bytes(daemon.max_request_bytes);
 }
 
 void to_proto(const EmbedResult & result, v1::EmbedResponse * out) {
@@ -90,18 +132,29 @@ void to_proto(const EmbedResult & result, v1::EmbedResponse * out) {
 }
 
 v1::GenerateChunk finish_chunk(FinishReason reason, const GenerateStats & stats, std::vector<ToolCall> tool_calls) {
-    const bool ran_to_completion = reason == FinishReason::Eog || reason == FinishReason::Stop;
+    const v1::FinishReason wire_reason       = to_proto(reason);
+    const bool             ran_to_completion = reason == FinishReason::Eog || reason == FinishReason::Stop;
     if (!ran_to_completion) {
         tool_calls.clear();
     }
 
     v1::GenerateChunk chunk;
     v1::Finish *      finish = chunk.mutable_finish();
-    finish->set_reason(tool_calls.empty() ? to_proto(reason) : v1::FINISH_REASON_TOOL_CALLS);
+    finish->set_reason(tool_calls.empty() ? wire_reason : v1::FINISH_REASON_TOOL_CALLS);
     to_proto(stats, finish->mutable_stats());
     for (const ToolCall & call : tool_calls) {
         to_proto(call, finish->add_tool_calls());
     }
+    return chunk;
+}
+
+v1::GenerateChunk progress_chunk(const GenerateProgress & progress) {
+    v1::GenerateChunk chunk;
+    v1::Progress *    out = chunk.mutable_progress();
+    out->set_stage(to_proto(progress.stage));
+    out->set_prompt_tokens(progress.prompt_tokens);
+    out->set_ready_prompt_tokens(progress.ready_prompt_tokens);
+    out->set_completion_tokens(progress.completion_tokens);
     return chunk;
 }
 

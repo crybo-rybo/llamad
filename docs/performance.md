@@ -26,7 +26,8 @@ the prompt, and the prefill is always cold.
 
 For prefill, tokens per second counts the decoded tokens. For decode, it counts the generated
 tokens in the time from the first sample to the last sample. The bench does not send the stream
-to a callback. Thus, these numbers do not include the cost of the socket for each chunk.
+to a callback. Thus, these numbers do not include the cost of the socket for each chunk. The bench
+gives a progress callback that reads the clock at each step, as the daemon does.
 
 The numbers change by a few percent between runs of the same binary. They change more on a
 machine that is busy or warm. Compare a change with a baseline that you measure in the same

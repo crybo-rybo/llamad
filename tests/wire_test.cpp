@@ -13,6 +13,7 @@
 #include <google/protobuf/descriptor.h>
 
 #include <algorithm>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -53,21 +54,35 @@ void check_fields(std::vector<std::string> carried) {
 
 void test_field_coverage() {
     check_fields<v1::SamplingParams>({"temperature", "top_k", "top_p", "min_p", "seed", "max_tokens", "stop"});
+    // `sampling` has a conversion of its own; the Chat handler applies it next to this one.
+    check_fields<v1::ChatRequest>({"messages", "sampling", "tools", "response_json_schema", "reasoning"});
     check_fields<v1::ChatMessage>({"role", "content", "tool_calls", "tool_call_id"});
     check_fields<v1::Tool>({"name", "description", "parameters_json_schema"});
     check_fields<v1::ToolCall>({"id", "name", "arguments_json"});
-    check_fields<v1::ModelInfo>({"description", "n_params", "size_bytes", "n_ctx", "n_ctx_train",
-                                 "has_chat_template", "n_embd", "serves_embeddings"});
+    // The model's fields come from the engine's ModelInfo; llamad_version and max_request_bytes
+    // from the daemon's DaemonInfo.
+    check_fields<v1::ModelInfo>({"description", "model_name", "model_file", "n_params", "size_bytes", "n_ctx",
+                                 "n_ctx_train", "has_chat_template", "n_embd", "serves_embeddings",
+                                 "llamad_version", "max_request_bytes"});
     check_fields<v1::GenerateStats>(
         {"prompt_tokens", "completion_tokens", "prompt_ms", "completion_ms", "cached_prompt_tokens"});
     check_fields<v1::Finish>({"reason", "stats", "tool_calls"});
-    check_fields<v1::GenerateChunk>({"text", "finish"});
+    check_fields<v1::GenerateChunk>({"text", "finish", "progress"});
+    check_fields<v1::Progress>({"stage", "prompt_tokens", "ready_prompt_tokens", "completion_tokens"});
     check_fields<v1::EmbedResponse>({"embeddings", "input_tokens"});
     check_fields<v1::Embedding>({"values"});
 
+    // Every wire reasoning value has a counterpart in the chat layer's Reasoning.
+    CHECK_EQ(v1::Reasoning_descriptor()->value_count(), 2);
+
     // The engine's FinishReason has a counterpart for every wire reason but TOOL_CALLS, which
-    // finish_chunk derives, and UNSPECIFIED, which is never sent.
-    CHECK_EQ(v1::FinishReason_descriptor()->value_count(), 6);
+    // finish_chunk derives, and UNSPECIFIED, which is never sent. The engine's Cancelled has none:
+    // a cancelled stream has no finish chunk.
+    CHECK_EQ(v1::FinishReason_descriptor()->value_count(), 5);
+    CHECK(v1::FinishReason_descriptor()->FindValueByName("FINISH_REASON_CANCELLED") == nullptr);
+
+    // Every engine stage has a wire stage, and UNSPECIFIED is never sent.
+    CHECK_EQ(v1::Stage_descriptor()->value_count(), 4);
 }
 
 void test_unset_sampling_keeps_engine_defaults() {
@@ -125,6 +140,37 @@ void test_chat_message() {
     CHECK_EQ(message.tool_calls[0].arguments_json, R"({"tz":"UTC"})");
 }
 
+void test_chat_request() {
+    v1::ChatRequest in;
+    in.add_messages()->set_content("hello");
+    in.add_messages()->set_content("again");
+    in.add_tools()->set_name("search");
+    in.set_response_json_schema(R"({"type":"object"})");
+    in.set_reasoning(v1::REASONING_OFF);
+
+    const llamad::ChatInput input = wire::from_proto(in);
+    CHECK_EQ(input.messages.size(), size_t(2));
+    CHECK_EQ(input.messages[1].content, "again");
+    CHECK_EQ(input.tools.size(), size_t(1));
+    CHECK_EQ(input.tools[0].name, "search");
+    CHECK_EQ(input.response_json_schema, R"({"type":"object"})");
+    CHECK(input.reasoning == llamad::Reasoning::Off);
+
+    // Unset is the template's own behaviour.
+    CHECK(wire::from_proto(v1::ChatRequest{}).reasoning == llamad::Reasoning::Default);
+
+    // A value from a newer proto is refused rather than served as the default.
+    v1::ChatRequest unknown;
+    unknown.set_reasoning(static_cast<v1::Reasoning>(7));
+    bool threw = false;
+    try {
+        wire::from_proto(unknown);
+    } catch (const llamad::ChatFormatError &) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
 void test_tool() {
     v1::Tool in;
     in.set_name("search");
@@ -140,6 +186,8 @@ void test_tool() {
 void test_model_info() {
     llamad::ModelInfo info;
     info.description       = "qwen2 0.5B Q4_K - Medium";
+    info.name              = "Qwen2.5 0.5B Instruct";
+    info.file              = "qwen2.5-0.5b-instruct-q4_k_m.gguf";
     info.n_params          = 494032768;
     info.size_bytes        = 397808192;
     info.n_ctx             = 4096;
@@ -148,9 +196,15 @@ void test_model_info() {
     info.n_embd            = 896;
     info.serves_embeddings = true;
 
+    const wire::DaemonInfo daemon{"0.1.0", 16777216};
+
     v1::ModelInfo out;
-    wire::to_proto(info, &out);
+    wire::to_proto(info, daemon, &out);
     CHECK_EQ(out.description(), "qwen2 0.5B Q4_K - Medium");
+    CHECK_EQ(out.model_name(), "Qwen2.5 0.5B Instruct");
+    CHECK_EQ(out.model_file(), "qwen2.5-0.5b-instruct-q4_k_m.gguf");
+    CHECK_EQ(out.llamad_version(), "0.1.0");
+    CHECK(out.max_request_bytes() == 16777216u);
     CHECK(out.n_params() == 494032768u);
     CHECK(out.size_bytes() == 397808192u);
     CHECK(out.n_ctx() == 4096u);
@@ -198,8 +252,41 @@ void test_finish_carries_reason_and_stats() {
 
     CHECK(wire::finish_chunk(llamad::FinishReason::Eog, stats, {}).finish().reason() == v1::FINISH_REASON_EOG);
     CHECK(wire::finish_chunk(llamad::FinishReason::Length, stats, {}).finish().reason() == v1::FINISH_REASON_LENGTH);
-    CHECK(wire::finish_chunk(llamad::FinishReason::Cancelled, stats, {}).finish().reason() ==
-          v1::FINISH_REASON_CANCELLED);
+}
+
+void test_a_cancelled_generation_has_no_finish_chunk() {
+    // Building one would put FINISH_REASON_UNSPECIFIED on the wire.
+    bool threw = false;
+    try {
+        wire::finish_chunk(llamad::FinishReason::Cancelled, {}, one_call());
+    } catch (const std::invalid_argument &) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
+void test_progress_carries_stage_and_counts() {
+    llamad::GenerateProgress progress;
+    progress.stage               = llamad::GenerateStage::Prompt;
+    progress.prompt_tokens       = 5923;
+    progress.ready_prompt_tokens = 2048;
+    progress.completion_tokens   = 0;
+
+    const v1::GenerateChunk chunk = wire::progress_chunk(progress);
+    CHECK(chunk.chunk_case() == v1::GenerateChunk::kProgress);
+    CHECK(chunk.progress().stage() == v1::STAGE_PROMPT);
+    CHECK_EQ(chunk.progress().prompt_tokens(), 5923);
+    CHECK_EQ(chunk.progress().ready_prompt_tokens(), 2048);
+    CHECK_EQ(chunk.progress().completion_tokens(), 0);
+
+    progress.stage = llamad::GenerateStage::Queued;
+    CHECK(wire::progress_chunk(progress).progress().stage() == v1::STAGE_QUEUED);
+
+    progress.stage             = llamad::GenerateStage::Generating;
+    progress.completion_tokens = 17;
+    const v1::GenerateChunk generating = wire::progress_chunk(progress);
+    CHECK(generating.progress().stage() == v1::STAGE_GENERATING);
+    CHECK_EQ(generating.progress().completion_tokens(), 17);
 }
 
 void test_tool_calls_only_when_generation_completed() {
@@ -215,12 +302,10 @@ void test_tool_calls_only_when_generation_completed() {
         CHECK_EQ(chunk.finish().tool_calls(0).arguments_json(), R"({"tz":"UTC"})");
     }
 
-    // One cut short by the token limit or a cancel keeps its reason and drops what was parsed.
-    for (const llamad::FinishReason reason : {llamad::FinishReason::Length, llamad::FinishReason::Cancelled}) {
-        const v1::GenerateChunk chunk = wire::finish_chunk(reason, stats, one_call());
-        CHECK(chunk.finish().reason() != v1::FINISH_REASON_TOOL_CALLS);
-        CHECK_EQ(chunk.finish().tool_calls_size(), 0);
-    }
+    // One cut short by the token limit keeps its reason and drops what was parsed.
+    const v1::GenerateChunk chunk = wire::finish_chunk(llamad::FinishReason::Length, stats, one_call());
+    CHECK(chunk.finish().reason() == v1::FINISH_REASON_LENGTH);
+    CHECK_EQ(chunk.finish().tool_calls_size(), 0);
 }
 
 }  // namespace
@@ -230,11 +315,14 @@ int main() {
     test_unset_sampling_keeps_engine_defaults();
     test_set_sampling_overrides();
     test_chat_message();
+    test_chat_request();
     test_tool();
     test_model_info();
     test_embed_response();
     test_finish_carries_reason_and_stats();
     test_tool_calls_only_when_generation_completed();
+    test_a_cancelled_generation_has_no_finish_chunk();
+    test_progress_carries_stage_and_counts();
 
     return tests::report();
 }

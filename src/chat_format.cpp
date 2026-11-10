@@ -13,6 +13,7 @@
 #include <map>
 #include <mutex>
 #include <random>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -37,17 +38,22 @@ void init_common_log_once() {
 // Tool call ids
 // ---------------------------------------------------------------------------
 
-/// Same shape as llama-server's: 32 random alphanumeric characters. Ids only have to be
-/// unique within one response, so a per-call thread-local generator is plenty.
+/// Same shape as llama-server's: 32 random alphanumeric characters. A client resends every id in
+/// the history of a tool loop, and a conversation outlives a daemon restart, so an id must not
+/// repeat across responses, threads or runs. Each character therefore comes straight from
+/// std::random_device, the operating system's entropy source with libstdc++ and libc++, which
+/// gives an id about 190 bits. A seeded std::mt19937 would carry only the seed's 32, and two
+/// threads or runs with the same seed would repeat each other's ids. Tool calls are rare, so the
+/// cost of the source does not matter.
 std::string gen_tool_call_id() {
     static const char alnum[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
-    static thread_local std::mt19937 rng{std::random_device{}()};
+    std::random_device                    entropy;
     std::uniform_int_distribution<size_t> pick(0, sizeof(alnum) - 2);
 
     std::string id(32, ' ');
     for (char & c : id) {
-        c = alnum[pick(rng)];
+        c = alnum[pick(entropy)];
     }
     return id;
 }
@@ -74,19 +80,35 @@ common_chat_msg to_common(const ChatMessage & message) {
     return msg;
 }
 
-/// Validate schema syntax and provide common with an object for argument-free tools.
+/// Validate the argument schema and provide common with an object for argument-free tools.
 common_chat_tool to_common(const Tool & tool) {
-    // common parses `parameters` with nlohmann and lets the exception escape into the middle of
-    // template rendering; validate here instead so the caller gets a useful message.
     const std::string & schema = tool.parameters_json_schema;
-    if (!schema.empty() && !nlohmann::json::accept(schema)) {
-        throw ChatFormatError("tool '" + tool.name + "': parameters_json_schema is not valid JSON");
+    if (!schema.empty()) {
+        // common parses `parameters` with nlohmann and lets the exception escape into the middle of
+        // template rendering; validate here instead so the caller gets a useful message.
+        const nlohmann::json parsed = nlohmann::json::parse(schema, /*cb*/ nullptr, /*allow_exceptions*/ false);
+        if (parsed.is_discarded()) {
+            throw ChatFormatError("tool '" + tool.name + "': parameters_json_schema is not valid JSON");
+        }
+        if (!parsed.is_object()) {
+            throw ChatFormatError("tool '" + tool.name + "': parameters_json_schema is not a JSON object");
+        }
+        // The grammar's arguments rule is built from this schema, and the contract promises the
+        // client an object. A schema whose type admits something else lets the model write other
+        // arguments, which common's parser then replaces with {}: a call the model did not make.
+        const auto type = parsed.find("type");
+        if (type != parsed.end() && *type != "object") {
+            throw ChatFormatError("tool '" + tool.name + "': parameters_json_schema has type " + type->dump() +
+                                  ", but tool-call arguments are a JSON object, so it must be \"object\"");
+        }
     }
 
     common_chat_tool out;
     out.name        = tool.name;
     out.description = tool.description;
-    // An empty schema means "no arguments"; common expects a JSON object either way.
+    // An empty schema means "no arguments". common renders `{}` into the prompt as it is, and
+    // builds the grammar from {"type":"object","properties":{}} in its place
+    // (common_chat_tool_parameters), so the model can write only the empty object.
     out.parameters  = schema.empty() ? "{}" : schema;
     return out;
 }
@@ -103,9 +125,20 @@ ToolCall from_common(const common_chat_tool_call & call) {
 
 /// The PEG parsers are lenient, so text cut off inside a tool call still parses: the call comes back
 /// with a half-finished name or a fragment of its arguments ("{"). Complete calls are the only ones
-/// worth handing to a client, and valid JSON arguments are the test for that.
+/// worth handing to a client, and arguments that parse as one JSON object are the test for that.
+/// An object is also what the contract promises. At this pin common's parser keeps only argument
+/// text that starts with '{' (anything else becomes {}), so a non-object does not arrive here
+/// today; the check keeps the contract if a submodule update changes that.
 bool is_complete(const common_chat_tool_call & call) {
-    return !call.name.empty() && (call.arguments.empty() || nlohmann::json::accept(call.arguments));
+    if (call.name.empty()) {
+        return false;
+    }
+    if (call.arguments.empty()) {
+        return true;  // a tool that takes no arguments; from_common spells it {}
+    }
+    const nlohmann::json arguments =
+        nlohmann::json::parse(call.arguments, /*cb*/ nullptr, /*allow_exceptions*/ false);
+    return !arguments.is_discarded() && arguments.is_object();
 }
 
 /// The engine resolves trigger words against the vocab, so words stay raw here and only regexes
@@ -148,7 +181,8 @@ void split_triggers(const std::vector<common_grammar_trigger> & triggers, Gramma
 
 /// Everything common_chat_parse needs, built once per render and shared by every Stream.
 struct ParseState {
-    common_chat_parser_params params;  ///< Format identifier, parser and generation prefix fixed by a render.
+    common_chat_parser_params params;            ///< Format identifier, parser and generation prefix fixed by a render.
+    std::set<std::string>     history_call_ids;  ///< ids of the calls replayed in the rendered history
 };
 
 // ---------------------------------------------------------------------------
@@ -188,10 +222,10 @@ ChatFormat::ChatFormat(const std::string & template_source,
 
 ChatFormat::~ChatFormat() = default;
 
-RenderedChat ChatFormat::render(const std::vector<ChatMessage> & messages, const std::vector<Tool> & tools,
-                                const std::string & response_json_schema) const {
+RenderedChat ChatFormat::render(const ChatInput & input) const {
+    const std::string & response_json_schema = input.response_json_schema;
     if (!response_json_schema.empty()) {
-        if (!tools.empty()) {
+        if (!input.tools.empty()) {
             // common's parser matches the response format before tools, so under a response schema
             // a tool call would never be parsed as one. Refusing beats ignoring one of the two.
             throw ChatFormatError("tools and response_json_schema cannot be used together");
@@ -214,15 +248,22 @@ RenderedChat ChatFormat::render(const std::vector<ChatMessage> & messages, const
         }
     }
 
-    // A schema turn and a thinking template disagree about how the assistant turn opens: the
-    // template writes an unclosed <think> block into the generation prompt, while the response
-    // grammar admits only JSON after the assistant header, so the engine's prefill is rejected.
-    // Asking the template to close the block, and the parser to treat thinking as reasoning
-    // rather than content, makes the two agree and keeps thinking text out of the JSON stream.
-    // Plain and tool turns leave a model's thinking inline in the content.
-    const bool                    schema_turn = !response_json_schema.empty();
+    // Reasoning off means enable_thinking=false for the template and reasoning extraction for the
+    // parser; the two only work as a pair. A template that honours the switch writes a closed,
+    // empty <think> block into the generation prompt. Under COMMON_REASONING_FORMAT_NONE the parser
+    // would report that prompt text as content and stream it, so the parser is told to expect
+    // reasoning instead. A template that ignores the switch still opens the block, and the model
+    // still reasons; the parser files that text as reasoning, which never reaches the caller. (A
+    // block the model opens on its own after a closed one is content either way.) A template with
+    // no reasoning markers is unaffected by either setting.
+    //
+    // A schema turn is always off: the response grammar admits only JSON after the assistant
+    // header, so an open <think> block in the prompt would make the engine's prefill fail.
+    // A default turn leaves the template alone and a model's thinking inline in the content.
+    const bool                    schema_turn   = !response_json_schema.empty();
+    const bool                    reasoning_off = schema_turn || input.reasoning == Reasoning::Off;
     const common_reasoning_format reasoning =
-        schema_turn ? COMMON_REASONING_FORMAT_AUTO : COMMON_REASONING_FORMAT_NONE;
+        reasoning_off ? COMMON_REASONING_FORMAT_AUTO : COMMON_REASONING_FORMAT_NONE;
 
     common_chat_templates_inputs inputs;
     inputs.use_jinja             = true;
@@ -230,15 +271,15 @@ RenderedChat ChatFormat::render(const std::vector<ChatMessage> & messages, const
     inputs.tool_choice           = COMMON_CHAT_TOOL_CHOICE_AUTO;
     inputs.parallel_tool_calls   = impl_->parallel_tool_calls;
     inputs.reasoning_format      = reasoning;
-    inputs.enable_thinking       = !schema_turn;
+    inputs.enable_thinking       = !reasoning_off;
     inputs.json_schema           = response_json_schema;           // empty leaves the reply unconstrained
 
-    inputs.messages.reserve(messages.size());
-    for (const ChatMessage & message : messages) {
+    inputs.messages.reserve(input.messages.size());
+    for (const ChatMessage & message : input.messages) {
         inputs.messages.push_back(to_common(message));
     }
-    inputs.tools.reserve(tools.size());
-    for (const Tool & tool : tools) {
+    inputs.tools.reserve(input.tools.size());
+    for (const Tool & tool : input.tools) {
         inputs.tools.push_back(to_common(tool));
     }
 
@@ -280,6 +321,11 @@ RenderedChat ChatFormat::render(const std::vector<ChatMessage> & messages, const
     state->params.generation_prompt  = params.generation_prompt;
     state->params.reasoning_format   = reasoning;   // the parser must match what the grammar was built from
     state->params.parse_tool_calls   = true;
+    for (const ChatMessage & message : input.messages) {
+        for (const ToolCall & call : message.tool_calls) {
+            state->history_call_ids.insert(call.id);
+        }
+    }
     if (!params.parser.empty()) {
         // The serialized PEG parser: without it common_chat_parse falls back to "everything is
         // content" and tool-call markup would be streamed straight to the client.
@@ -405,18 +451,29 @@ ChatFormat::Stream::Final ChatFormat::Stream::finish() {
 
     for (const common_chat_tool_call & call : impl_->parsed.tool_calls) {
         if (!is_complete(call)) {
-            // Generation ended inside the markup of a call (a length limit or a cancellation): the
+            // Generation ended inside the markup of a call (a length limit, usually): the
             // name or the arguments are a fragment. All or nothing — a half-parsed call is worth
             // less to a client than no call at all, and the finish reason already says the response
             // was cut short. The content parsed so far still streams; the markup never does.
+            // Arguments that are complete JSON but not an object get the same treatment: the
+            // contract says arguments are an object. The reason is then EOG or STOP, so a reply
+            // that was only the call arrives with no text and no call.
             final.tool_calls.clear();
             return final;
         }
     }
 
+    // Most formats leave the id to the daemon, but some let the model write one, and a model can
+    // copy an id from the history or write one twice. The client matches tool results to calls by
+    // id across the whole conversation, so an id that is already taken is replaced.
+    std::set<std::string> taken = impl_->state->history_call_ids;
     final.tool_calls.reserve(impl_->parsed.tool_calls.size());
     for (const common_chat_tool_call & call : impl_->parsed.tool_calls) {
-        final.tool_calls.push_back(from_common(call));
+        ToolCall out = from_common(call);
+        while (out.id.empty() || !taken.insert(out.id).second) {
+            out.id = gen_tool_call_id();
+        }
+        final.tool_calls.push_back(std::move(out));
     }
     return final;
 }

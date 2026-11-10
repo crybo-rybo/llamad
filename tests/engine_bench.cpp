@@ -19,6 +19,7 @@
 #include "flags.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
@@ -88,7 +89,18 @@ struct Scenario {
 
 /// Runs the scenario once and returns what it measures: the prompt or the generation.
 Sample run_once(llamad::Engine & engine, const Scenario & scenario, int run) {
-    const llamad::GenerateResult result = engine.generate(scenario.prompt(run), scenario.params, /*on_chunk*/ {});
+    // The daemon's progress callback reads the clock at every step to see whether the stream has
+    // been silent, so this one does too, and the per-token cost is part of what is measured.
+    auto       last_step   = std::chrono::steady_clock::now();
+    const auto on_progress = [&](const llamad::GenerateProgress &) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_step >= std::chrono::seconds(1)) {
+            last_step = now;
+        }
+        return true;
+    };
+    const llamad::GenerateResult result =
+        engine.generate(scenario.prompt(run), scenario.params, /*on_chunk*/ {}, on_progress);
     if (scenario.prefill) {
         return {result.stats.prompt_tokens - result.stats.cached_prompt_tokens, result.stats.prompt_ms};
     }
@@ -211,12 +223,15 @@ int main(int argc, char ** argv) {
                 R"("description":{"type":"string"}},"required":["name","population","description"]}}},)"
                 R"("required":["towns"]})";
             llamad::SamplingParams json = greedy;
-            json.grammar                = format->render({{"user", "x", {}, {}}}, {}, schema).grammar;
+            json.grammar =
+                format->render({.messages = {{"user", "x", {}, {}}}, .response_json_schema = schema}).grammar;
             scenarios.push_back({"tg128-json", false,
                                  [&, schema](int run) {
                                      const std::string ask = "Request " + std::to_string(run) +
                                                              ": describe ten imaginary coastal towns in detail.";
-                                     return format->render({{"user", ask, {}, {}}}, {}, schema).prompt;
+                                     const llamad::ChatInput input = {.messages = {{"user", ask, {}, {}}},
+                                                                      .response_json_schema = schema};
+                                     return format->render(input).prompt;
                                  },
                                  json});
         }

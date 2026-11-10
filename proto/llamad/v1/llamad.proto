@@ -11,16 +11,35 @@
 //   any response schema. The daemon keeps no sessions and never executes a tool. The one thing a
 //   request leaves behind is the KV cache, which changes how long the next prompt takes and never
 //   which prompt runs.
-// - Stream shape. A Generate or Chat stream that succeeds is zero or more chunks carrying `text`,
-//   then exactly one chunk carrying `finish`, then the end of the stream. Cancellation or a
-//   transport failure can end it before `finish`; an error status ends it with no `finish`.
+// - Stream shape. A Generate or Chat stream that succeeds is zero or more chunks carrying `text`
+//   or `progress`, in any order, then exactly one chunk carrying `finish`, then the end of the
+//   stream. A stream that ends without `finish` ends with a status that is not OK: CANCELLED or
+//   DEADLINE_EXCEEDED after a cancel or a deadline, or an error. Skip a chunk whose kind you do
+//   not know, so that a later version can add one.
+// - Liveness. While a request queues or runs, a stream is silent for at most about one second
+//   longer than the slowest single step of the engine: one prompt batch (up to 2048 tokens) or
+//   one token. A `progress` chunk goes out only when no other chunk did for about a second, so a
+//   fast request has none.
 // - Text is user-visible output only: never tool-call markup, never part of a matched stop string,
 //   never a partial UTF-8 sequence.
 // - Tool calls arrive whole, on `finish`, and `finish.tool_calls` is non-empty if and only if
-//   `finish.reason` is FINISH_REASON_TOOL_CALLS. Their arguments are a complete JSON object.
-// - Errors are status codes: INVALID_ARGUMENT for a request the caller can fix, FAILED_PRECONDITION
-//   for something the loaded model cannot do (Chat without a usable template, Embed on a
-//   generative model, Generate or Chat on an embedding model), INTERNAL for anything else.
+//   `finish.reason` is FINISH_REASON_TOOL_CALLS. Their arguments are a complete JSON object, and
+//   their ids are unique in the conversation.
+// - Errors are status codes: OUT_OF_RANGE for an input with more tokens than the model can take
+//   (a Generate or Chat prompt that does not fit the context, an Embed input over the per-input
+//   limit), which a shorter input can fix; INVALID_ARGUMENT for any other request the caller can
+//   fix; FAILED_PRECONDITION for something the loaded model cannot do (Chat without a usable
+//   template, Embed on a generative model, Generate or Chat on an embedding model); INTERNAL for
+//   anything else. A request message larger than ModelInfo.max_request_bytes is refused by the
+//   gRPC transport with RESOURCE_EXHAUSTED before the daemon reads it.
+// - Request id. Each call to this service gets an id from the daemon, in the initial metadata
+//   under the key "x-request-id". It is there on success and on every error status, and Generate
+//   and Chat send it before their first chunk, also while the request queues. The daemon's log
+//   line for the call carries the same id, so give it with an error report. Treat it as an opaque
+//   string; ids are random, so they do not repeat across restarts of the daemon. The daemon
+//   ignores an id the client sends. A call the transport refuses before the service sees it (an
+//   oversized message, an unknown method) has no id, and neither do the health and reflection
+//   services.
 //
 // llamad follows semantic versioning. Before 1.0.0, a minor release can change this contract
 // incompatibly; callers then regenerate their stubs and update their request and response
@@ -60,6 +79,12 @@ message ModelInfo {
   bool has_chat_template = 6;  // the model stores a template; Chat also needs it to parse
   uint32 n_embd = 7;           // length of every Embed vector; 0 unless serves_embeddings
   bool serves_embeddings = 8;  // an embedding model: Embed is served, Generate and Chat are not
+  string model_name = 9;       // the GGUF's general.name metadata; empty when the file has none
+  string model_file = 10;      // file name of the loaded GGUF, without its directory
+  string llamad_version = 11;  // the daemon's version, e.g. "0.1.0"; `llamad --version` prints it too
+  // The largest serialized request message the daemon accepts, set by --max-request-bytes. A larger
+  // request gets RESOURCE_EXHAUSTED from the transport and never reaches the daemon.
+  uint32 max_request_bytes = 12;
 }
 
 message TokenizeRequest {
@@ -94,11 +119,17 @@ message GenerateRequest {
 message Tool {
   string name = 1;
   string description = 2;
-  string parameters_json_schema = 3;  // JSON Schema object for the arguments; empty takes none
+  // A JSON Schema object for the arguments; empty takes none. The arguments are a JSON object, so
+  // a schema with a "type" other than "object" is refused with INVALID_ARGUMENT.
+  string parameters_json_schema = 3;
 }
 
 message ToolCall {
-  string id = 1;              // assigned by the daemon; echo it as the "tool" message's tool_call_id
+  // Set by the daemon and unique in the conversation: it repeats no id in the request's history
+  // and no other call in the reply. A daemon-made id is 32 random characters, so in practice it
+  // also differs from the ids of other requests and daemon runs. Echo it as the "tool" message's
+  // tool_call_id.
+  string id = 1;
   string name = 2;
   string arguments_json = 3;  // a complete JSON object; {} for a call without arguments
 }
@@ -118,6 +149,22 @@ message ChatRequest {
   // JSON object of that shape. Empty leaves the reply unconstrained; the empty object is refused,
   // because it constrains nothing. Cannot be combined with `tools`.
   string response_json_schema = 4;
+  // Whether the model reasons before it replies. Works with `tools`; a response schema is always
+  // REASONING_OFF. A value this daemon does not know is refused with INVALID_ARGUMENT.
+  Reasoning reasoning = 5;
+}
+
+// Reasoning is text that a reasoning model writes before its reply, in a block that its chat
+// template opens, such as <think>...</think>. The effect of each value depends on the template.
+enum Reasoning {
+  // What the template does on its own. Reasoning the model writes streams as ordinary `text`.
+  REASONING_DEFAULT = 0;
+  // Asks the template to turn reasoning off. A template that supports this closes the block in the
+  // prompt, so the model replies without reasoning. A template without reasoning ignores it: the
+  // prompt and the reply do not change. A template that always opens the block also ignores it,
+  // and the model still reasons: that reasoning is not sent as `text`, but `completion_tokens`
+  // counts it, and a reply that never closes the block has no text.
+  REASONING_OFF = 1;
 }
 
 enum FinishReason {
@@ -125,11 +172,14 @@ enum FinishReason {
   FINISH_REASON_EOG = 1;          // the model ended its turn
   FINISH_REASON_LENGTH = 2;       // max_tokens or the context ran out
   FINISH_REASON_STOP = 3;         // a stop string matched
-  FINISH_REASON_CANCELLED = 4;    // the client cancelled
   FINISH_REASON_TOOL_CALLS = 5;   // the model called one or more tools; see Finish.tool_calls
+  // A cancelled stream ends with the status CANCELLED and no `finish`, so it needs no reason.
+  reserved 4;
+  reserved "FINISH_REASON_CANCELLED";
 }
 
-// Token counts and wall-clock time of one generation, not counting time queued behind another.
+// Token counts and wall-clock time of one generation, not counting time queued behind another
+// (progress chunks show that wait as STAGE_QUEUED).
 message GenerateStats {
   int32 prompt_tokens = 1;         // the whole prompt, special and cached tokens included
   int32 completion_tokens = 2;     // tokens generated, withheld stop and tool markup included
@@ -145,16 +195,34 @@ message Finish {
   repeated ToolCall tool_calls = 3;  // non-empty if and only if reason is FINISH_REASON_TOOL_CALLS
 }
 
+// What a request is doing when it sends a progress chunk.
+enum Stage {
+  STAGE_UNSPECIFIED = 0;  // never sent
+  STAGE_QUEUED = 1;       // waiting for another request to release the model
+  STAGE_PROMPT = 2;       // decoding the prompt
+  STAGE_GENERATING = 3;   // generating, with output not yet sent: tool-call markup, say
+}
+
+// A sign of life from a stream that has been silent for about a second. It carries no output.
+message Progress {
+  Stage stage = 1;
+  int32 prompt_tokens = 2;        // the whole prompt, as in GenerateStats
+  int32 ready_prompt_tokens = 3;  // leading prompt tokens in the KV cache so far; 0 while queued
+  int32 completion_tokens = 4;    // tokens generated so far, as in GenerateStats
+}
+
 message GenerateChunk {
   oneof chunk {
-    string text = 1;    // the next piece of user-visible output; never empty
-    Finish finish = 2;  // the last chunk of the stream
+    string text = 1;        // the next piece of user-visible output; never empty
+    Finish finish = 2;      // the last chunk of the stream
+    Progress progress = 3;  // the stream is alive; skip it if you do not need it
   }
 }
 
 message EmbedRequest {
   // Must not be empty. Each input is tokenized as a Generate prompt is and must fit the daemon's
-  // per-input token limit; an instruction prefix the model expects is part of the text.
+  // per-input token limit; an instruction prefix the model expects is part of the text. The whole
+  // request must also fit ModelInfo.max_request_bytes, which a large batch can pass first.
   repeated string inputs = 1;
 }
 

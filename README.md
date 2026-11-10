@@ -9,9 +9,10 @@ and each process does not load the model again.
 
 The contract gives these guarantees in all languages:
 
-- **A strict stream shape.** A stream has text chunks and then one `finish` chunk. A protobuf
-  `oneof` holds these two types. Text chunks contain only output for the user. They never
-  contain tool-call markup, part of a stop string or partial UTF-8.
+- **A strict stream shape.** A stream has text chunks and progress chunks, and then one `finish`
+  chunk. A protobuf `oneof` holds these types. Text chunks contain only output for the user. They
+  never contain tool-call markup, part of a stop string or partial UTF-8. A progress chunk comes
+  only after approximately one second without a chunk. It shows that a slow request is alive.
 - **Complete tool calls.** Tool calls are complete and are only in the `finish` chunk. The
   `finish` chunk contains tool calls only when its finish reason is `TOOL_CALLS`. A grammar
   limits the JSON arguments of each call to the schema of its tool.
@@ -65,8 +66,8 @@ pooling type, for example bge-small-en-v1.5 or Qwen3-Embedding. With such a mode
 answers `Embed` requests, and not `Generate` or `Chat` requests.
 
 The project does not include a model. You can use any GGUF file. The daemon accepts the flags
-`--socket`, `--ctx`, `--ngl`, `--threads`, `--devices` and `--tensor-split`. For more
-information, refer to [docs/daemon.md](docs/daemon.md).
+`--socket`, `--max-request-bytes`, `--ctx`, `--ngl`, `--threads`, `--devices` and
+`--tensor-split`. For more information, refer to [docs/daemon.md](docs/daemon.md).
 
 ## Use llamad from your application
 

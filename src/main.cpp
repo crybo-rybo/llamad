@@ -9,9 +9,11 @@
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -34,13 +36,22 @@
 #include "engine_flags.h"
 #include "flags.h"
 #include "service.h"
+#include "wire.h"
 
 namespace {
+
+/// gRPC's own default receive limit, kept as the default so that the flag changes nothing unless set.
+constexpr int64_t kDefaultMaxRequestBytes = 4 * 1024 * 1024;
+
+/// Below this, a value is much more likely a unit mistake (16 for 16 MiB, 4096 for 4 MiB) than a
+/// limit anyone wants; 64 KiB still holds any ordinary Chat request.
+constexpr int64_t kMinMaxRequestBytes = 64 * 1024;
 
 /// Options specific to this executable; the context and offload flags are EngineFlags.
 struct Options {
     std::string                model;   ///< GGUF model to load (required).
     std::optional<std::string> socket;  ///< Unix socket path; unset uses the per-user default.
+    int64_t                    max_request_bytes = kDefaultMaxRequestBytes;  ///< Largest request message accepted.
     bool                       help = false;     ///< Print usage and exit.
     bool                       version = false;  ///< Print the version and exit.
 };
@@ -53,6 +64,9 @@ void print_usage(const char * argv0) {
                  "  --model PATH        GGUF model to load (required)\n"
                  "  --socket PATH       unix socket to listen on\n"
                  "                      (default: $XDG_RUNTIME_DIR/llamad.sock, else /tmp/llamad-<uid>.sock)\n"
+                 "  --max-request-bytes N\n"
+                 "                      largest request message to accept; a larger one gets\n"
+                 "                      RESOURCE_EXHAUSTED (default 4194304)\n"
                  "%s"
                  "  --help              show this message\n"
                  "  --version           show the version, and exit\n",
@@ -66,6 +80,8 @@ void parse_command_line(int argc, char ** argv, Options & options, llamad::Engin
             options.model = args.value();
         } else if (args.is("--socket")) {
             options.socket = args.value();
+        } else if (args.is("--max-request-bytes")) {
+            options.max_request_bytes = args.number<int64_t>();
         } else if (args.is("--help")) {
             options.help = true;
         } else if (args.is("--version")) {
@@ -162,6 +178,14 @@ int main(int argc, char ** argv) {
         }
         config = llamad::to_config(engine_flags);
 
+        // gRPC takes the limit as an int, in which -1 means no limit; that is not offered.
+        if (options.max_request_bytes < kMinMaxRequestBytes ||
+            options.max_request_bytes > std::numeric_limits<int>::max()) {
+            throw llamad::cli::FlagError("--max-request-bytes needs an integer from " +
+                                         std::to_string(kMinMaxRequestBytes) + " to " +
+                                         std::to_string(std::numeric_limits<int>::max()));
+        }
+
         // Listing devices needs no model, and is the way to find the names --devices takes.
         if (engine_flags.list_devices) {
             llamad::print_device_table(stdout);
@@ -202,6 +226,7 @@ int main(int argc, char ** argv) {
     // that can generate, never one waiting on a half-ready daemon.
     std::unique_ptr<llamad::Engine> engine;
     try {
+        std::fprintf(stderr, "[llamad] version %s\n", LLAMAD_VERSION);
         std::fprintf(stderr, "[llamad] loading %s ...\n", config.model_path.c_str());
         engine = std::make_unique<llamad::Engine>(config);
     } catch (const std::exception & e) {
@@ -237,7 +262,8 @@ int main(int argc, char ** argv) {
         }
     }
 
-    llamad::LlamaService service(*engine, chat_format.get(), chat_unavailable_reason);
+    const llamad::wire::DaemonInfo daemon{LLAMAD_VERSION, static_cast<uint32_t>(options.max_request_bytes)};
+    llamad::LlamaService service(*engine, daemon, chat_format.get(), chat_unavailable_reason);
 
     grpc::EnableDefaultHealthCheckService(true);
     grpc::reflection::InitProtoReflectionServerBuilderPlugin();
@@ -245,6 +271,9 @@ int main(int argc, char ** argv) {
     grpc::ServerBuilder builder;
     builder.AddListeningPort("unix:" + socket_path, grpc::InsecureServerCredentials());
     builder.RegisterService(&service);
+    // gRPC refuses a larger message with RESOURCE_EXHAUSTED before any handler runs, so such a
+    // refusal has no [llamad] line; GetModelInfo reports the limit instead.
+    builder.SetMaxReceiveMessageSize(static_cast<int>(options.max_request_bytes));
 
     // Set the mode with umask rather than a chmod after bind(): between bind()
     // and chmod() the socket would briefly be connectable by any local user, and
@@ -270,7 +299,9 @@ int main(int argc, char ** argv) {
         server->Shutdown(std::chrono::system_clock::now() + std::chrono::milliseconds(500));
     });
 
-    std::fprintf(stderr, "[llamad] model: %s (n_ctx=%u)\n", info.description.c_str(), info.n_ctx);
+    // The name is quoted, so a reader can tell it from the description; a GGUF without one shows none.
+    const std::string name = info.name.empty() ? "" : "\"" + info.name + "\", ";
+    std::fprintf(stderr, "[llamad] model: %s%s (n_ctx=%u)\n", name.c_str(), info.description.c_str(), info.n_ctx);
     std::fprintf(stderr, "[llamad] listening on unix:%s\n", socket_path.c_str());
     std::fflush(stderr);
 

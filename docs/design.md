@@ -38,10 +38,23 @@
   just started. The `cached_prompt_tokens` field in the stats shows how many prompt tokens came
   from the cache.
 - **Version v1 serves one generation at a time.** The engine serializes `generate`. Thus,
-  concurrent requests wait in a queue and do not share the context.
-- **Stream shape.** A stream has zero or more `text` chunks, and then exactly one `finish` chunk.
-  The `finish` chunk contains the finish reason and the stats. `GenerateChunk` is a `oneof` of
-  these two types, so the types enforce the shape.
+  concurrent requests wait in a queue and do not share the context. The engine tokenizes the
+  prompt and builds the sampler before the request goes into the queue. Thus, a request that
+  cannot run fails without a wait.
+
+  A progress callback lets the service see a request at each step of the engine. The steps are
+  a wait of 250 ms in the queue, one prompt batch and one token. At each step, the callback can
+  send a `progress` chunk or stop the request. The engine does not use the abort callback of
+  llama.cpp, which could stop in a batch. With that callback, the Metal backend sends its work to
+  the GPU in a different way. The CUDA and Vulkan backends ignore it.
+- **Stream shape.** A stream has zero or more `text` and `progress` chunks, and then exactly one
+  `finish` chunk. The `finish` chunk contains the finish reason and the stats. `GenerateChunk` is
+  a `oneof` of these three types, so the types enforce the shape. A cancelled stream ends with the
+  status `CANCELLED` and with no `finish` chunk. Thus, there is no finish reason for a cancel.
+
+  A `progress` chunk comes only after approximately one second without a chunk. Thus, a client
+  can use an idle timeout, and a fast request looks the same as without progress chunks. There is
+  no timer thread. The steps of the engine send the chunks.
 
   Tool calls are complete and are in the `finish` chunk. `tool_calls` is not empty if and only if
   the finish reason is `TOOL_CALLS`. Text chunks contain only the content that the user sees.
@@ -56,13 +69,16 @@
   The template controls the prompt, and its defaults also. For example, Qwen2.5 adds its own
   default system prompt when the request has no `system` message. A response schema on `Chat`
   uses the same path from JSON Schema to grammar as tool arguments. Thus, the reply is a JSON
-  object that agrees with the schema, and it streams as usual text. On a schema turn, the daemon
-  tells the template to close its `<think>` block. Thus, a reasoning model replies with only the
-  JSON.
+  object that agrees with the schema, and it streams as usual text.
 
   The schema also goes into the prompt, as a system instruction to reply with one JSON object
   that agrees with the schema. This instruction gives the property descriptions to the model. It
   replaces the default system prompt of the template.
+
+  A request can turn off reasoning with `REASONING_OFF`, and a schema turn always turns it off.
+  Then the daemon tells the template to close its `<think>` block. If the template ignores this,
+  the daemon keeps the reasoning out of the text. Thus, on a schema turn, a reasoning model
+  replies with only the JSON.
 - **One model, one type of work.** If the GGUF of a model declares a pooling type, the model is
   an embedding model. With an embedding model, the daemon serves `Embed` and rejects `Generate`
   and `Chat`. With all other models, the daemon does the opposite. The daemon rejects a request
@@ -73,7 +89,9 @@
   with one `llama_decode` call for each input. On the CPU, this is as fast as one decode that
   packs many inputs as separate sequences. That alternative also must have a context with space
   for many sequences. The vectors are always L2-normalised.
-- **Errors have types.** Errors in the request map to `INVALID_ARGUMENT`. A missing capability
-  maps to `FAILED_PRECONDITION`. All other errors map to `INTERNAL`.
+- **Errors have types.** An input with more tokens than the model can take maps to
+  `OUT_OF_RANGE`. The application can make the input shorter and try again, for example without
+  the oldest turns. All other errors in the request map to `INVALID_ARGUMENT`. A missing
+  capability maps to `FAILED_PRECONDITION`. All other errors map to `INTERNAL`.
 
 `AGENTS.md` gives the layer rules that the code must follow.

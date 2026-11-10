@@ -73,7 +73,10 @@ def default_socket():
 
 def describe(error):
     if isinstance(error, grpc.RpcError):
-        return f"{error.code().name}: {error.details()}"
+        # The daemon's log line for the call has the same id. A call that did not reach it has none.
+        request_id = dict(error.initial_metadata() or ()).get("x-request-id")
+        suffix = f" (request {request_id})" if request_id else ""
+        return f"{error.code().name}: {error.details()}{suffix}"
     return str(error)
 
 
@@ -93,11 +96,13 @@ def stream_reply(stub, messages):
     text, finish = [], None
     try:
         for chunk in stream:
-            if chunk.WhichOneof("chunk") == "text":
+            kind = chunk.WhichOneof("chunk")
+            if kind == "text":
                 text.append(chunk.text)
                 print(chunk.text, end="", flush=True)
-            else:
+            elif kind == "finish":
                 finish = chunk.finish
+            # Skip all other chunks: progress chunks, and kinds that a later daemon can add.
     except KeyboardInterrupt:
         stream.cancel()
         raise
@@ -165,7 +170,8 @@ def main():
         print(paint("error> ", "1;31") + describe(error))
         print("Start llamad with a chat model and check --socket.")
         return 1
-    print(paint(f"llamad | {info.description} | context {info.n_ctx} tokens", "1"))
+    model = info.model_name or info.model_file
+    print(paint(f"llamad {info.llamad_version} | {model} ({info.description}) | context {info.n_ctx} tokens", "1"))
     print(HELP)
 
     history = [SYSTEM]  # The daemon keeps no conversation, so the client sends all of it each turn.
@@ -198,7 +204,8 @@ def main():
             continue
         except (grpc.RpcError, RuntimeError) as error:
             print(paint("error> ", "1;31") + describe(error))
-            print("Use /clear if the conversation exceeds the model's context.")
+            if isinstance(error, grpc.RpcError) and error.code() == grpc.StatusCode.OUT_OF_RANGE:
+                print("The conversation is too long for the model's context. Use /clear.")
             failed = True
             continue
         if turn is None:

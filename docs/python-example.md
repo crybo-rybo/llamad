@@ -42,6 +42,10 @@ reuses from its KV cache ([design.md](design.md)).
 Use `/clear` to reset the history, `/help` for the commands, and `/quit` or Ctrl+D to exit.
 Ctrl+C cancels a reply.
 
+If the daemon returns an error, the client shows the status, the message and the request id. The
+log line of the daemon for that request has the same id. If the conversation becomes too long
+for the context, the client tells you to use `/clear`.
+
 The client offers one tool, `get_current_time`. When the model calls it, the client runs it and
 sends the result back. A dim line shows each call and its result. A turn can have at most four
 replies. Small models, such as the 0.5B model, often do not call the tool. For typed replies,

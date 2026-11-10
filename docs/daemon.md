@@ -9,6 +9,7 @@
 |---|---|---|
 | `--model PATH` | necessary | The GGUF model to load |
 | `--socket PATH` | `$XDG_RUNTIME_DIR/llamad.sock`, else `/tmp/llamad-<uid>.sock` | The Unix socket to listen on |
+| `--max-request-bytes N` | 4194304 (4 MiB) | The maximum size of a request message in bytes, from 65536 to 2147483647 |
 | `--ctx N` | 4096 | The context size in tokens |
 | `--ngl N` | 99 | The number of layers to offload to the GPU. 0 disables offload. |
 | `--threads N` | 0 | The number of inference threads. 0 is automatic: half of the hardware threads for generation, and all of them for prompts. |
@@ -19,14 +20,50 @@
 
 The daemon creates the socket with mode 0600. Thus, only your user can connect to it. The daemon
 writes one `[llamad] ...` log line for each request to stderr. While it runs, it writes nothing to
-stdout.
+stdout. At start-up, the log shows the llamad version, the model path, and the name and
+description of the model.
+
+Each request line starts with the name of the call and the request id: `[llamad] <call> id=<id>`.
+The daemon sends the same id to the client in the `x-request-id` metadata
+([protocol.md](protocol.md#request-ids)). Thus, an application can report the id with an error,
+and you can find the line of that request. A request that fails writes `error:` or
+`internal error:` and the message:
+
+```
+[llamad] Chat id=bc572824d4031e16 error: prompt is too long: 1230 tokens for a context of 512
+```
+
+The log line of a `Generate` or `Chat` request gives the token counts, the finish reason and the
+time from the start of the request, queue time included. A cancelled request has `finish=cancelled`.
+Its line also gives the stage where it stopped and the prompt tokens in the KV cache:
+
+```
+[llamad] Generate id=90313a784aa353f2 prompt_tokens=6689 cached_prompt_tokens=0 completion_tokens=0 finish=cancelled stage=prompt ready_prompt_tokens=2048 8560ms
+```
+
+The lines for start and stop have no id. Some calls write no line: a call that the gRPC
+transport refuses before the service gets it, and calls to the health and reflection services.
+
+gRPC refuses a request that is larger than `--max-request-bytes`, before the daemon reads it. The
+client gets `RESOURCE_EXHAUSTED`. The daemon does not see the request. Thus, the log has no line
+for it. `GetModelInfo` gives the limit in `max_request_bytes`. For `Chat` and `Generate`, the
+context is almost always full before a request gets to 4 MiB. An `Embed` batch of thousands of
+short inputs can be larger than 4 MiB. For such batches, increase the limit or send smaller
+batches.
 
 SIGINT or SIGTERM stops the daemon and removes the socket. If a script starts the daemon in the
 background, the daemon inherits SIGINT as ignored. macOS discards a signal that is both ignored
 and blocked. Thus, use SIGTERM to stop a daemon that a script started in the background.
 
 The engine serves one generation at a time. Concurrent requests wait in a queue and do not share
-the context.
+the context. Before a request goes into the queue, the daemon tokenizes its prompt and checks its
+length. Thus, a prompt that is too long fails immediately with `OUT_OF_RANGE`. A request in the queue gets `progress`
+chunks. If its client cancels, the request leaves the queue in 250 ms or less.
+
+The engine checks for a cancelled request before each prompt batch and after each token. It
+cannot stop in a batch. A batch has a maximum of 2048 tokens. When a request stops in its prompt,
+the KV cache keeps the batches that the engine decoded. A new request with the same prompt uses
+them again.
 
 The KV cache keeps the tokens that the previous request decoded. A request decodes only the part
 of its prompt after the prefix that it shares with these tokens. Thus, a chat turn or a tool
@@ -54,7 +91,7 @@ the daemon does not start.
 dot product of two vectors is their cosine similarity. The daemon embeds each input separately,
 in one decode. Thus, an input can have a maximum of 512 tokens, which is the physical batch of
 llama.cpp. The limit is lower if `--ctx` or the training context of the model is shorter. If an
-input is longer, the daemon returns `INVALID_ARGUMENT` for the request.
+input is longer, the daemon returns `OUT_OF_RANGE` for the request.
 
 The daemon tokenizes inputs the same way as `Generate` prompts, and adds the special tokens of the
 model. Some models expect an instruction prefix, for example `Instruct: ...\nQuery:` for
@@ -89,6 +126,8 @@ flags:
 - `--grammar-file PATH`: Limit the generation with a GBNF file that you supply.
 - `--stop TEXT`: Stop the generation at this stop string.
 - `--cancel-after N`: Cancel the generation after N chunks.
+- `--cancel-after-ms N`: Cancel each run after N milliseconds, at the next step of the engine.
+  With `--repeat`, each run continues the prompt from the batches of the run before it.
 - `--embed TEXT`: With an embedding model, embed this text and not a prompt. You can use this
   flag more than one time. The output shows the first values of each vector, and the cosine of
   each vector with the first vector.

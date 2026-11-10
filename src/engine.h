@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -48,6 +49,8 @@ struct DeviceInfo {
 /// Metadata for the loaded model and its configured context.
 struct ModelInfo {
     std::string description;                ///< Human-readable model architecture and quantization description.
+    std::string name;                       ///< The GGUF's general.name metadata; empty when the file has none.
+    std::string file;                       ///< File name of the loaded GGUF, without its directory.
     uint64_t    n_params          = 0;      ///< Number of model parameters.
     uint64_t    size_bytes        = 0;      ///< Size of model tensors in bytes.
     uint32_t    n_ctx             = 0;      ///< Actual context capacity configured by the daemon, in tokens.
@@ -98,7 +101,22 @@ enum class FinishReason {
     Eog,  ///< The model emitted an end-of-generation token.
     Length,  ///< The token budget or context capacity was reached.
     Stop,  ///< A configured stop string matched; its bytes are withheld.
-    Cancelled  ///< The callback requested cancellation.
+    Cancelled  ///< A callback returned false.
+};
+
+/// What a generation is doing when it reports progress.
+enum class GenerateStage {
+    Queued,      ///< Waiting for another generate() or embed() call to release the engine.
+    Prompt,      ///< Decoding the prompt, one batch of up to n_batch tokens at a time.
+    Generating,  ///< Generating tokens, some of which the text stream can withhold.
+};
+
+/// Where a generation is, reported to its ProgressCallback.
+struct GenerateProgress {
+    GenerateStage stage               = GenerateStage::Queued;  ///< The step the generation is at.
+    int32_t       prompt_tokens       = 0;  ///< Prompt length in tokens, as in GenerateStats.
+    int32_t       ready_prompt_tokens = 0;  ///< Leading prompt tokens in the KV cache so far, reused or decoded.
+    int32_t       completion_tokens   = 0;  ///< Tokens generated so far, as in GenerateStats.
 };
 
 /// Token counts and wall-clock milliseconds for one generation, excluding queue time.
@@ -133,9 +151,23 @@ struct EmbedResult {
 /// Incomplete multi-byte sequences are held back; malformed model bytes are not repaired.
 using ChunkCallback = std::function<bool(const std::string & text)>;
 
+/// Called each time a generation finishes a step: about every kQueueTick while it waits for the
+/// engine, before each prompt batch (the first included), and after each generated token. The
+/// longest gap between two calls is therefore one prompt batch, or one token. Return false to
+/// cancel: the generation then ends with FinishReason::Cancelled, and the prompt tokens decoded
+/// so far stay in the KV cache for the next request to reuse.
+using ProgressCallback = std::function<bool(const GenerateProgress & progress)>;
+
 /// Configuration, model-loading, tokenization or generation failure reported by the engine.
 struct EngineError : std::runtime_error {
     using std::runtime_error::runtime_error;
+};
+
+/// An input has more tokens than the model can take: a prompt that does not fit the context, or
+/// an embedding input longer than one decode. Unlike other EngineErrors, a shorter input of the
+/// same request can succeed.
+struct InputTooLongError : EngineError {
+    using EngineError::EngineError;
 };
 
 /// How many leading tokens of `prompt` a generation keeps from a KV cache holding `cached`: the
@@ -143,8 +175,12 @@ struct EngineError : std::runtime_error {
 /// logits of the prompt's last token and only decoding it produces them.
 size_t reusable_prefix(const std::vector<int32_t> & cached, const std::vector<int32_t> & prompt);
 
+/// How often a call that waits for the engine asks its callback whether to go on waiting.
+inline constexpr std::chrono::milliseconds kQueueTick{250};
+
 /// Owns one model and context; generate() and embed() calls serialize, and generations share one
-/// KV cache. Callbacks run synchronously while that lock is held; do not reenter the engine.
+/// KV cache. Callbacks run synchronously on the caller's thread, while the call waits for the
+/// engine or holds it; do not reenter the engine from them.
 /// A model whose GGUF declares a pooling type (mean, CLS or last token) is an embedding model:
 /// it serves embed() and not generate(). Any other model is the reverse.
 class Engine {
@@ -182,7 +218,9 @@ public:
     /// The model's built-in chat template, for the chat layer to render with.
     ChatTemplateInfo chat_template() const;
 
-    /// Generates from a raw prompt. Serialized internally: concurrent callers queue.
+    /// Generates from a raw prompt. Serialized internally: concurrent callers queue. The prompt is
+    /// tokenized, measured and the sampler built before the call queues, so a request that cannot
+    /// run fails without waiting for another one.
     /// The KV cache keeps what the previous call decoded, and a call decodes only the part of its
     /// prompt after the prefix it shares with that (see reusable_prefix). The cache changes how
     /// long a prompt takes, never which prompt runs; the logits can differ from a cold run's in
@@ -190,20 +228,24 @@ public:
     /// @param prompt Raw model input; special-token spellings are recognized.
     /// @param params Sampling, grammar, stop strings and completion budget.
     /// @param on_chunk Synchronous receiver; empty discards text, false requests cancellation.
-    /// @return Finish reason and counts including generated bytes withheld from output.
-    /// @throws EngineError If the prompt does not fit, the grammar is invalid or decoding fails.
-    /// Exceptions from on_chunk propagate to the caller.
-    GenerateResult generate(const std::string & prompt, const SamplingParams & params, const ChunkCallback & on_chunk);
+    /// @param on_progress Told of each step; empty never cancels, false requests cancellation.
+    /// @return Finish reason and counts including generated bytes withheld from output. A request
+    /// cancelled while queued has only its prompt_tokens set.
+    /// @throws InputTooLongError If the prompt has n_ctx tokens or more; it leaves no room to generate.
+    /// @throws EngineError If the prompt is empty, the grammar is invalid or decoding fails.
+    /// Exceptions from either callback propagate to the caller.
+    GenerateResult generate(const std::string & prompt, const SamplingParams & params, const ChunkCallback & on_chunk,
+                            const ProgressCallback & on_progress);
 
     /// Embeds each input on its own, as a single sequence decoded in one piece, so the model's
     /// pooling sees all of it and nothing else. Serialized with generate().
     /// @param inputs Texts to embed; special-token spellings are recognized, as in generate().
-    /// @param keep_going Asked before each input is decoded; false cancels the rest of the batch.
-    /// Empty never cancels.
+    /// @param keep_going Asked about every kQueueTick while the call waits for the engine, and
+    /// before each input is decoded; false cancels the rest of the batch. Empty never cancels.
     /// @return One L2-normalised vector per input, in input order; after a cancel, only those for
     /// the inputs before it.
-    /// @throws EngineError If the model is not an embedding model, or an input tokenizes to nothing
-    /// or to more tokens than one decode can take.
+    /// @throws InputTooLongError If an input tokenizes to more tokens than one decode can take.
+    /// @throws EngineError If the model is not an embedding model, or an input tokenizes to nothing.
     /// @throws std::runtime_error If decoding fails or yields no pooled embedding.
     EmbedResult embed(const std::vector<std::string> & inputs, const std::function<bool()> & keep_going);
 

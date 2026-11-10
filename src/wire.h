@@ -12,12 +12,24 @@
 #include "engine.h"
 #include "llamad/v1/llamad.pb.h"
 
+#include <cstdint>
+#include <string>
 #include <vector>
 
 namespace llamad::wire {
 
+/// What GetModelInfo reports about the daemon itself, beside the model. main.cpp fills it.
+struct DaemonInfo {
+    std::string version;                ///< As `llamad --version` prints it, without the program name.
+    uint32_t    max_request_bytes = 0;  ///< The largest request message the server accepts.
+};
+
 /// Engine sampling parameters, with the engine's defaults wherever the request left a field unset.
 SamplingParams from_proto(const v1::SamplingParams & params);
+
+/// Everything a Chat request asks of the chat template; `sampling` converts on its own.
+/// @throws ChatFormatError For a `reasoning` value this daemon does not know.
+ChatInput from_proto(const v1::ChatRequest & request);
 
 /// One history turn.
 ChatMessage from_proto(const v1::ChatMessage & message);
@@ -28,16 +40,21 @@ Tool from_proto(const v1::Tool & tool);
 /// One tool call replayed from history.
 ToolCall from_proto(const v1::ToolCall & call);
 
-/// Model metadata.
-void to_proto(const ModelInfo & info, v1::ModelInfo * out);
+/// Model metadata, and the daemon facts that GetModelInfo sends with it.
+void to_proto(const ModelInfo & info, const DaemonInfo & daemon, v1::ModelInfo * out);
 
 /// The vectors of one Embed request.
 void to_proto(const EmbedResult & result, v1::EmbedResponse * out);
 
 /// The last chunk of a Generate or Chat stream. `tool_calls` are what the chat parser found; they
 /// are kept, and the reason becomes TOOL_CALLS, only when generation ran to completion (EOG or a
-/// stop string). A reply cut short by the token limit or a cancel stopped mid-thought, so whatever
-/// the parser salvaged from it is not a call anyone should execute.
+/// stop string). A reply cut short by the token limit stopped mid-thought, so whatever the parser
+/// salvaged from it is not a call anyone should execute.
+/// @throws std::invalid_argument For FinishReason::Cancelled: a cancelled stream has no finish
+/// chunk, and the wire has no reason to give one.
 v1::GenerateChunk finish_chunk(FinishReason reason, const GenerateStats & stats, std::vector<ToolCall> tool_calls);
+
+/// A chunk that says where a generation is, for a stream that has been silent for a while.
+v1::GenerateChunk progress_chunk(const GenerateProgress & progress);
 
 }  // namespace llamad::wire
