@@ -57,7 +57,7 @@ Use active voice, simple tenses and short sentences: at most 20 words for instru
 ./scripts/smoke-test.sh cpu models/qwen2.5-0.5b-instruct-q4_k_m.gguf
 ```
 
-Use `gpu` for Vulkan on Linux or Metal on macOS. See `docs/building.md` and `docs/performance.md` for details.
+Use `gpu` for CUDA or Vulkan on Linux, or Metal on macOS. See `docs/building.md` and `docs/performance.md` for details.
 
 - For code changes, build without warnings and run CTest.
 - For chat or parser changes, extend `tests/chat_format_test.cpp`. For wire changes, extend `tests/wire_test.cpp`.

@@ -69,36 +69,57 @@ the llamad source files stops the build. CI uses this option.
 
 ## GPU
 
-The usual CMake flags of llama.cpp enable its GPU backends. `build.sh gpu` sets the flag for the
-platform: Vulkan on Linux, Metal on macOS. `build.sh cpu` disables that backend. Vulkan is the
-Linux backend that this project tests. Vulkan operates on Pascal cards (GTX 10xx), and CUDA 13
-does not support these cards.
+The usual CMake flags of llama.cpp enable its GPU backends. `build.sh gpu` enables one backend for
+the machine, in `build-gpu/`:
+
+- On macOS, it uses Metal.
+- On Linux, it uses CUDA if it finds the CUDA compiler `nvcc`. If not, it uses Vulkan.
+
+The script looks for `nvcc` on `PATH`, then in `$CUDA_PATH/bin`, `/usr/local/cuda/bin` and
+`/opt/cuda/bin`. It gives the path to CMake, so `nvcc` does not have to be on `PATH`. Before the
+build starts, the script writes the backend that it uses to stderr. `build.sh cpu` disables all
+GPU backends.
 
 ```sh
-pacman -S vulkan-headers spirv-headers vulkan-icd-loader shaderc   # Linux only (Metal: no packages)
-./scripts/build.sh gpu                  # -DGGML_VULKAN=ON or -DGGML_METAL=ON, in build-gpu/
+pacman -S cuda                          # Linux CUDA backend
+pacman -S vulkan-headers spirv-headers vulkan-icd-loader shaderc   # Linux Vulkan backend
+./scripts/build.sh gpu                  # CUDA or Vulkan on Linux, Metal on macOS (no packages)
 ./scripts/test.sh gpu
 ./scripts/smoke-test.sh gpu /absolute/path/to/model.gguf
 ```
+
+The CUDA build compiles only for the GPUs in the machine. On Arch Linux, `/etc/profile.d/cuda.sh`
+sets the host compiler of `nvcc`. Log in again after you install `cuda`. CUDA 13 does not support
+Pascal cards (GTX 10xx). Vulkan operates on these cards. To use Vulkan when `nvcc` is installed,
+use this command:
+
+```sh
+./scripts/build.sh gpu -DGGML_CUDA=OFF -DGGML_VULKAN=ON
+```
+
+`build.sh` gives your CMake arguments after its own flags. Thus, your arguments override the
+backend that the script selects. The project tests CUDA and Vulkan on Linux GPUs locally. CI
+tests only CPU builds.
 
 The project does not include a model. `test.sh` does not use a model. `smoke-test.sh` must have a
 model path as an argument. The path can be absolute or relative to your working directory. The
 script runs one chat turn through `engine_smoke` at temperature 0.
 
-On Linux, you must also have a Vulkan driver for the GPU that operates correctly. If the
+On Linux, you must also have a CUDA or Vulkan driver for the GPU that operates correctly. If the
 inference runs on the CPU, the smoke test stops with an error. A device list does not test the
 model load or the token generation.
 
 ### Device selection
 
-With Vulkan, llama.cpp uses all discrete GPUs by default. It divides the layers of the model
-between them, in proportion to the free memory of each card. If there is a discrete GPU,
+With CUDA or Vulkan, llama.cpp uses all discrete GPUs by default. It divides the layers of the
+model between them, in proportion to the free memory of each card. If there is a discrete GPU,
 llama.cpp does not use an integrated GPU. Thus, two 8 GB cards can hold a model that is too large
-for one card. Apple silicon has one Metal device, `MTL0`, with unified memory. When the daemon
-starts, it writes one line for each offload device.
+for one card. The device names start with the backend: `CUDA0` and `CUDA1` with CUDA, `Vulkan0`
+and `Vulkan1` with Vulkan. Apple silicon has one Metal device, `MTL0`, with unified memory. When
+the daemon starts, it writes one line for each offload device.
 
 ```sh
 ./build-gpu/llamad --list-devices                    # names, types, free/total memory
-./build-gpu/llamad --model M --devices Vulkan0       # this card only (MTL0 on macOS)
+./build-gpu/llamad --model M --devices CUDA0         # this card only (Vulkan0, MTL0)
 ./build-gpu/llamad --model M --tensor-split 3,1      # 3:1 share, in device order
 ```

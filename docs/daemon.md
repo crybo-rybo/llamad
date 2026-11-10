@@ -12,7 +12,7 @@
 | `--ctx N` | 4096 | The context size in tokens |
 | `--ngl N` | 99 | The number of layers to offload to the GPU. 0 disables offload. |
 | `--threads N` | 0 | The number of inference threads. 0 is automatic: half of the hardware threads for generation, and all of them for prompts. |
-| `--devices NAMES` | all discrete GPUs | A comma-separated list of offload devices, for example `Vulkan0` or `MTL0` |
+| `--devices NAMES` | all discrete GPUs | A comma-separated list of offload devices, for example `CUDA0`, `Vulkan0` or `MTL0` |
 | `--tensor-split S` | by free memory | A comma-separated list with the share of each device, for example `3,1` |
 | `--list-devices` | | Show the devices that this build can offload to, then exit |
 | `--version` | | Show the version of llamad on stdout, then exit |
